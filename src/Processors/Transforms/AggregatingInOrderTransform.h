@@ -61,6 +61,8 @@ private:
     Chunk to_push_chunk;
 
     Poco::Logger * log = &Poco::Logger::get("AggregatingInOrderTransform");
+
+    size_t cnt = 0;
 };
 
 

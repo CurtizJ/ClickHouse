@@ -40,18 +40,75 @@ AggregatingInOrderTransform::AggregatingInOrderTransform(
 
 AggregatingInOrderTransform::~AggregatingInOrderTransform() = default;
 
-static bool less(const MutableColumns & lhs, const Columns & rhs, size_t i, size_t j, const SortDescription & descr)
+namespace
+{
+
+template <typename LeftColumns, typename RightColumns>
+bool equals(const LeftColumns & lhs, const RightColumns & rhs, size_t i, size_t j, const SortDescription & descr)
 {
     for (const auto & elem : descr)
     {
         size_t ind = elem.column_number;
-        int res = elem.direction * lhs[ind]->compareAt(i, j, *rhs[ind], elem.nulls_direction);
-        if (res < 0)
-            return true;
-        else if (res > 0)
+        int res = lhs[ind]->compareAt(i, j, *rhs[ind], elem.nulls_direction);
+        if (res)
             return false;
     }
-    return false;
+
+    return true;
+}
+
+template <typename Columns>
+bool equals(const Columns & columns, size_t i, size_t j, const SortDescription & descr)
+{
+    return equals(columns, columns, i, j, descr);
+}
+
+struct Range
+{
+    Range(size_t left_, size_t right_, bool start_of_group_)
+        : left(left_), right(right_), start_of_group(start_of_group_) {}
+
+    size_t left;
+    size_t right;
+    bool start_of_group;
+}; 
+
+std::vector<size_t> splitByRanges(const Columns & columns, const SortDescription & descr, size_t & cnt)
+{
+    assert(!columns.empty());
+    size_t rows_num = columns[0]->size();
+    if (!rows_num)
+        return {};
+
+    std::vector<size_t> positions;
+    std::vector<Range> stack = { Range{0, rows_num - 1, true} };
+
+    while (!stack.empty())
+    {
+        auto range = std::move(stack.back());
+        stack.pop_back();
+        
+        if (range.start_of_group)
+            positions.push_back(range.left);
+
+        if (range.left < range.right)
+            ++cnt;
+        
+        if (range.left < range.right && !equals(columns, range.left, range.right, descr))
+        {
+            size_t mid = (range.left + range.right) / 2;
+            bool are_equals = equals(columns, mid, mid + 1, descr);
+
+            ++cnt;
+
+            stack.emplace_back(mid + 1, range.right, !are_equals);
+            stack.emplace_back(range.left, mid, false);
+        }
+    }
+
+    return positions;
+}
+
 }
 
 
@@ -81,8 +138,6 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
     Aggregator::AggregateFunctionInstructions aggregate_function_instructions;
     params->aggregator.prepareAggregateInstructions(chunk.getColumns(), aggregate_columns, materialized_columns, aggregate_function_instructions, nested_columns_holder);
 
-    size_t key_end = 0;
-    size_t key_begin = 0;
     /// If we don't have a block we create it and fill with first key
     if (!cur_block_size)
     {
@@ -97,37 +152,39 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
         {
             res_aggregate_columns[i] = res_header.safeGetByPosition(i + params->params.keys_size).type->createColumn();
         }
-        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, key_begin, res_key_columns);
+        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, 0, res_key_columns);
         ++cur_block_size;
     }
-    ssize_t mid = 0;
-    ssize_t high = 0;
-    ssize_t low = -1;
-    /// Will split block into segments with the same key
-    while (key_end != rows)
-    {
-        high = rows;
-        /// Find the first position of new (not current) key in current chunk
-        while (high - low > 1)
-        {
-            mid = (low + high) / 2;
-            if (!less(res_key_columns, key_columns, cur_block_size - 1, mid, group_by_description))
-                low = mid;
-            else
-                high = mid;
-        }
-        key_end = high;
-        /// Add data to aggr. state if interval is not empty. Empty when haven't found current key in new block.
-        if (key_begin != key_end)
-        {
-            params->aggregator.executeOnIntervalWithoutKeyImpl(variants.without_key, key_begin, key_end, aggregate_function_instructions.data(), variants.aggregates_pool);
-        }
 
-        low = key_begin = key_end;
-        /// We finalize last key aggregation state if a new key found.
-        if (key_begin != rows)
+    auto borders = splitByRanges(key_columns, group_by_description, cnt);
+    borders.push_back(rows);
+
+    assert(std::is_sorted(borders.begin(), borders.end()));
+
+    ++cnt;
+
+    /// Finalize key from previous chunk.
+    if (!equals(res_key_columns, key_columns, cur_block_size - 1, 0, group_by_description))
+    {
+        params->aggregator.fillAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, 0, res_key_columns);
+        ++cur_block_size;
+    }
+        
+    for (size_t i = 1; i < borders.size(); ++i)
+    {
+        size_t key_begin = borders[i - 1];
+        size_t key_end = borders[i];
+
+        /// Add data from interval with current key to aggregate state.
+        params->aggregator.executeOnIntervalWithoutKeyImpl(
+            variants.without_key, key_begin, key_end,
+            aggregate_function_instructions.data(), variants.aggregates_pool);
+
+        if (key_end != rows)
         {
             params->aggregator.fillAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+
             /// If res_block_size is reached we have to stop consuming and generate the block. Save the extra rows into new chunk.
             if (cur_block_size == res_block_size)
             {
@@ -148,6 +205,7 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
             ++cur_block_size;
         }
     }
+
     block_end_reached = false;
 }
 
@@ -203,6 +261,8 @@ IProcessor::Status AggregatingInOrderTransform::prepare()
             output.finish();
             LOG_TRACE(log, "Aggregated. {} to {} rows (from {})", src_rows, res_rows,
                                         formatReadableSizeWithBinarySuffix(src_bytes));
+
+            std::cerr << "rows: " << src_rows << "compares: " << cnt << "\n";
             return Status::Finished;
         }
         if (input.isFinished())
