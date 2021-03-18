@@ -279,6 +279,19 @@ void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_dire
 }
 
 template <typename T>
+void ColumnVector<T>::binarySearch(const IColumn & rhs, size_t rhs_row, EqualRange & equal_range) const
+{
+    const auto & rhs_data = assert_cast<const Self &>(rhs).getData();
+    auto range_it = std::equal_range(
+        data.begin() + equal_range.first,
+        data.begin() + equal_range.second,
+        rhs_data[rhs_row]);
+
+    equal_range.first = range_it.first - data.begin();
+    equal_range.second = range_it.second - data.begin();
+}
+
+template <typename T>
 MutableColumnPtr ColumnVector<T>::cloneResized(size_t size) const
 {
     auto res = this->create();

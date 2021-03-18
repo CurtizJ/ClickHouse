@@ -25,6 +25,10 @@ String IColumn::dumpStructure() const
     return res.str();
 }
 
+void IColumn::binarySearch(const IColumn &, size_t, EqualRange &) const
+{
+}
+
 void IColumn::insertFrom(const IColumn & src, size_t n)
 {
     insert(src[n]);

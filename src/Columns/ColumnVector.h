@@ -216,6 +216,8 @@ public:
 
     void updatePermutation(bool reverse, size_t limit, int nan_direction_hint, IColumn::Permutation & res, EqualRanges& equal_range) const override;
 
+    void binarySearch(const IColumn & rhs, size_t rhs_row, EqualRange & equal_range) const override;
+
     void reserve(size_t n) override
     {
         data.reserve(n);

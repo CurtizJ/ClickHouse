@@ -31,7 +31,8 @@ class WeakHash32;
  * Represents a set of equal ranges in previous column to perform sorting in current column.
  * Used in sorting by tuples.
  * */
-using EqualRanges = std::vector<std::pair<size_t, size_t> >;
+using EqualRange = std::pair<size_t, size_t>;
+using EqualRanges = std::vector<EqualRange>;
 
 /// Declares interface to store columns in memory.
 class IColumn : public COW<IColumn>
@@ -302,6 +303,8 @@ public:
     {
         throw Exception("Collations could be specified only for String, LowCardinality(String), Nullable(String) or for Array or Tuple, containing them.", ErrorCodes::BAD_COLLATION);
     }
+
+    virtual void binarySearch(const IColumn & rhs, size_t rhs_row, EqualRange & equal_range) const;
 
     /** Copies each element according offsets parameter.
       * (i-th element should be copied offsets[i] - offsets[i - 1] times.)
