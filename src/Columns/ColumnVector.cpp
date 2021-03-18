@@ -107,6 +107,14 @@ struct ColumnVector<T>::greater
     bool operator()(size_t lhs, size_t rhs) const { return CompareHelper<T>::greater(parent.data[lhs], parent.data[rhs], nan_direction_hint); }
 };
 
+template <typename T>
+struct ColumnVector<T>::equals
+{
+    const Self & parent;
+    equals(const Self & parent_) : parent(parent_) {}
+    bool operator()(size_t lhs, size_t rhs) const { return CompareHelper<T>::equals(parent.data[lhs], parent.data[rhs]); }
+};
+
 
 namespace
 {
@@ -221,7 +229,7 @@ void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_dire
         size_t new_first = first;
         for (size_t j = first + 1; j < last; ++j)
         {
-            if (less(*this, nan_direction_hint)(res[j], res[new_first]) || greater(*this, nan_direction_hint)(res[j], res[new_first]))
+            if (!equals(*this)(res[j], res[new_first]))
             {
                 if (j - new_first > 1)
                 {
@@ -252,7 +260,7 @@ void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_dire
         size_t new_first = first;
         for (size_t j = first + 1; j < limit; ++j)
         {
-            if (less(*this, nan_direction_hint)(res[j], res[new_first]) || greater(*this, nan_direction_hint)(res[j], res[new_first]))
+            if (!equals(*this)(res[j], res[new_first]))
             {
                 if (j - new_first > 1)
                 {
@@ -265,7 +273,7 @@ void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_dire
         size_t new_last = limit;
         for (size_t j = limit; j < last; ++j)
         {
-            if (!less(*this, nan_direction_hint)(res[j], res[new_first]) && !greater(*this, nan_direction_hint)(res[j], res[new_first]))
+            if (equals(*this)(res[j], res[new_first]))
             {
                 std::swap(res[j], res[new_last]);
                 ++new_last;
@@ -277,6 +285,93 @@ void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_dire
         }
     }
 }
+
+
+namespace
+{
+
+struct Range
+{
+    Range(size_t left_, size_t right_, bool start_of_group_)
+        : left(left_), right(right_), start_of_group(start_of_group_) {}
+
+    size_t left;
+    size_t right;
+    bool start_of_group;
+};
+
+template <typename T>
+std::vector<size_t> splitByRanges(const std::pair<size_t, size_t> & start_range, const PaddedPODArray<T> & data, std::vector<size_t> & positions, size_t limit)
+{
+    std::vector<Range> stack = { Range{start_range.first, start_range.second - 1, true} };
+    stack.reserve(100);
+
+    while (!stack.empty())
+    {
+        auto range = std::move(stack.back());
+        stack.pop_back();
+
+        if (range.start_of_group)
+        {
+            positions.push_back(range.left);
+            if (positions.size() >= limit)
+                return positions;
+        }
+
+
+        if (range.left < range.right && data[range.left] != data[range.right])
+        {
+            size_t mid = (range.left + range.right) / 2;
+            stack.emplace_back(mid + 1, range.right, (data[mid] != data[mid + 1]));
+            stack.emplace_back(range.left, mid, false);
+        }
+    }
+
+    return positions;
+}
+
+}
+
+template <typename T>
+void ColumnVector<T>::getEqualRanges(std::vector<size_t> & equal_ranges, size_t limit) const
+{
+    std::vector<size_t> new_ranges;
+    // auto comparator = equals(*this);
+    // for (const auto & range : equal_ranges)
+    // {
+    //     // auto borders = splitByRanges(range, data,);
+    //     // new_ranges.reserve(new_ranges.size() + borders.size());
+    //     // for (size_t i = 1; i < borders.size(); ++i)
+    //     //     new_ranges.emplace_back(borders[i - 1], borders[i]);
+    //     // new_ranges.emplace_back(borders.back(), range.second);
+
+    // new_ranges.reserve(size());
+
+    for (size_t j = 1; j < equal_ranges.size(); ++j)
+    {
+        size_t first = equal_ranges[j - 1];
+        size_t last = equal_ranges[j];
+
+        splitByRanges({first, last}, data, new_ranges, limit);
+        new_ranges.push_back(last);
+    }
+
+    UNUSED(limit);
+
+    // }
+
+    equal_ranges = std::move(new_ranges);
+}
+
+template <typename T>
+void ColumnVector<T>::equalRange(std::pair<size_t, size_t> & range, size_t row_num) const
+{
+    assert(range.first >= 0 && range.second < size());
+    auto range_it = std::equal_range(data.begin() + range.first, data.begin() + range.second, data[row_num]);
+    range.first = range_it.first - data.begin();
+    range.second = range_it.second - data.begin();
+}
+
 
 template <typename T>
 MutableColumnPtr ColumnVector<T>::cloneResized(size_t size) const

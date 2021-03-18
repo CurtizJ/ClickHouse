@@ -1,15 +1,8 @@
 #include <Processors/Transforms/AggregatingInOrderTransform.h>
 #include <DataTypes/DataTypeLowCardinality.h>
-#include <Core/SortCursor.h>
 
 namespace DB
 {
-
-namespace ErrorCodes
-{
-    extern const int LOGICAL_ERROR;
-}
-
 
 AggregatingInOrderTransform::AggregatingInOrderTransform(
     Block header, AggregatingTransformParamsPtr params_,
@@ -47,6 +40,42 @@ AggregatingInOrderTransform::AggregatingInOrderTransform(
 
 AggregatingInOrderTransform::~AggregatingInOrderTransform() = default;
 
+
+namespace
+{
+
+template <typename LeftColumns, typename RightColumns>
+bool equals(const LeftColumns & lhs, const RightColumns & rhs, size_t i, size_t j, const SortDescription & descr)
+{
+    for (const auto & elem : descr)
+    {
+        size_t ind = elem.column_number;
+        int res = lhs[ind]->compareAt(i, j, *rhs[ind], elem.nulls_direction);
+        if (res)
+            return false;
+    }
+
+    return true;
+}
+
+template <typename Columns>
+bool equals(const Columns & columns, size_t i, size_t j, const SortDescription & descr)
+{
+    return equals(columns, columns, i, j, descr);
+}
+
+std::vector<size_t> splitByRanges(const Columns & columns, size_t limit)
+{
+    assert(!columns.empty());
+    std::vector<size_t> equal_ranges = {0, columns[0]->size()};
+    for (const auto & column : columns)
+        column->getEqualRanges(equal_ranges, limit);
+
+    return equal_ranges;
+}
+
+}
+
 void AggregatingInOrderTransform::consume(Chunk chunk)
 {
     size_t rows = chunk.getNumRows();
@@ -58,6 +87,7 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
         LOG_TRACE(log, "Aggregating in order");
         is_consume_started = true;
     }
+
     src_rows += rows;
     src_bytes += chunk.bytes();
 
@@ -73,8 +103,6 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
     Aggregator::AggregateFunctionInstructions aggregate_function_instructions;
     params->aggregator.prepareAggregateInstructions(chunk.getColumns(), aggregate_columns, materialized_columns, aggregate_function_instructions, nested_columns_holder);
 
-    size_t key_end = 0;
-    size_t key_begin = 0;
     /// If we don't have a block we create it and fill with first key
     if (!cur_block_size)
     {
@@ -82,57 +110,51 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
         res_aggregate_columns.resize(params->params.aggregates_size);
 
         for (size_t i = 0; i < params->params.keys_size; ++i)
-        {
             res_key_columns[i] = res_header.safeGetByPosition(i).type->createColumn();
-        }
+
         for (size_t i = 0; i < params->params.aggregates_size; ++i)
-        {
             res_aggregate_columns[i] = res_header.safeGetByPosition(i + params->params.keys_size).type->createColumn();
-        }
-        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, key_begin, res_key_columns);
+
+        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, 0, res_key_columns);
         ++cur_block_size;
     }
-    ssize_t mid = 0;
-    ssize_t high = 0;
-    ssize_t low = -1;
-    /// Will split block into segments with the same key
-    while (key_end != rows)
+    else if (!equals(res_key_columns, key_columns, cur_block_size - 1, 0, group_by_description))
     {
-        high = rows;
-        /// Find the first position of new (not current) key in current chunk
-        while (high - low > 1)
-        {
-            mid = (low + high) / 2;
-            if (!less(res_key_columns, key_columns, cur_block_size - 1, mid, group_by_description))
-                low = mid;
-            else
-                high = mid;
-        }
-        key_end = high;
-        /// Add data to aggr. state if interval is not empty. Empty when haven't found current key in new block.
-        if (key_begin != key_end)
-        {
-            params->aggregator.executeOnIntervalWithoutKeyImpl(variants.without_key, key_begin, key_end, aggregate_function_instructions.data(), variants.aggregates_pool);
-        }
+        params->aggregator.addToAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+        params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, 0, res_key_columns);
+        ++cur_block_size;
+    }
 
-        low = key_begin = key_end;
-        /// We finalize last key aggregation state if a new key found.
-        if (key_begin != rows)
+    auto equal_ranges = splitByRanges(key_columns, res_block_size - cur_block_size);
+
+    for (size_t i = 1; i < equal_ranges.size(); ++i)
+    {
+        size_t key_begin = equal_ranges[i - 1];
+        size_t key_end = equal_ranges[i];
+
+        /// Add data from interval with current key to aggregate state.
+        params->aggregator.executeOnIntervalWithoutKeyImpl(
+            variants.without_key, key_begin, key_end,
+            aggregate_function_instructions.data(), variants.aggregates_pool);
+
+        if (key_end != rows)
         {
-            params->aggregator.fillAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+            params->aggregator.addToAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+
             /// If res_block_size is reached we have to stop consuming and generate the block. Save the extra rows into new chunk.
-            if (cur_block_size == res_block_size)
+            if (cur_block_size >= res_block_size)
             {
                 Columns source_columns = chunk.detachColumns();
 
                 for (auto & source_column : source_columns)
-                    source_column = source_column->cut(key_begin, rows - key_begin);
+                    source_column = source_column->cut(key_end, rows - key_end);
 
-                current_chunk = Chunk(source_columns, rows - key_begin);
-                src_rows -= current_chunk.getNumRows();
+                current_chunk = Chunk(source_columns, rows - key_end);
                 block_end_reached = true;
                 need_generate = true;
                 cur_block_size = 0;
+
+                params->aggregator.finalizeAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
 
                 /// Arenas cannot be destroyed here, since later, in FinalizingSimpleTransform
                 /// there will be finalizeChunk(), but even after
@@ -155,10 +177,11 @@ void AggregatingInOrderTransform::consume(Chunk chunk)
             }
 
             /// We create a new state for the new key and update res_key_columns
-            params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, key_begin, res_key_columns);
+            params->aggregator.createStatesAndFillKeyColumnsWithSingleKey(variants, key_columns, key_end, res_key_columns);
             ++cur_block_size;
         }
     }
+
     block_end_reached = false;
 }
 
@@ -234,18 +257,19 @@ IProcessor::Status AggregatingInOrderTransform::prepare()
 void AggregatingInOrderTransform::generate()
 {
     if (cur_block_size && is_consume_finished)
-        params->aggregator.fillAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+    {
+        params->aggregator.addToAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+        params->aggregator.finalizeAggregateColumnsWithSingleKey(variants, res_aggregate_columns);
+    }
 
     Block res = res_header.cloneEmpty();
 
     for (size_t i = 0; i < res_key_columns.size(); ++i)
-    {
         res.getByPosition(i).column = std::move(res_key_columns[i]);
-    }
+
     for (size_t i = 0; i < res_aggregate_columns.size(); ++i)
-    {
         res.getByPosition(i + res_key_columns.size()).column = std::move(res_aggregate_columns[i]);
-    }
+
     to_push_chunk = convertToChunk(res);
     res_rows += to_push_chunk.getNumRows();
     need_generate = false;

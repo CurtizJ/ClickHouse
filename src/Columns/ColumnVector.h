@@ -22,6 +22,7 @@ struct CompareHelper
 {
     static constexpr bool less(T a, U b, int /*nan_direction_hint*/) { return a < b; }
     static constexpr bool greater(T a, U b, int /*nan_direction_hint*/) { return a > b; }
+    static constexpr bool equals(T a, U b) { return a == b; }
 
     /** Compares two numbers. Returns a number less than zero, equal to zero, or greater than zero if a < b, a == b, a > b, respectively.
       * If one of the values is NaN, then
@@ -68,6 +69,19 @@ struct FloatCompareHelper
         return a > b;
     }
 
+    static constexpr bool equals(T a, T b)
+    {
+        const bool isnan_a = std::isnan(a);
+        const bool isnan_b = std::isnan(b);
+
+        if (isnan_a && isnan_b)
+            return true;
+        if (isnan_a || isnan_b)
+            return false;
+
+        return a == b;
+    }
+
     static constexpr int compare(T a, T b, int nan_direction_hint)
     {
         const bool isnan_a = std::isnan(a);
@@ -103,6 +117,7 @@ private:
 
     struct less;
     struct greater;
+    struct equals;
 
 public:
     using ValueType = T;
@@ -215,6 +230,10 @@ public:
     void getPermutation(bool reverse, size_t limit, int nan_direction_hint, IColumn::Permutation & res) const override;
 
     void updatePermutation(bool reverse, size_t limit, int nan_direction_hint, IColumn::Permutation & res, EqualRanges& equal_range) const override;
+
+    void getEqualRanges(std::vector<size_t> & equal_ranges, size_t limit) const override;
+
+    void equalRange(std::pair<size_t, size_t> & range, size_t row_num) const override;
 
     void reserve(size_t n) override
     {

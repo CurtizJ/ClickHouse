@@ -24,11 +24,13 @@ FinishAggregatingInOrderAlgorithm::FinishAggregatingInOrderAlgorithm(
     const Block & header_,
     size_t num_inputs_,
     AggregatingTransformParamsPtr params_,
-    SortDescription description_)
+    SortDescription description_,
+    size_t max_block_size_)
     : header(header_)
     , num_inputs(num_inputs_)
     , params(params_)
     , description(std::move(description_))
+    , max_block_size(max_block_size_)
 {
     /// Replace column names in description to positions.
     for (auto & column_description : description)
@@ -94,16 +96,25 @@ IMergingAlgorithm::Status FinishAggregatingInOrderAlgorithm::merge()
         states[i].to_row = (it == indices.end() ? states[i].num_rows : *it);
     }
 
+    addToAggregation();
+
     Status status(*best_input);
-    status.chunk = aggregate();
+    if (accumulated_rows >= max_block_size)
+        status.chunk = aggregate();
 
     return status;
 }
 
 Chunk FinishAggregatingInOrderAlgorithm::aggregate()
 {
-    BlocksList blocks;
+    auto aggregated = params->aggregator.mergeBlocks(blocks, false);
+    blocks.clear();
+    accumulated_rows = 0;
+    return {aggregated.getColumns(), aggregated.rows()};
+}
 
+void FinishAggregatingInOrderAlgorithm::addToAggregation()
+{
     for (size_t i = 0; i < num_inputs; ++i)
     {
         const auto & state = states[i];
@@ -124,11 +135,9 @@ Chunk FinishAggregatingInOrderAlgorithm::aggregate()
             blocks.emplace_back(header.cloneWithColumns(new_columns));
         }
 
+        accumulated_rows += blocks.back().rows();
         states[i].current_row = states[i].to_row;
     }
-
-    auto aggregated = params->aggregator.mergeBlocks(blocks, false);
-    return {aggregated.getColumns(), aggregated.rows()};
 }
 
 }

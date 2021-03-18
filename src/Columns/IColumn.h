@@ -303,6 +303,10 @@ public:
         throw Exception("Collations could be specified only for String, LowCardinality(String), Nullable(String) or for Array or Tuple, containing them.", ErrorCodes::BAD_COLLATION);
     }
 
+    virtual void getEqualRanges(std::vector<size_t> & equal_ranges, size_t limit) const;
+
+    virtual void equalRange(std::pair<size_t, size_t> & range, size_t row_num) const { UNUSED(range); UNUSED(row_num); }
+
     /** Copies each element according offsets parameter.
       * (i-th element should be copied offsets[i] - offsets[i - 1] times.)
       * It is necessary in ARRAY JOIN operation.
