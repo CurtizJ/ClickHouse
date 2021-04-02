@@ -1305,7 +1305,7 @@ protected:
 
     void createStatesAndFillKeyColumnsWithSingleKey(
         AggregatedDataVariants & data_variants,
-        Columns & key_columns, size_t key_row,
+        const Columns & key_columns, size_t key_row,
         MutableColumns & final_key_columns);
 };
 

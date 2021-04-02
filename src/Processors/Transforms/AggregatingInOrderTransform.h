@@ -32,6 +32,8 @@ public:
 
 private:
     void generate();
+    size_t aggregateOnIntervals(
+        Aggregator::AggregateFunctionInstructions & instructions, const Columns & columns, size_t rows);
 
     size_t res_block_size;
     size_t cur_block_size = 0;
@@ -52,7 +54,7 @@ private:
     UInt64 res_rows = 0;
 
     bool need_generate = false;
-    bool block_end_reached = false;
+    bool res_block_ready = false;
     bool is_consume_started = false;
     bool is_consume_finished = false;
 
