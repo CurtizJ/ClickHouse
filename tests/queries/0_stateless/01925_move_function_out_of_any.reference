@@ -1,0 +1,17 @@
+90	0
+SELECT
+    sum(number * 2 AS n),
+    any(number) * 2
+FROM numbers(10)
+6
+SELECT any(2 * 3)
+FROM numbers(10)
+foo
+SELECT any(nullIf(s, \'\'))
+FROM t_null_if
+(1,NULL)
+SELECT any((a, b))
+FROM t_nullable_any
+12
+SELECT any(a * b)
+FROM t_nullable_any

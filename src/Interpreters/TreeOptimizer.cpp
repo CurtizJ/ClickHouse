@@ -28,10 +28,10 @@
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 
+#include <Parsers/queryToString.h>
+
 #include <Functions/FunctionFactory.h>
 #include <Storages/IStorage.h>
-
-#include <Interpreters/RewriteSumIfFunctionVisitor.h>
 
 namespace DB
 {
@@ -545,9 +545,9 @@ void optimizeAggregationFunctions(ASTPtr & query)
     ArithmeticOperationsInAgrFuncVisitor(data).visit(query);
 }
 
-void optimizeAnyFunctions(ASTPtr & query)
+void optimizeAnyFunctions(ASTPtr & query, const StorageMetadataPtr & metadata_snapshot)
 {
-    RewriteAnyFunctionVisitor::Data data = {};
+    RewriteAnyFunctionVisitor::Data data = {metadata_snapshot};
     RewriteAnyFunctionVisitor(data).visit(query);
 }
 
@@ -629,7 +629,7 @@ void TreeOptimizer::apply(ASTPtr & query, TreeRewriterResult & result,
 
     /// Move all operations out of any function
     if (settings.optimize_move_functions_out_of_any)
-        optimizeAnyFunctions(query);
+        optimizeAnyFunctions(query, result.metadata_snapshot);
 
     if (settings.optimize_normalize_count_variants)
         optimizeCountConstantAndSumOne(query);

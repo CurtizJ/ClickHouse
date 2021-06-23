@@ -4,6 +4,8 @@
 
 #include <Parsers/IAST.h>
 #include <Interpreters/InDepthNodeVisitor.h>
+#include <Storages/StorageInMemoryMetadata.h>
+
 
 namespace DB
 {
@@ -17,7 +19,13 @@ class RewriteAnyFunctionMatcher
 public:
     struct Data
     {
-        std::unordered_set<IAST *> rewritten;
+        Data(const StorageMetadataPtr & metadata_snapshot_)
+            : metadata_snapshot(metadata_snapshot_)
+        {
+        }
+
+        StorageMetadataPtr metadata_snapshot;
+        std::unordered_map<IAST *, ASTPtr> rewritten;
     };
 
     static void visit(ASTPtr & ast, Data & data);
