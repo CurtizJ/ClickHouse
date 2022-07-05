@@ -238,7 +238,7 @@ namespace DB
         return "Redis: " + configuration.host + ':' + DB::toString(configuration.port);
     }
 
-    RedisDictionarySource::ConnectionPtr RedisDictionarySource::getConnection() const
+    ConnectionPtr RedisDictionarySource::getConnection() const
     {
         ClientPtr client;
         bool ok = pool->tryBorrowObject(client,

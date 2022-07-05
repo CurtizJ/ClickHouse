@@ -393,11 +393,12 @@ dbms_target_link_libraries (
         clickhouse_parsers
         ch_contrib::lz4
         Poco::JSON
-        Poco::MongoDB
         string_utils
     PUBLIC
         boost::system
         clickhouse_common_io
+        Poco::Redis
+        Poco::MongoDB
 )
 
 if (TARGET ch::mysqlxx)
