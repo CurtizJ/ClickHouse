@@ -3,81 +3,45 @@
 #include <Core/Block.h>
 #include <base/BorrowedObjectPool.h>
 #include <Core/ExternalResultDescription.h>
+#include <Storages/ExternalDataSourceConfiguration.h>
 #include <Processors/ISource.h>
 #include <Poco/Redis/Array.h>
 #include <Poco/Redis/Type.h>
 #include <Poco/Redis/Client.h>
 
-namespace Poco
-{
-    namespace Redis
-    {
-        class Client;
-        class Array;
-        class Command;
-    }
-}
-
-
 namespace DB
 {
-    enum class RedisStorageType
-    {
-            SIMPLE,
-            HASH_MAP,
-            UNKNOWN
-    };
 
-    using ClientPtr = std::unique_ptr<Poco::Redis::Client>;
-    using Pool = BorrowedObjectPool<ClientPtr>;
-    using PoolPtr = std::shared_ptr<Pool>;
-    struct Connection
-    {
-        Connection(PoolPtr pool_, ClientPtr client_)
-            : pool(std::move(pool_)), client(std::move(client_))
-        {
-        }
+class RedisSource final : public ISource
+{
+public:
+    using RedisArray = Poco::Redis::Array;
+    using RedisBulkString = Poco::Redis::BulkString;
 
-        ~Connection()
-        {
-            pool->returnObject(std::move(client));
-        }
+    RedisSource(
+        Redis::ConnectionPtr connection_,
+        const Poco::Redis::Array & keys_,
+        const Redis::StorageType & storage_type_,
+        const Block & sample_block,
+        size_t max_block_size,
+        const std::vector<bool> & selected_columns_ = {true, true, true});
 
-        PoolPtr pool;
-        ClientPtr client;
-    };
+    ~RedisSource() override;
 
-    using ConnectionPtr = std::unique_ptr<Connection>;
+    String getName() const override { return "Redis"; }
 
-    class RedisSource final : public ISource
-    {
-    public:
-        using RedisArray = Poco::Redis::Array;
-        using RedisBulkString = Poco::Redis::BulkString;
-        RedisSource(
-            ConnectionPtr connection_,
-            const Poco::Redis::Array & keys_,
-            const RedisStorageType & storage_type_,
-            const Block & sample_block,
-            size_t max_block_size,
-            const std::vector<bool> & selected_columns_ = {true, true, true});
+private:
+    Chunk generate() override;
 
-        ~RedisSource() override;
-
-        String getName() const override { return "Redis"; }
-
-    private:
-        Chunk generate() override;
-
-        ConnectionPtr connection;
-        Poco::Redis::Array keys;
-        RedisStorageType storage_type;
-        const size_t max_block_size;
-        ExternalResultDescription description;
-        size_t cursor = 0;
-        bool all_read = false;
-        const std::vector<bool> selected_columns;
-    };
+    Redis::ConnectionPtr connection;
+    Poco::Redis::Array keys;
+    Redis::StorageType storage_type;
+    const size_t max_block_size;
+    ExternalResultDescription description;
+    size_t cursor = 0;
+    bool all_read = false;
+    const std::vector<bool> selected_columns;
+};
 
 }
 

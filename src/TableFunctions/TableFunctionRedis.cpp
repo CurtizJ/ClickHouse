@@ -24,13 +24,13 @@ StoragePtr TableFunctionRedis::executeImpl(const ASTPtr & /*ast_function*/,
         ContextPtr context, const String & table_name, ColumnsDescription /*cached_columns*/) const
 {
     auto columns = getActualTableStructure(context);
-    auto storage = std::make_shared<StorageRedis>( 
-    StorageID(getDatabaseName(), table_name), 
+    auto storage = std::make_shared<StorageRedis>(
+    StorageID(getDatabaseName(), table_name),
     configuration->host,
     configuration->port,
     configuration->db_index,
     configuration->password,
-    static_cast<RedisStorageType>(configuration->storage_type),
+    static_cast<Redis::StorageType>(configuration->storage_type),
     "primary_key",
     "secondary_key",
     "value",
@@ -46,9 +46,9 @@ StoragePtr TableFunctionRedis::executeImpl(const ASTPtr & /*ast_function*/,
 ColumnsDescription TableFunctionRedis::getActualTableStructure(ContextPtr context) const
 {
     String structure;
-    if (configuration->storage_type ==  StorageRedisConfiguration::RedisStorageType::HASH_MAP)
+    if (configuration->storage_type ==  StorageRedisConfiguration::Redis::StorageType::HASH_MAP)
         structure = "primary_key String, secondary_key String, value String";
-    else if (configuration->storage_type ==  StorageRedisConfiguration::RedisStorageType::SIMPLE)
+    else if (configuration->storage_type ==  StorageRedisConfiguration::Redis::StorageType::SIMPLE)
         structure = "key String, value String";
     return parseColumnsListFromString(structure, context);
 }
@@ -56,7 +56,7 @@ ColumnsDescription TableFunctionRedis::getActualTableStructure(ContextPtr contex
 void TableFunctionRedis::parseArguments(const ASTPtr & ast_function, ContextPtr context)
 {
     const auto & func_args = ast_function->as<ASTFunction &>();
-    if (!func_args.arguments) 
+    if (!func_args.arguments)
         throw Exception("Table function 'redis' must have arguments.", ErrorCodes::BAD_ARGUMENTS);
 
     ASTs & args = func_args.arguments->children;

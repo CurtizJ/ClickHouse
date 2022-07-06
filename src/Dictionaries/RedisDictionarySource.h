@@ -5,16 +5,6 @@
 #include "DictionaryStructure.h"
 #include "IDictionarySource.h"
 
-namespace Poco
-{
-    namespace Redis
-    {
-        class Client;
-        class Array;
-        class Command;
-    }
-}
-
 namespace DB
 {
     namespace ErrorCodes
@@ -34,7 +24,7 @@ namespace DB
             const UInt16 port;
             const UInt32 db_index;
             const std::string password;
-            const RedisStorageType storage_type;
+            const Redis::StorageType storage_type;
             const size_t pool_size;
         };
 
@@ -45,7 +35,7 @@ namespace DB
 
         RedisDictionarySource(const RedisDictionarySource & other);
 
-        ~RedisDictionarySource() override;
+        ~RedisDictionarySource() override = default;
 
         QueryPipeline loadAll() override;
 
@@ -74,7 +64,7 @@ namespace DB
         const DictionaryStructure dict_struct;
         const Configuration configuration;
 
-        PoolPtr pool;
+        Redis::ConnectionPool pool;
         Block sample_block;
     };
 }

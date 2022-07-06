@@ -3,6 +3,7 @@
 #include <Interpreters/Context.h>
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Storages/StorageS3Settings.h>
+#include <Storages/RedisHelpers.h>
 
 namespace DB
 {
@@ -50,13 +51,7 @@ struct StorageMongoDBConfiguration : ExternalDataSourceConfiguration
 
 struct StorageRedisConfiguration : ExternalDataSourceConfiguration
 {
-    enum class RedisStorageType
-    {
-            SIMPLE,
-            HASH_MAP,
-            UNKNOWN
-    };
-    RedisStorageType storage_type;
+    Redis::StorageType storage_type;
     UInt32 db_index;
     String options;
 };

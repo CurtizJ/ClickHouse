@@ -15,8 +15,8 @@
 #include <IO/WriteHelpers.h>
 
 #include "DictionaryStructure.h"
-
 #include <Common/logger_useful.h>
+
 namespace DB
 {
     namespace ErrorCodes
@@ -28,11 +28,10 @@ namespace DB
         extern const int UNKNOWN_TYPE;
     }
 
-
     RedisSource::RedisSource(
-        ConnectionPtr connection_,
+        Redis::ConnectionPtr connection_,
         const RedisArray & keys_,
-        const RedisStorageType & storage_type_,
+        const Redis::StorageType & storage_type_,
         const DB::Block & sample_block,
         size_t max_block_size_,
         const std::vector<bool> & selected_columns_)
@@ -151,7 +150,7 @@ namespace DB
                 insertValue(*columns[idx], description.types[idx].first, value);
         };
 
-        if (storage_type == RedisStorageType::HASH_MAP)
+        if (storage_type == Redis::StorageType::HASH_MAP)
         {
             size_t num_rows = 0;
             for (; cursor < keys.size(); ++cursor)

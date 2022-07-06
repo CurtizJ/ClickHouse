@@ -10,6 +10,7 @@
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Interpreters/Context.h>
 #include <QueryPipeline/QueryPipeline.h>
+#include <Storages/RedisHelpers.h>
 
 #include <IO/WriteHelpers.h>
 
@@ -26,14 +27,14 @@ namespace DB
         extern const int TIMEOUT_EXCEEDED;
     }
 
-    static RedisStorageType parseStorageType(const String & storage_type_str)
+    static Redis::StorageType parseStorageType(const String & storage_type_str)
     {
         if (storage_type_str == "hash_map")
-            return RedisStorageType::HASH_MAP;
+            return Redis::StorageType::HASH_MAP;
         else if (!storage_type_str.empty() && storage_type_str != "simple")
             throw Exception(ErrorCodes::INVALID_CONFIG_PARAMETER, "Unknown storage type {} for Redis dictionary", storage_type_str);
 
-        return RedisStorageType::SIMPLE;
+        return Redis::StorageType::SIMPLE;
     }
 
     void registerDictionarySourceRedis(DictionarySourceFactory & factory)
@@ -77,7 +78,7 @@ namespace DB
         const Block & sample_block_)
         : dict_struct{dict_struct_}
         , configuration(configuration_)
-        , pool(std::make_shared<Pool>(configuration.pool_size))
+        , pool(configuration.pool_size)
         , sample_block{sample_block_}
     {
         if (dict_struct.attributes.size() != 1)
@@ -85,7 +86,7 @@ namespace DB
                 "Invalid number of non key columns for Redis source: {}, expected 1",
                 DB::toString(dict_struct.attributes.size()));
 
-        if (configuration.storage_type == RedisStorageType::HASH_MAP)
+        if (configuration.storage_type == Redis::StorageType::HASH_MAP)
         {
             if (!dict_struct.key)
                 throw Exception(ErrorCodes::INVALID_CONFIG_PARAMETER,
@@ -110,73 +111,10 @@ namespace DB
     {
     }
 
-    RedisDictionarySource::~RedisDictionarySource() = default;
-
-    static String storageTypeToKeyType(RedisStorageType type)
-    {
-        switch (type)
-        {
-            case RedisStorageType::SIMPLE:
-                return "string";
-            case RedisStorageType::HASH_MAP:
-                return "hash";
-            default:
-                return "none";
-        }
-
-        __builtin_unreachable();
-    }
-
     QueryPipeline RedisDictionarySource::loadAll()
     {
-        auto connection = getConnection();
-
-        RedisCommand command_for_keys("KEYS");
-        command_for_keys << "*";
-
-        /// Get only keys for specified storage type.
-        auto all_keys = connection->client->execute<RedisArray>(command_for_keys);
-        if (all_keys.isNull())
-            return QueryPipeline(std::make_shared<RedisSource>(
-                std::move(connection), RedisArray{},
-                configuration.storage_type, sample_block, REDIS_MAX_BLOCK_SIZE));
-
-        RedisArray keys;
-        auto key_type = storageTypeToKeyType(configuration.storage_type);
-        for (auto && key : all_keys)
-            if (key_type == connection->client->execute<String>(RedisCommand("TYPE").addRedisType(key)))
-                keys.addRedisType(key);
-
-        if (configuration.storage_type == RedisStorageType::HASH_MAP)
-        {
-            RedisArray hkeys;
-            for (const auto & key : keys)
-            {
-                RedisCommand command_for_secondary_keys("HKEYS");
-                command_for_secondary_keys.addRedisType(key);
-
-                auto secondary_keys = connection->client->execute<RedisArray>(command_for_secondary_keys);
-
-                RedisArray primary_with_secondary;
-                primary_with_secondary.addRedisType(key);
-                for (const auto & secondary_key : secondary_keys)
-                {
-                    primary_with_secondary.addRedisType(secondary_key);
-                    /// Do not store more than max_block_size values for one request.
-                    if (primary_with_secondary.size() == REDIS_MAX_BLOCK_SIZE + 1)
-                    {
-                        hkeys.add(primary_with_secondary);
-                        primary_with_secondary.clear();
-                        primary_with_secondary.addRedisType(key);
-                    }
-                }
-
-                if (primary_with_secondary.size() > 1)
-                    hkeys.add(primary_with_secondary);
-            }
-
-            keys = hkeys;
-        }
+        auto connection = pool.getConnection();
+        auto keys = Redis::getAllKeys(connection, configuration.storage_type, REDIS_MAX_BLOCK_SIZE);
 
         return QueryPipeline(std::make_shared<RedisSource>(
             std::move(connection), std::move(keys),
@@ -185,9 +123,9 @@ namespace DB
 
     QueryPipeline RedisDictionarySource::loadIds(const std::vector<UInt64> & ids)
     {
-        auto connection = getConnection();
+        auto connection = pool.getConnection();
 
-        if (configuration.storage_type == RedisStorageType::HASH_MAP)
+        if (configuration.storage_type == Redis::StorageType::HASH_MAP)
             throw Exception(ErrorCodes::UNSUPPORTED_METHOD, "Cannot use loadIds with 'hash_map' storage type");
 
         if (!dict_struct.id)
@@ -205,7 +143,7 @@ namespace DB
 
     QueryPipeline RedisDictionarySource::loadKeys(const Columns & key_columns, const std::vector<size_t> & requested_rows)
     {
-        auto connection = getConnection();
+        auto connection = pool.getConnection();
 
         if (key_columns.size() != dict_struct.key->size())
             throw Exception(ErrorCodes::LOGICAL_ERROR, "The size of key_columns does not equal to the size of dictionary key");
@@ -236,57 +174,5 @@ namespace DB
     String RedisDictionarySource::toString() const
     {
         return "Redis: " + configuration.host + ':' + DB::toString(configuration.port);
-    }
-
-    ConnectionPtr RedisDictionarySource::getConnection() const
-    {
-        ClientPtr client;
-        bool ok = pool->tryBorrowObject(client,
-            [] { return std::make_unique<Poco::Redis::Client>(); },
-            REDIS_LOCK_ACQUIRE_TIMEOUT_MS);
-
-        if (!ok)
-            throw Exception(ErrorCodes::TIMEOUT_EXCEEDED,
-                "Could not get connection from pool, timeout exceeded {} seconds",
-                REDIS_LOCK_ACQUIRE_TIMEOUT_MS);
-
-        if (!client->isConnected())
-        {
-            try
-            {
-                client->connect(configuration.host, configuration.port);
-
-                if (!configuration.password.empty())
-                {
-                    RedisCommand command("AUTH");
-                    command << configuration.password;
-                    String reply = client->execute<String>(command);
-                    if (reply != "OK")
-                        throw Exception(ErrorCodes::INTERNAL_REDIS_ERROR,
-                            "Authentication failed with reason {}", reply);
-                }
-
-                if (configuration.db_index != 0)
-                {
-                    RedisCommand command("SELECT");
-                    command << std::to_string(configuration.db_index);
-                    String reply = client->execute<String>(command);
-                    if (reply != "OK")
-                        throw Exception(ErrorCodes::INTERNAL_REDIS_ERROR,
-                            "Selecting database with index {} failed with reason {}",
-                            configuration.db_index, reply);
-                }
-            }
-            catch (...)
-            {
-                if (client->isConnected())
-                    client->disconnect();
-
-                pool->returnObject(std::move(client));
-                throw;
-            }
-        }
-
-        return std::make_unique<Connection>(pool, std::move(client));
     }
 }
