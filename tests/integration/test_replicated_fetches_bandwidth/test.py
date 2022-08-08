@@ -11,8 +11,13 @@ import statistics
 cluster = ClickHouseCluster(__file__)
 node1 = cluster.add_instance("node1", with_zookeeper=True)
 node2 = cluster.add_instance("node2", with_zookeeper=True)
+
 node3 = cluster.add_instance(
     "node3", user_configs=["configs/limit_replication_config.xml"], with_zookeeper=True
+)
+
+node4 = cluster.add_instance(
+    "node4", main_configs=["configs/limit_memory_config.xml"], with_zookeeper=True
 )
 
 
@@ -261,3 +266,30 @@ def test_should_execute_fetch(start_cluster):
     finally:
         for node in [node1, node2]:
             node.query("DROP TABLE IF EXISTS should_execute_table SYNC")
+
+
+def test_fetch_huge_column(start_cluster):
+    try:
+        create_query = """
+            CREATE TABLE fetch_test_huge
+            (
+                huge_column String CODEC(NONE)
+            )
+            ENGINE = ReplicatedMergeTree('/clickhouse/tables/fetch_test_huge', '{replica}')
+            ORDER BY tuple()"""
+
+        node1.query(create_query.format(replica=1))
+        node1.query(
+            "INSERT INTO fetch_test_huge SELECT randomPrintableASCII(10 * 1024) FROM numbers(3e5) SETTINGS max_block_size=256"
+        )
+        node1.query("OPTIMIZE TABLE fetch_test_huge FINAL")
+
+        node4.query(create_query.format(replica=2))
+        node4.query("SYSTEM SYNC REPLICA fetch_test_huge", timeout=120)
+
+        assert node4.query("SELECT count() FROM fetch_test_huge") == "300000\n"
+        assert not node4.contains_in_log("MEMORY_LIMIT_EXCEEDED")
+
+    finally:
+        for node in [node1, node4]:
+            node.query("DROP TABLE IF EXISTS fetch_test_huge SYNC")

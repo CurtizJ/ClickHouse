@@ -1,3 +1,4 @@
+#include "Core/Defines.h"
 #include <Storages/MergeTree/DataPartsExchange.h>
 
 #include <Formats/NativeWriter.h>
@@ -719,7 +720,8 @@ void Fetcher::downloadBaseOrProjectionPartToDisk(
                 "This may happen if we are trying to download part from malicious replica or logical error.",
                 absolute_file_path, data_part_storage_builder->getRelativePath());
 
-        auto file_out = data_part_storage_builder->writeFile(file_name, file_size, {});
+        size_t buffer_size = std::min(file_size, static_cast<size_t>(DBMS_DEFAULT_BUFFER_SIZE));
+        auto file_out = data_part_storage_builder->writeFile(file_name, buffer_size, {});
         HashingWriteBuffer hashing_out(*file_out);
         copyDataWithThrottler(in, hashing_out, file_size, blocker.getCounter(), throttler);
 

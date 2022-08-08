@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <max_server_memory_usage>2000000000</max_server_memory_usage>
+</clickhouse>
