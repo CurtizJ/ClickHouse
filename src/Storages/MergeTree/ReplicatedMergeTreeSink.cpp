@@ -66,6 +66,7 @@ ReplicatedMergeTreeSink::ReplicatedMergeTreeSink(
     , deduplicate(deduplicate_)
     , log(&Poco::Logger::get(storage.getLogName() + " (Replicated OutputStream)"))
     , context(context_)
+    , storage_snapshot(storage.getStorageSnapshot(metadata_snapshot, context))
 {
     /// The quorum value `1` has the same meaning as if it is disabled.
     if (quorum == 1)
@@ -151,7 +152,6 @@ void ReplicatedMergeTreeSink::consume(Chunk chunk)
     if (quorum)
         checkQuorumPrecondition(zookeeper);
 
-    auto storage_snapshot = storage.getStorageSnapshot(metadata_snapshot, context);
     if (!storage_snapshot->object_columns.empty())
         convertDynamicColumnsToTuples(block, storage_snapshot);
 
