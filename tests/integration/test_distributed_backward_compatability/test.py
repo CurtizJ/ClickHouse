@@ -12,8 +12,16 @@ node_old = cluster.add_instance(
     stay_alive=True,
     with_installed_binary=True,
 )
-node_new = cluster.add_instance(
+node_22_8 = cluster.add_instance(
     "node2",
+    main_configs=["configs/remote_servers.xml"],
+    image="clickhouse/clickhouse-server",
+    tag="22.8",
+    stay_alive=True,
+    with_installed_binary=True,
+)
+node_new = cluster.add_instance(
+    "node3",
     main_configs=["configs/remote_servers.xml"],
     user_configs=["configs/legacy.xml"],
 )
@@ -62,3 +70,26 @@ def test_distributed_in_tuple(started_cluster):
     assert node_old.query(query4) == "2\n"
     assert node_new.query(query3) == "2\n"
     assert node_new.query(query4) == "2\n"
+
+
+def test_distributed_tuple_function(started_cluster):
+    node_22_8.query("CREATE TABLE t_tuple_names (A UInt64, B UInt64) ENGINE = Memory")
+    node_new.query("CREATE TABLE t_tuple_names (A UInt64, B UInt64) ENGINE = Memory")
+
+    node_22_8.query("INSERT INTO t_tuple_names VALUES (1, 2)")
+    node_new.query("INSERT INTO t_tuple_names VALUES (3, 4)")
+
+    expected = "(1,2)\n(3,4)\n"
+
+    assert (
+        node_new.query(
+            "SELECT tuple(A, B) FROM remote(test_cluster_2, default, t_tuple_names) ORDER BY A"
+        )
+        == expected
+    )
+    assert (
+        node_22_8.query(
+            "SELECT tuple(A, B) FROM remote(test_cluster_2, default, t_tuple_names) ORDER BY A"
+        )
+        == expected
+    )

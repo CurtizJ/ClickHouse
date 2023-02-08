@@ -62,6 +62,11 @@ static std::optional<Exception> checkTupleNames(const Strings & names)
     return {};
 }
 
+bool DataTypeTuple::canBeCreatedWithNames(const Strings & names)
+{
+    return checkTupleNames(names) == std::nullopt;
+}
+
 DataTypeTuple::DataTypeTuple(const DataTypes & elems_, const Strings & names_)
     : elems(elems_), names(names_), have_explicit_names(true)
 {

@@ -1,3 +1,4 @@
+#include <Common/StringUtils/StringUtils.h>
 #include <Functions/IFunction.h>
 #include <Functions/FunctionFactory.h>
 #include <DataTypes/DataTypeTuple.h>
@@ -57,12 +58,30 @@ public:
     bool useDefaultImplementationForConstants() const override { return true; }
     bool useDefaultImplementationForLowCardinalityColumns() const override { return false; }
 
-    DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
+    DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override
     {
         if (arguments.empty())
             throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH, "Function {} requires at least one argument.", getName());
 
-        return std::make_shared<DataTypeTuple>(arguments);
+        DataTypes types;
+        Strings names;
+        bool all_names_are_valid = true;
+
+        for (const auto & argument : arguments)
+        {
+            if (!isValidIdentifier(argument.name))
+                all_names_are_valid = false;
+
+            types.emplace_back(argument.type);
+            names.emplace_back(argument.name);
+        }
+
+        /// Create named tuple if all names are valid identifiers,
+        /// because otherwise names may be meaningless (e.g. serialized expression).
+        if (all_names_are_valid && DataTypeTuple::canBeCreatedWithNames(names))
+            return std::make_shared<DataTypeTuple>(types, names);
+
+        return std::make_shared<DataTypeTuple>(types);
     }
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t /*input_rows_count*/) const override
