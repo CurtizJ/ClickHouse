@@ -143,12 +143,24 @@ def clickhouse_execute_http(
 
     return data
 
+
 def clickhouse_execute(base_args, query, timeout=30, settings=None, max_http_retries=5):
-    return clickhouse_execute_http(base_args, query, timeout, settings, max_http_retries=max_http_retries).strip()
+    return clickhouse_execute_http(
+        base_args, query, timeout, settings, max_http_retries=max_http_retries
+    ).strip()
 
 
-def clickhouse_execute_json(base_args, query, timeout=60, settings=None, max_http_retries=5):
-    data = clickhouse_execute_http(base_args, query, timeout, settings, "JSONEachRow", max_http_retries=max_http_retries)
+def clickhouse_execute_json(
+    base_args, query, timeout=60, settings=None, max_http_retries=5
+):
+    data = clickhouse_execute_http(
+        base_args,
+        query,
+        timeout,
+        settings,
+        "JSONEachRow",
+        max_http_retries=max_http_retries,
+    )
     if not data:
         return None
     rows = []
@@ -521,7 +533,9 @@ class SettingsRandomizer:
         "merge_tree_coarse_index_granularity": lambda: random.randint(2, 32),
         "optimize_distinct_in_order": lambda: random.randint(0, 1),
         "optimize_sorting_by_input_stream_properties": lambda: random.randint(0, 1),
-        "enable_memory_bound_merging_of_aggregation_results": lambda: random.randint(0, 1),
+        "enable_memory_bound_merging_of_aggregation_results": lambda: random.randint(
+            0, 1
+        ),
     }
 
     @staticmethod
@@ -557,11 +571,23 @@ class MergeTreeSettingsRandomizer:
     }
 
     @staticmethod
-    def get_random_settings(args):
+    def get_random_settings(args, tags):
         random_settings = []
         for setting, generator in MergeTreeSettingsRandomizer.settings.items():
             if setting not in args.changed_merge_tree_settings:
                 random_settings.append(f"{setting}={generator()}")
+
+        if (
+            not args.s3_storage
+            and args.storage_policies_by_disk_type
+            and args.storage_policies_by_disk_type.values()
+            and "storage_policy" not in args.changed_merge_tree_settings
+            and (not tags or "no-s3-storage" not in tags)
+        ):
+            policies = random.choice(list(args.storage_policies_by_disk_type.values()))
+            policy = random.choice(policies)
+            random_settings.append(f"storage_policy={policy}")
+
         return random_settings
 
 
@@ -643,7 +669,9 @@ class TestCase:
 
             clickhouse_execute(
                 args,
-                "CREATE DATABASE IF NOT EXISTS " + database + get_db_engine(testcase_args, database),
+                "CREATE DATABASE IF NOT EXISTS "
+                + database
+                + get_db_engine(testcase_args, database),
                 settings=get_create_database_settings(args, testcase_args),
             )
 
@@ -759,7 +787,7 @@ class TestCase:
 
         if self.randomize_merge_tree_settings:
             self.merge_tree_random_settings = (
-                MergeTreeSettingsRandomizer.get_random_settings(args)
+                MergeTreeSettingsRandomizer.get_random_settings(args, self.tags)
             )
 
         self.base_url_params = (
@@ -1235,7 +1263,7 @@ class TestCase:
             )
             result.check_if_need_retry(args, stdout, stderr, self.runs_count)
             # to avoid breaking CSV parser
-            result.description = result.description.replace('\0', '')
+            result.description = result.description.replace("\0", "")
 
             if result.status == TestStatus.FAIL:
                 result.description = self.add_info_about_settings(result.description)
@@ -1691,7 +1719,12 @@ def check_server_started(args):
             print("\nConnection timeout, will not retry")
             break
         except Exception as e:
-            print("\nUexpected exception, will not retry: ", type(e).__name__, ": ", str(e))
+            print(
+                "\nUexpected exception, will not retry: ",
+                type(e).__name__,
+                ": ",
+                str(e),
+            )
             break
 
     print("\nAll connection tries failed")
@@ -1778,6 +1811,28 @@ def collect_changed_merge_tree_settings(args):
     )
 
     return list(map(lambda s: s.decode(), changed_settings))
+
+
+def get_storage_policies_by_disk_type(args):
+    policies = clickhouse_execute_json(
+        args,
+        """
+        SELECT
+            type,
+            groupArray(policy_name) AS policies
+        FROM system.storage_policies
+        INNER JOIN system.disks ON disks[1] = name
+        GROUP BY type
+    """,
+    )
+
+    if not policies:
+        return None
+
+    policies_by_type = dict()
+    for row in policies:
+        policies_by_type[row["type"]] = row["policies"]
+    return policies_by_type
 
 
 def check_table_column(args, database, table, column):
@@ -1968,6 +2023,7 @@ def reportCoverage(args):
         )
     )
 
+
 def reportLogStats(args):
     query = """
         WITH
@@ -2085,6 +2141,7 @@ def main(args):
 
     args.build_flags = collect_build_flags(args)
     args.changed_merge_tree_settings = collect_changed_merge_tree_settings(args)
+    args.storage_policies_by_disk_type = get_storage_policies_by_disk_type(args)
     args.suppport_system_processes_is_all_data_sent = check_table_column(
         args, "system", "processes", "is_all_data_sent"
     )
