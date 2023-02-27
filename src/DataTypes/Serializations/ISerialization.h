@@ -57,6 +57,7 @@ public:
     {
         DEFAULT = 0,
         SPARSE = 1,
+        LOW_CARDINALITY = 2,
     };
 
     virtual Kind getKind() const { return Kind::DEFAULT; }

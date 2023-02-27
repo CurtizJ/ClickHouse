@@ -1,3 +1,4 @@
+#include "DataTypes/Serializations/ISerialization.h"
 #include <cstddef>
 #include <Columns/IColumn.h>
 #include <Columns/ColumnConst.h>
@@ -13,6 +14,7 @@
 #include <DataTypes/DataTypeCustom.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/Serializations/SerializationSparse.h>
+#include <DataTypes/Serializations/SerializationLowCardinality.h>
 #include <DataTypes/Serializations/SerializationInfo.h>
 
 
@@ -212,10 +214,18 @@ SerializationPtr IDataType::getSparseSerialization() const
     return std::make_shared<SerializationSparse>(getDefaultSerialization());
 }
 
+SerializationPtr IDataType::getLowCardinalitySerialization() const
+{
+    return std::make_shared<SerializationLowCardinality>(getPtr());
+}
+
 SerializationPtr IDataType::getSerialization(ISerialization::Kind kind) const
 {
     if (supportsSparseSerialization() && kind == ISerialization::Kind::SPARSE)
         return getSparseSerialization();
+
+    if (canBeInsideLowCardinality() && kind == ISerialization::Kind::LOW_CARDINALITY)
+        return getLowCardinalitySerialization();
 
     return getDefaultSerialization();
 }

@@ -40,9 +40,13 @@ public:
     struct Settings
     {
         const double ratio_of_defaults_for_sparse = 1.0;
+        const size_t max_uniq_values_for_low_cardinality = 0;
         const bool choose_kind = false;
 
-        bool isAlwaysDefault() const { return ratio_of_defaults_for_sparse >= 1.0; }
+        bool isAlwaysDefault() const
+        {
+            return ratio_of_defaults_for_sparse >= 1.0 && max_uniq_values_for_low_cardinality == 0;
+        }
     };
 
     SerializationInfo(ISerialization::Kind kind_, const Settings & settings_);

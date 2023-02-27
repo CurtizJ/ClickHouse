@@ -35,6 +35,8 @@ String ISerialization::kindToString(Kind kind)
             return "Default";
         case Kind::SPARSE:
             return "Sparse";
+        case Kind::LOW_CARDINALITY:
+            return "LowCardinality";
     }
     UNREACHABLE();
 }
