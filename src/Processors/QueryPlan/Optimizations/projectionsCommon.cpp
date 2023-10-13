@@ -244,18 +244,12 @@ bool analyzeProjectionCandidate(
         context->getSettingsRef().max_threads,
         max_added_blocks);
 
-    if (projection_result_ptr->error())
-        return false;
-
     candidate.merge_tree_projection_select_result_ptr = std::move(projection_result_ptr);
     candidate.sum_marks += candidate.merge_tree_projection_select_result_ptr->marks();
 
     if (!normal_parts.empty())
     {
         auto normal_result_ptr = reading.selectRangesToRead(std::move(normal_parts), /* alter_conversions = */ {});
-
-        if (normal_result_ptr->error())
-            return false;
 
         if (normal_result_ptr->marks() != 0)
         {

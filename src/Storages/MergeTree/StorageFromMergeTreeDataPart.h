@@ -6,8 +6,6 @@
 #include <Storages/MergeTree/AlterConversions.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Processors/QueryPlan/QueryPlan.h>
-#include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
-#include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Core/Defines.h>
 #include <Common/Exception.h>
@@ -32,13 +30,6 @@ public:
         , alter_conversions({part_->storage.getAlterConversionsForPart(part_)})
         , storage(part_->storage)
         , partition_id(part_->info.partition_id)
-    {
-        setInMemoryMetadata(storage.getInMemoryMetadata());
-    }
-
-    /// Used in queries with projection.
-    StorageFromMergeTreeDataPart(const MergeTreeData & storage_, MergeTreeDataSelectAnalysisResultPtr analysis_result_ptr_)
-        : IStorage(storage_.getStorageID()), storage(storage_), analysis_result_ptr(analysis_result_ptr_)
     {
         setInMemoryMetadata(storage.getInMemoryMetadata());
     }
@@ -81,7 +72,7 @@ public:
                                                   max_block_size,
                                                   num_streams,
                                                   nullptr,
-                                                  analysis_result_ptr));
+                                                  nullptr));
     }
 
     bool supportsPrewhere() const override { return true; }
@@ -135,7 +126,6 @@ private:
     const std::vector<AlterConversionsPtr> alter_conversions;
     const MergeTreeData & storage;
     const String partition_id;
-    const MergeTreeDataSelectAnalysisResultPtr analysis_result_ptr;
 
     static StorageID getIDFromPart(const MergeTreeData::DataPartPtr & part_)
     {

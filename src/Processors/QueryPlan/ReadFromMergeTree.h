@@ -55,9 +55,6 @@ struct UsefulSkipIndexes
     std::vector<MergedDataSkippingIndexAndCondition> merged_indices;
 };
 
-struct MergeTreeDataSelectAnalysisResult;
-using MergeTreeDataSelectAnalysisResultPtr = std::shared_ptr<MergeTreeDataSelectAnalysisResult>;
-
 /// This step is created to read from MergeTree* table.
 /// For now, it takes a list of parts and creates source from it.
 class ReadFromMergeTree final : public SourceStepWithFilter
@@ -106,7 +103,10 @@ public:
         UInt64 selected_rows = 0;
 
         void checkLimits(const Settings & settings, const SelectQueryInfo & query_info_) const;
+        size_t marks() const { return index_stats.empty() ? 0 : index_stats.back().num_granules_after; }
     };
+
+    using AnalysisResultPtr = std::shared_ptr<AnalysisResult>;
 
     ReadFromMergeTree(
         MergeTreeData::DataPartsVector parts_,
@@ -122,7 +122,7 @@ public:
         bool sample_factor_column_queried_,
         std::shared_ptr<PartitionIdToMaxBlock> max_block_numbers_to_read_,
         Poco::Logger * log_,
-        MergeTreeDataSelectAnalysisResultPtr analyzed_result_ptr_,
+        AnalysisResultPtr analyzed_result_ptr_,
         bool enable_parallel_reading
     );
 
@@ -156,7 +156,7 @@ public:
         std::optional<std::unordered_set<String>> part_values;
     };
 
-    static MergeTreeDataSelectAnalysisResultPtr selectRangesToRead(
+    static AnalysisResultPtr selectRangesToRead(
         MergeTreeData::DataPartsVector parts,
         std::vector<AlterConversionsPtr> alter_conversions,
         const PrewhereInfoPtr & prewhere_info,
@@ -173,7 +173,7 @@ public:
         Poco::Logger * log,
         std::optional<Indexes> & indexes);
 
-    MergeTreeDataSelectAnalysisResultPtr selectRangesToRead(
+    AnalysisResultPtr selectRangesToRead(
         MergeTreeData::DataPartsVector parts,
         std::vector<AlterConversionsPtr> alter_conversions) const;
 
@@ -195,7 +195,7 @@ public:
     bool willOutputEachPartitionThroughSeparatePort() const { return output_each_partition_through_separate_port; }
 
     bool hasAnalyzedResult() const { return analyzed_result_ptr != nullptr; }
-    void setAnalyzedResult(MergeTreeDataSelectAnalysisResultPtr analyzed_result_ptr_) { analyzed_result_ptr = std::move(analyzed_result_ptr_); }
+    void setAnalyzedResult(AnalysisResultPtr analyzed_result_ptr_) { analyzed_result_ptr = std::move(analyzed_result_ptr_); }
 
     void resetParts(MergeTreeData::DataPartsVector parts)
     {
@@ -212,7 +212,7 @@ public:
     void applyFilters() override;
 
 private:
-    static MergeTreeDataSelectAnalysisResultPtr selectRangesToReadImpl(
+    static AnalysisResultPtr selectRangesToReadImpl(
         MergeTreeData::DataPartsVector parts,
         std::vector<AlterConversionsPtr> alter_conversions,
         const StorageMetadataPtr & metadata_snapshot_base,
@@ -294,20 +294,12 @@ private:
     Pipe spreadMarkRangesAmongStreamsFinal(
         RangesInDataParts && parts, size_t num_streams, const Names & origin_column_names, const Names & column_names, ActionsDAGPtr & out_projection);
 
-    ReadFromMergeTree::AnalysisResult getAnalysisResult() const;
-    MergeTreeDataSelectAnalysisResultPtr analyzed_result_ptr;
+    AnalysisResult getAnalysisResult() const;
+    AnalysisResultPtr analyzed_result_ptr;
 
     bool is_parallel_reading_from_replicas;
     std::optional<MergeTreeAllRangesCallback> all_ranges_callback;
     std::optional<MergeTreeReadTaskCallback> read_task_callback;
-};
-
-struct MergeTreeDataSelectAnalysisResult
-{
-    std::variant<std::exception_ptr, ReadFromMergeTree::AnalysisResult> result;
-
-    bool error() const;
-    size_t marks() const;
 };
 
 }

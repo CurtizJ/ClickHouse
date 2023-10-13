@@ -42,9 +42,6 @@ using ReadInOrderOptimizerPtr = std::shared_ptr<const ReadInOrderOptimizer>;
 class Cluster;
 using ClusterPtr = std::shared_ptr<Cluster>;
 
-struct MergeTreeDataSelectAnalysisResult;
-using MergeTreeDataSelectAnalysisResultPtr = std::shared_ptr<MergeTreeDataSelectAnalysisResult>;
-
 struct PrewhereInfo
 {
     /// Actions for row level security filter. Applied separately before prewhere_actions.

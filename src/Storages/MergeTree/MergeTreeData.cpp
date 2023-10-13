@@ -6620,9 +6620,6 @@ bool MergeTreeData::canUseParallelReplicasBasedOnPKAnalysis(
         query_context,
         query_context->getSettingsRef().max_threads);
 
-    if (result_ptr->error())
-        std::rethrow_exception(std::get<std::exception_ptr>(result_ptr->result));
-
     LOG_TRACE(log, "Estimated number of granules to read is {}", result_ptr->marks());
 
     bool decision = result_ptr->marks() >= query_context->getSettingsRef().parallel_replicas_min_number_of_granules_to_enable;

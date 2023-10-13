@@ -8,7 +8,6 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/KeyCondition.h>
 #include <Storages/MergeTree/MergeTreeDataPartUUID.h>
-#include <Storages/MergeTree/StorageFromMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndexInverted.h>
 #include <Storages/ReadInOrderOptimizer.h>
 #include <Storages/VirtualColumnUtils.h>
@@ -941,7 +940,7 @@ static void selectColumnNames(
     }
 }
 
-MergeTreeDataSelectAnalysisResultPtr MergeTreeDataSelectExecutor::estimateNumMarksToRead(
+ReadFromMergeTree::AnalysisResultPtr MergeTreeDataSelectExecutor::estimateNumMarksToRead(
     MergeTreeData::DataPartsVector parts,
     const PrewhereInfoPtr & prewhere_info,
     const Names & column_names_to_return,
@@ -955,8 +954,7 @@ MergeTreeDataSelectAnalysisResultPtr MergeTreeDataSelectExecutor::estimateNumMar
 {
     size_t total_parts = parts.size();
     if (total_parts == 0)
-        return std::make_shared<MergeTreeDataSelectAnalysisResult>(
-            MergeTreeDataSelectAnalysisResult{.result = ReadFromMergeTree::AnalysisResult()});
+        return std::make_shared<ReadFromMergeTree::AnalysisResult>();
 
     Names real_column_names;
     Names virt_column_names;
@@ -995,7 +993,7 @@ QueryPlanStepPtr MergeTreeDataSelectExecutor::readFromParts(
     const UInt64 max_block_size,
     const size_t num_streams,
     std::shared_ptr<PartitionIdToMaxBlock> max_block_numbers_to_read,
-    MergeTreeDataSelectAnalysisResultPtr merge_tree_select_result_ptr,
+    ReadFromMergeTree::AnalysisResultPtr merge_tree_select_result_ptr,
     bool enable_parallel_reading) const
 {
     /// If merge_tree_select_result_ptr != nullptr, we use analyzed result so parts will always be empty.
