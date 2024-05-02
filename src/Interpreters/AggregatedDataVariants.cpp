@@ -232,6 +232,21 @@ bool AggregatedDataVariants::isLowCardinality() const
     }
 }
 
+bool AggregatedDataVariants::isSparse() const
+{
+    switch (type)
+    {
+    #define M(NAME) \
+        case Type::NAME: \
+            return true;
+
+        APPLY_FOR_SPARSE_VARIANTS(M)
+    #undef M
+        default:
+            return false;
+    }
+}
+
 HashMethodContextPtr AggregatedDataVariants::createCache(Type type, const HashMethodContext::Settings & settings)
 {
     switch (type)

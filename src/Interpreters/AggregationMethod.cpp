@@ -1,4 +1,5 @@
 #include <Interpreters/AggregationMethod.h>
+#include "Common/logger_useful.h"
 
 namespace DB
 {
@@ -196,6 +197,7 @@ void AggregationMethodSerialized<TData, nullable, prealloc>::insertKeyIntoColumn
     for (auto & column : key_columns)
         pos = column->deserializeAndInsertFromArena(pos);
 }
+
 template struct AggregationMethodSerialized<AggregatedDataWithStringKey>;
 template struct AggregationMethodSerialized<AggregatedDataWithStringKeyTwoLevel>;
 template struct AggregationMethodSerialized<AggregatedDataWithStringKeyHash64>;
@@ -211,5 +213,25 @@ template struct AggregationMethodSerialized<AggregatedDataWithStringKeyHash64, f
 template struct AggregationMethodSerialized<AggregatedDataWithStringKey, true, true>;
 template struct AggregationMethodSerialized<AggregatedDataWithStringKeyTwoLevel, true, true>;
 template struct AggregationMethodSerialized<AggregatedDataWithStringKeyHash64, true, true>;
+
+template <typename SingleColumnMethod>
+void AggregationMethodSingleSparseColumn<SingleColumnMethod>::insertKeyIntoColumns(const Key & key, std::vector<IColumn *> & key_columns, const Sizes &)
+{
+    if constexpr (std::is_same_v<Key, StringRef>)
+        key_columns[0]->insertData(key.data, key.size);
+    else
+        key_columns[0]->insertData(reinterpret_cast<const char *>(&key), sizeof(key));
+}
+
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt8, AggregatedDataWithNullableUInt8Key, false>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt16, AggregatedDataWithNullableUInt16Key, false>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt32, AggregatedDataWithNullableUInt64Key>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt64, AggregatedDataWithNullableUInt64Key>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodString<AggregatedDataWithNullableStringKey>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodFixedString<AggregatedDataWithNullableStringKey>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt32, AggregatedDataWithNullableUInt64KeyTwoLevel>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt64, AggregatedDataWithNullableUInt64KeyTwoLevel>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodString<AggregatedDataWithNullableStringKeyTwoLevel>>;
+template struct AggregationMethodSingleSparseColumn<AggregationMethodFixedString<AggregatedDataWithNullableStringKeyTwoLevel>>;
 
 }

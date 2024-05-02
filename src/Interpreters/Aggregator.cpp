@@ -2,6 +2,8 @@
 #include <future>
 #include <numeric>
 #include <Poco/Util/Application.h>
+#include "Common/FieldVisitorToString.h"
+#include "Common/Logger.h"
 
 #ifdef OS_LINUX
 #    include <unistd.h>
@@ -770,13 +772,13 @@ AggregatedDataVariants::Type Aggregator::chooseAggregationMethod()
         }
 
         if (size_of_field == 1)
-            return AggregatedDataVariants::Type::key8;
+            return AggregatedDataVariants::Type::sparse_key8;
         if (size_of_field == 2)
-            return AggregatedDataVariants::Type::key16;
+            return AggregatedDataVariants::Type::sparse_key16;
         if (size_of_field == 4)
-            return AggregatedDataVariants::Type::key32;
+            return AggregatedDataVariants::Type::sparse_key32;
         if (size_of_field == 8)
-            return AggregatedDataVariants::Type::key64;
+            return AggregatedDataVariants::Type::sparse_key64;
         if (size_of_field == 16)
             return AggregatedDataVariants::Type::keys128;
         if (size_of_field == 32)
@@ -1574,10 +1576,19 @@ bool Aggregator::executeOnBlock(Columns columns,
         }
         else
         {
-            materialized_columns.push_back(recursiveRemoveSparse(columns.at(keys_positions[i]))->convertToFullColumnIfConst());
+            materialized_columns.push_back(columns.at(keys_positions[i])->convertToFullColumnIfConst());
             key_columns[i] = materialized_columns.back().get();
         }
 
+        if (!result.isSparse())
+        {
+            auto column_no_sparse = recursiveRemoveSparse(key_columns[i]->getPtr());
+            if (column_no_sparse.get() != key_columns[i])
+            {
+                materialized_columns.emplace_back(std::move(column_no_sparse));
+                key_columns[i] = materialized_columns.back().get();
+            }
+        }
 
         if (!result.isLowCardinality())
         {

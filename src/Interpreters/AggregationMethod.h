@@ -316,5 +316,35 @@ using AggregationMethodPreallocSerialized = AggregationMethodSerialized<TData, f
 template <typename TData>
 using AggregationMethodNullablePreallocSerialized = AggregationMethodSerialized<TData, true, true>;
 
+/// Single sparse column.
+template <typename SingleColumnMethod>
+struct AggregationMethodSingleSparseColumn : public SingleColumnMethod
+{
+    using Base = SingleColumnMethod;
+    using Data = typename Base::Data;
+    using Key = typename Base::Key;
+    using Mapped = typename Base::Mapped;
+    using Base::data;
+
+    template <bool use_cache>
+    using BaseStateImpl = typename Base::template StateImpl<use_cache>;
+
+    AggregationMethodSingleSparseColumn() = default;
+
+    template <typename Other>
+    explicit AggregationMethodSingleSparseColumn(const Other & other) : Base(other) {}
+
+    template <bool use_cache>
+    using StateImpl = ColumnsHashing::HashMethodSingleSparseColumn<BaseStateImpl<use_cache>, Mapped, /*consecutive_keys=*/ true>;
+
+    using State = StateImpl<true>;
+    using StateNoCache = StateImpl<false>;
+
+    static const bool low_cardinality_optimization = false;
+
+    std::optional<Sizes> shuffleKeyColumns(std::vector<IColumn *> &, const Sizes &) { return {}; }
+
+    static void insertKeyIntoColumns(const Key & key, std::vector<IColumn *> & key_columns_sparse, const Sizes & key_sizes);
+};
 
 }

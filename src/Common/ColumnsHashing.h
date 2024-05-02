@@ -11,6 +11,7 @@
 #include <Columns/ColumnString.h>
 #include <Columns/ColumnFixedString.h>
 #include <Columns/ColumnLowCardinality.h>
+#include <Columns/ColumnSparse.h>
 
 #include <Core/Defines.h>
 #include <memory>
@@ -235,7 +236,7 @@ struct HashMethodSingleLowCardinalityColumn : public SingleColumnMethod
 {
     using Base = SingleColumnMethod;
 
-    enum class VisitValue
+    enum class VisitValue : UInt8
     {
         Empty = 0,
         Found = 1,
@@ -782,5 +783,177 @@ struct HashMethodHashed
     }
 };
 
+template <typename SingleColumnMethod, typename Mapped, bool consecutive_keys>
+struct HashMethodSingleSparseColumn : public SingleColumnMethod
+{
+    using Base = SingleColumnMethod;
+    using EmplaceResult = columns_hashing_impl::EmplaceResultImpl<Mapped>;
+    using FindResult = columns_hashing_impl::FindResultImpl<Mapped>;
+
+    static constexpr bool has_mapped = !std::is_same_v<Mapped, void>;
+    static constexpr bool has_cheap_key_calculation = Base::has_cheap_key_calculation;
+
+    const ColumnSparse & column_sparse;
+    const IColumn::Offsets & offsets;
+    Int64 current_position = -1;
+
+    enum class LookupValue : UInt8
+    {
+        Empty = 0,
+        Found = 1,
+        NotFound = 2,
+    };
+
+    Mapped mapped_for_default{};
+    LookupValue default_lookup = LookupValue::Empty;
+
+// #ifndef NDEBUG
+    Int64 previous_row = -1;
+// #endif
+
+    static const ColumnSparse & getSparseColumn(const IColumn * column)
+    {
+        const auto * sparse_column = typeid_cast<const ColumnSparse *>(column);
+        if (!sparse_column)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Invalid aggregation key type for HashMethodSingleSparseColumn method. Excepted Sparse, got {}",
+                column->getName());
+        return *sparse_column;
+    }
+
+    HashMethodSingleSparseColumn(
+        const ColumnRawPtrs & key_columns_sparse, const Sizes & key_sizes, const HashMethodContextPtr & context)
+        : Base({getSparseColumn(key_columns_sparse[0]).getValuesPtr().get()}, key_sizes, context)
+        , column_sparse(getSparseColumn(key_columns_sparse[0]))
+        , offsets(column_sparse.getOffsetsData())
+    {
+    }
+
+    ALWAYS_INLINE size_t getIndexAt(size_t row)
+    {
+        if constexpr (consecutive_keys)
+        {
+// #ifndef NDEBUG
+            if (previous_row != -1 && row != static_cast<size_t>(previous_row) + 1)
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "HashMethodSingleSparseColumn expected consecutive rows. Got row: {}, previous_row: {}",
+                    row, previous_row);
+            previous_row = row;
+// #endif
+            if (current_position == -1)
+                current_position = std::lower_bound(offsets.begin(), offsets.end(), row) - offsets.begin();
+
+            /// Position of value in column is the position of offset + 1.
+            if (static_cast<size_t>(current_position) != offsets.size() && offsets[current_position] == row)
+                return ++current_position;
+
+            /// Default value is always at 0 position.
+            return 0;
+        }
+
+        return column_sparse.getValueIndex(row);
+    }
+
+    /// Get the key holder from the key columns for insertion into the hash table.
+    ALWAYS_INLINE auto getKeyHolder(size_t row, Arena & pool) const
+    {
+        return Base::getKeyHolder(column_sparse.getValueIndex(row), pool);
+    }
+
+    template <typename Data>
+    ALWAYS_INLINE EmplaceResult emplaceKey(Data & data, size_t row, Arena & pool)
+    {
+        size_t index = getIndexAt(row);
+        auto key_holder = Base::getKeyHolder(index, pool);
+
+        bool inserted = false;
+        typename Data::LookupResult it;
+
+        if (index == 0)
+        {
+            if (default_lookup != LookupValue::Found)
+            {
+                data.emplace(key_holder, it, inserted);
+                default_lookup = LookupValue::Found;
+
+                if constexpr (has_mapped)
+                {
+                    if (inserted)
+                        new (&it->getMapped()) Mapped();
+
+                    mapped_for_default = it->getMapped();
+                    return EmplaceResult(it->getMapped(), mapped_for_default, inserted);
+                }
+            }
+
+            if constexpr (has_mapped)
+                return EmplaceResult(mapped_for_default, mapped_for_default, inserted);
+            else
+                return EmplaceResult(inserted);
+        }
+
+        data.emplace(key_holder, it, inserted);
+
+        if constexpr (has_mapped)
+        {
+            if (inserted)
+                new (&it->getMapped()) Mapped();
+            return EmplaceResult(it->getMapped(), it->getMapped(), inserted);
+        }
+        else
+        {
+            return EmplaceResult(inserted);
+        }
+    }
+
+    /// Sparse(Nullable(...)) is not supported currently.
+    ALWAYS_INLINE bool isNullAt(size_t) { return false; }
+
+    template <typename Data>
+    ALWAYS_INLINE FindResult findKey(Data & data, size_t row, Arena & pool)
+    {
+        size_t index = getIndexAt(row);
+        auto key_holder = Base::getKeyHolder(index, pool);
+
+        if (index == 0)
+        {
+            if (default_lookup == LookupValue::Empty)
+            {
+                auto it = data.find(keyHolderGetKey(key_holder));
+
+                if (it != nullptr)
+                {
+                    default_lookup = LookupValue::Found;
+                    if constexpr (has_mapped)
+                        mapped_for_default = it->getMapped();
+                }
+                else
+                {
+                    default_lookup = LookupValue::NotFound;
+                }
+            }
+
+            if constexpr (has_mapped)
+                return FindResult(&mapped_for_default, default_lookup == LookupValue::Found, 0);
+            else
+                return FindResult(default_lookup == LookupValue::Found, 0);
+        }
+
+        auto it = data.find(keyHolderGetKey(key_holder));
+
+        if constexpr (has_mapped)
+            return FindResult(it ? &it->getMapped() : nullptr, it != nullptr, 0);
+        else
+            return FindResult(it != nullptr, 0);
+    }
+
+    template <typename Data>
+    ALWAYS_INLINE size_t getHash(const Data & data, size_t row, Arena & pool)
+    {
+        return Base::getHash(data, column_sparse.getValueIndex(row), pool);
+    }
+};
+
 }
+
 }

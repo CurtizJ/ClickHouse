@@ -128,6 +128,14 @@ struct AggregatedDataVariants : private boost::noncopyable
     std::unique_ptr<AggregationMethodKeysFixed<AggregatedDataWithKeys128TwoLevel, false, true>> low_cardinality_keys128_two_level;
     std::unique_ptr<AggregationMethodKeysFixed<AggregatedDataWithKeys256TwoLevel, false, true>> low_cardinality_keys256_two_level;
 
+    /// Support for sparse columns.
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt8, AggregatedDataWithNullableUInt8Key, false>>> sparse_key8;
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt16, AggregatedDataWithNullableUInt16Key, false>>> sparse_key16;
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt32, AggregatedDataWithNullableUInt64Key>>> sparse_key32;
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodOneNumber<UInt64, AggregatedDataWithNullableUInt64Key>>> sparse_key64;
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodString<AggregatedDataWithNullableStringKey>>> sparse_key_string;
+    std::unique_ptr<AggregationMethodSingleSparseColumn<AggregationMethodFixedString<AggregatedDataWithNullableStringKey>>> sparse_key_fixed_string;
+
     /// In this and similar macros, the option without_key is not considered.
     #define APPLY_FOR_AGGREGATED_VARIANTS(M) \
         M(key8,                       false) \
@@ -194,6 +202,12 @@ struct AggregatedDataVariants : private boost::noncopyable
         M(low_cardinality_keys256_two_level, true) \
         M(low_cardinality_key_string_two_level, true) \
         M(low_cardinality_key_fixed_string_two_level, true) \
+        M(sparse_key8, false) \
+        M(sparse_key16, false) \
+        M(sparse_key32, false) \
+        M(sparse_key64, false) \
+        M(sparse_key_string, false) \
+        M(sparse_key_fixed_string, false) \
 
     #define APPLY_FOR_VARIANTS_CONVERTIBLE_TO_TWO_LEVEL(M) \
         M(key32)            \
@@ -239,6 +253,14 @@ struct AggregatedDataVariants : private boost::noncopyable
         M(nullable_prealloc_serialized_hash64) \
         M(low_cardinality_key8) \
         M(low_cardinality_key16) \
+        M(sparse_key8) \
+        M(sparse_key16) \
+        M(sparse_key32) \
+        M(sparse_key64) \
+        M(sparse_key_string) \
+        M(sparse_key_fixed_string) \
+
+    /// TODO: support two level sparse.
 
     /// NOLINTNEXTLINE
     #define APPLY_FOR_VARIANTS_SINGLE_LEVEL(M) \
@@ -288,6 +310,14 @@ struct AggregatedDataVariants : private boost::noncopyable
         M(low_cardinality_key_string_two_level) \
         M(low_cardinality_key_fixed_string_two_level)
 
+    #define APPLY_FOR_SPARSE_VARIANTS(M) \
+        M(sparse_key8) \
+        M(sparse_key16) \
+        M(sparse_key32) \
+        M(sparse_key64) \
+        M(sparse_key_string) \
+        M(sparse_key_fixed_string) \
+
     enum class Type
     {
         EMPTY = 0,
@@ -297,6 +327,7 @@ struct AggregatedDataVariants : private boost::noncopyable
         APPLY_FOR_AGGREGATED_VARIANTS(M)
     #undef M
     };
+
     Type type = Type::EMPTY;
     AggregatedDataVariants();
     ~AggregatedDataVariants();
@@ -311,6 +342,8 @@ struct AggregatedDataVariants : private boost::noncopyable
     bool isConvertibleToTwoLevel() const;
     void convertToTwoLevel();
     bool isLowCardinality() const;
+    bool isSparse() const;
+
     static ColumnsHashing::HashMethodContextPtr createCache(Type type, const ColumnsHashing::HashMethodContext::Settings & settings);
 
 };
