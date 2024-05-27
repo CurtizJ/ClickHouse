@@ -1,4 +1,6 @@
 #include <Processors/TTL/TTLDeleteAlgorithm.h>
+#include <Columns/ColumnConst.h>
+#include <Columns/ColumnsNumber.h>
 
 namespace DB
 {
@@ -22,34 +24,99 @@ void TTLDeleteAlgorithm::execute(Block & block)
     auto ttl_column = executeExpressionAndGetColumn(ttl_expressions.expression, block, description.result_column);
     auto where_column = executeExpressionAndGetColumn(ttl_expressions.where_expression, block, description.where_result_column);
 
-    MutableColumns result_columns;
-    const auto & column_names = block.getNames();
+    if (where_column)
+        where_column = where_column->convertToFullColumnIfConst();
 
-    result_columns.reserve(column_names.size());
-    for (auto it = column_names.begin(); it != column_names.end(); ++it)
+    if (const auto * ttl_const = typeid_cast<const ColumnConst *>(ttl_column.get()))
     {
-        const IColumn * values_column = block.getByName(*it).column.get();
-        MutableColumnPtr result_column = values_column->cloneEmpty();
-        result_column->reserve(block.rows());
-
-        for (size_t i = 0; i < block.rows(); ++i)
-        {
-            UInt32 cur_ttl = getTimestampByIndex(ttl_column.get(), i);
-            bool where_filter_passed = !where_column || where_column->getBool(i);
-
-            if (!isTTLExpired(cur_ttl) || !where_filter_passed)
-            {
-                new_ttl_info.update(cur_ttl);
-                result_column->insertFrom(*values_column, i);
-            }
-            else if (it == column_names.begin())
-                ++rows_removed;
-        }
-
-        result_columns.emplace_back(std::move(result_column));
+        executeConst(block, *ttl_const, where_column.get());
+        return;
     }
 
-    block = block.cloneWithColumns(std::move(result_columns));
+    IColumn::Filter filter(block.rows(), 0U);
+    buildTTLFilter(*ttl_column, filter);
+
+    if (where_column)
+        buildWhereFilter(*where_column, filter);
+
+    applyFilter(block, filter);
+}
+
+void TTLDeleteAlgorithm::executeConst(Block & block, const ColumnConst & ttl_const, const IColumn * where_column)
+{
+    UInt32 ttl_value;
+    if (ttl_const.getDataType() == TypeIndex::UInt16)
+        ttl_value = static_cast<UInt32>(date_lut.fromDayNum(DayNum(ttl_const.getValue<UInt16>())));
+    else if (ttl_const.getDataType() == TypeIndex::UInt32)
+        ttl_value = ttl_const.getValue<UInt32>();
+    else
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected type {} of result TTL column", ttl_const.getName());
+
+    new_ttl_info.update(ttl_value);
+
+    if (!isTTLExpired(ttl_value))
+        return;
+
+    if (where_column)
+    {
+        IColumn::Filter filter(block.rows(), 0U);
+        buildWhereFilter(*where_column, filter);
+        applyFilter(block, filter);
+    }
+    else
+    {
+        rows_removed += block.rows();
+        block = block.cloneEmpty();
+    }
+}
+
+void TTLDeleteAlgorithm::buildTTLFilter(const IColumn & ttl_column, IColumn::Filter & filter)
+{
+    if (const auto * ttl_date = typeid_cast<const ColumnUInt16 *>(&ttl_column))
+    {
+        const auto & ttl_data = ttl_date->getData();
+        for (size_t i = 0; i < filter.size(); ++i)
+        {
+            UInt32 ttl_value = static_cast<UInt32>(date_lut.fromDayNum(DayNum(ttl_data[i])));
+            filter[i] = ttl_value > current_time;
+            new_ttl_info.update(ttl_value);
+        }
+    }
+    else if (const auto * ttl_date_time = typeid_cast<const ColumnUInt32 *>(&ttl_column))
+    {
+        const auto & ttl_data = ttl_date_time->getData();
+        for (size_t i = 0; i < filter.size(); ++i)
+        {
+            filter[i] = ttl_data[i] > current_time;
+            new_ttl_info.update(ttl_data[i]);
+        }
+    }
+    else
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected type {} of result TTL column", ttl_column.getName());
+    }
+}
+
+void TTLDeleteAlgorithm::buildWhereFilter(const IColumn & where_column, IColumn::Filter & filter)
+{
+    if (const auto * where_column_bool = typeid_cast<const ColumnUInt8 *>(&where_column))
+    {
+        for (size_t i = 0; i < filter.size(); ++i)
+            filter[i] |= !where_column_bool->getData()[i];
+    }
+    else
+    {
+        for (size_t i = 0; i < filter.size(); ++i)
+            filter[i] |= !where_column.getBool(i);
+    }
+}
+
+void TTLDeleteAlgorithm::applyFilter(Block & block, const IColumn::Filter & filter)
+{
+    size_t old_size = block.rows();
+    for (auto & column : block)
+        column.column = column.column->filter(filter, -1);
+    rows_removed += old_size - block.rows();
 }
 
 void TTLDeleteAlgorithm::finalize(const MutableDataPartPtr & data_part) const

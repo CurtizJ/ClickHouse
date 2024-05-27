@@ -52,7 +52,6 @@ protected:
     const bool force;
     TTLInfo new_ttl_info;
 
-private:
     const DateLUTImpl & date_lut;
 };
 

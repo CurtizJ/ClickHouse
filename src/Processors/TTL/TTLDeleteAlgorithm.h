@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Processors/TTL/ITTLAlgorithm.h>
+#include "Columns/IColumn.h"
 
 namespace DB
 {
@@ -17,6 +18,11 @@ public:
     size_t getNumberOfRemovedRows() const { return rows_removed; }
 
 private:
+    void executeConst(Block & block, const ColumnConst & ttl_const, const IColumn * where_column);
+    void buildTTLFilter(const IColumn & ttl_column, IColumn::Filter & filter);
+    void buildWhereFilter(const IColumn & where_column, IColumn::Filter & filter);
+    void applyFilter(Block & block, const IColumn::Filter & filter);
+
     size_t rows_removed = 0;
 };
 
