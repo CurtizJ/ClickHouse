@@ -181,13 +181,25 @@ static void appendExpression(ActionsDAGPtr & dag, const ActionsDAGPtr & expressi
 
 /// This function builds a common DAG which is a merge of DAGs from Filter and Expression steps chain.
 /// Additionally, build a set of fixed columns.
-void buildSortingDAG(QueryPlan::Node & node, ActionsDAGPtr & dag, FixedColumns & fixed_columns, size_t & limit)
+void buildSortingDAG(QueryPlan::Node & node, ActionsDAGPtr & dag, FixedColumns & fixed_columns, size_t & limit, bool & optimize_sorting)
 {
     IQueryPlanStep * step = node.step.get();
     if (auto * reading = typeid_cast<ReadFromMergeTree *>(step))
     {
         if (const auto prewhere_info = reading->getPrewhereInfo())
         {
+            if (optimize_sorting && reading->getContext()->getSettingsRef().optimize_read_in_order_analyze_condition)
+            {
+                for (const auto & score : prewhere_info->conditions_score)
+                {
+                    if (score.good && !score.hasColumnInPrimaryKey())
+                    {
+                        optimize_sorting = false;
+                        return;
+                    }
+                }
+            }
+
             /// Should ignore limit if there is filtering.
             limit = 0;
 
@@ -205,7 +217,7 @@ void buildSortingDAG(QueryPlan::Node & node, ActionsDAGPtr & dag, FixedColumns &
     if (node.children.size() != 1)
         return;
 
-    buildSortingDAG(*node.children.front(), dag, fixed_columns, limit);
+    buildSortingDAG(*node.children.front(), dag, fixed_columns, limit, optimize_sorting);
 
     if (auto * expression = typeid_cast<ExpressionStep *>(step))
     {
@@ -794,11 +806,16 @@ InputOrderInfoPtr buildInputOrderInfo(SortingStep & sorting, QueryPlan::Node & n
         return nullptr;
 
     const auto & description = sorting.getSortDescription();
-    size_t limit = sorting.getLimit();
 
     ActionsDAGPtr dag;
     FixedColumns fixed_columns;
-    buildSortingDAG(node, dag, fixed_columns, limit);
+    size_t limit = sorting.getLimit();
+    bool optimize_sorting = true;
+
+    buildSortingDAG(node, dag, fixed_columns, limit, optimize_sorting);
+
+    if (!optimize_sorting)
+        return nullptr;
 
     if (dag && !fixed_columns.empty())
         enreachFixedColumns(*dag, fixed_columns);
@@ -848,11 +865,13 @@ AggregationInputOrder buildInputOrderInfo(AggregatingStep & aggregating, QueryPl
         return {};
 
     const auto & keys = aggregating.getParams().keys;
-    size_t limit = 0;
 
     ActionsDAGPtr dag;
     FixedColumns fixed_columns;
-    buildSortingDAG(node, dag, fixed_columns, limit);
+    size_t limit = 0;
+    bool optimize_sorting = false;
+
+    buildSortingDAG(node, dag, fixed_columns, limit, optimize_sorting);
 
     if (dag && !fixed_columns.empty())
         enreachFixedColumns(*dag, fixed_columns);

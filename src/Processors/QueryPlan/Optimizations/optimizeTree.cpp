@@ -113,8 +113,20 @@ void optimizeTreeSecondPass(const QueryPlanOptimizationSettings & optimization_s
     Stack stack;
     stack.push_back({.node = &root});
 
+    auto add_next_frame = [&stack](auto & frame)
+    {
+        if (frame.next_child >= frame.node->children.size())
+            return false;
+
+        auto next_frame = Frame{.node = frame.node->children[frame.next_child]};
+        ++frame.next_child;
+        stack.push_back(next_frame);
+        return true;
+    };
+
     while (!stack.empty())
     {
+        auto & frame = stack.back();
         optimizePrimaryKeyCondition(stack);
 
         /// NOTE: optimizePrewhere can modify the stack.
@@ -122,11 +134,19 @@ void optimizeTreeSecondPass(const QueryPlanOptimizationSettings & optimization_s
         if (optimization_settings.optimize_prewhere)
             optimizePrewhere(stack, nodes);
 
+        /// Traverse all children first.
+        if (!add_next_frame(frame))
+            stack.pop_back();
+    }
+
+    stack.push_back({.node = &root});
+
+    while (!stack.empty())
+    {
         auto & frame = stack.back();
 
         if (frame.next_child == 0)
         {
-
             if (optimization_settings.read_in_order)
                 optimizeReadInOrder(*frame.node, nodes);
 
@@ -134,16 +154,8 @@ void optimizeTreeSecondPass(const QueryPlanOptimizationSettings & optimization_s
                 tryDistinctReadInOrder(frame.node);
         }
 
-        /// Traverse all children first.
-        if (frame.next_child < frame.node->children.size())
-        {
-            auto next_frame = Frame{.node = frame.node->children[frame.next_child]};
-            ++frame.next_child;
-            stack.push_back(next_frame);
-            continue;
-        }
-
-        stack.pop_back();
+        if (!add_next_frame(frame))
+            stack.pop_back();
     }
 
     stack.push_back({.node = &root});
@@ -170,14 +182,8 @@ void optimizeTreeSecondPass(const QueryPlanOptimizationSettings & optimization_s
                     optimizeAggregationInOrder(*frame.node, nodes);
             }
 
-            /// Traverse all children first.
-            if (frame.next_child < frame.node->children.size())
-            {
-                auto next_frame = Frame{.node = frame.node->children[frame.next_child]};
-                ++frame.next_child;
-                stack.push_back(next_frame);
+            if (add_next_frame(frame))
                 continue;
-            }
         }
 
         if (optimization_settings.optimize_projection)

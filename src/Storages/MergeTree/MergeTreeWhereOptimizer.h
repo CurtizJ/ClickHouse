@@ -5,6 +5,7 @@
 #include <Storages/SelectQueryInfo.h>
 #include <Storages/MergeTree/RPNBuilder.h>
 #include <Storages/Statistics/Estimator.h>
+#include <Storages/ConditionScore.h>
 
 #include <boost/noncopyable.hpp>
 
@@ -49,6 +50,7 @@ public:
     {
         std::unordered_set<const ActionsDAG::Node *> prewhere_nodes;
         std::list<const ActionsDAG::Node *> prewhere_nodes_list; /// Keep insertion order of moved prewhere_nodes
+        std::list<ConditionScore> prehwere_conditions_score;
         bool fully_moved_to_prewhere = false;
     };
 
@@ -60,39 +62,16 @@ public:
 private:
     struct Condition
     {
-        explicit Condition(RPNBuilderTreeNode node_)
-            : node(std::move(node_))
-        {}
+        explicit Condition(RPNBuilderTreeNode node_) : node(std::move(node_))
+        {
+        }
 
         RPNBuilderTreeNode node;
-
-        UInt64 columns_size = 0;
         NameSet table_columns;
-
-        /// Can condition be moved to prewhere?
-        bool viable = false;
-
-        /// Does the condition presumably have good selectivity?
-        bool good = false;
-
-        /// the lower the better
-        Float64 selectivity = 1.0;
-
-        /// Does the condition contain primary key column?
-        /// If so, it is better to move it further to the end of PREWHERE chain depending on minimal position in PK of any
-        /// column in this condition because this condition have bigger chances to be already satisfied by PK analysis.
-        Int64 min_position_in_primary_key = std::numeric_limits<Int64>::max() - 1;
-
-        auto tuple() const
-        {
-            return std::make_tuple(!viable, !good, -min_position_in_primary_key, selectivity, columns_size, table_columns.size());
-        }
+        ConditionScore score;
 
         /// Is condition a better candidate for moving to PREWHERE?
-        bool operator< (const Condition & rhs) const
-        {
-            return tuple() < rhs.tuple();
-        }
+        bool operator< (const Condition & rhs) const { return score < rhs.score; }
     };
 
     using Conditions = std::list<Condition>;

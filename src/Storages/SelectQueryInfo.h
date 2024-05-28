@@ -9,6 +9,7 @@
 #include <Interpreters/PreparedSets.h>
 #include <Planner/PlannerContext.h>
 #include <QueryPipeline/StreamLocalLimits.h>
+#include <Storages/ConditionScore.h>
 
 #include <memory>
 
@@ -53,7 +54,7 @@ struct PrewhereInfo
     String prewhere_column_name;
     bool remove_prewhere_column = false;
     bool need_filter = false;
-    bool generated_by_optimizer = false;
+    std::list<ConditionScore> conditions_score;
 
     PrewhereInfo() = default;
     explicit PrewhereInfo(ActionsDAGPtr prewhere_actions_, String prewhere_column_name_)
@@ -75,7 +76,7 @@ struct PrewhereInfo
         prewhere_info->prewhere_column_name = prewhere_column_name;
         prewhere_info->remove_prewhere_column = remove_prewhere_column;
         prewhere_info->need_filter = need_filter;
-        prewhere_info->generated_by_optimizer = generated_by_optimizer;
+        prewhere_info->conditions_score = conditions_score;
 
         return prewhere_info;
     }

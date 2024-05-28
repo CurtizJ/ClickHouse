@@ -21,6 +21,7 @@ namespace DB
 /// Conditions like "x = N" are considered good if abs(N) > threshold.
 /// This is used to assume that condition is likely to have good selectivity.
 static constexpr auto threshold = 2;
+static constexpr auto max_good_selectivity = 0.5;
 
 static NameToIndexMap fillNamesPositions(const Names & names)
 {
@@ -134,17 +135,25 @@ MergeTreeWhereOptimizer::FilterActionsOptimizeResult MergeTreeWhereOptimizer::op
 
     std::unordered_set<const ActionsDAG::Node *> prewhere_conditions;
     std::list<const ActionsDAG::Node *> prewhere_conditions_list;
+    std::list<ConditionScore> prehwere_conditions_score;
+
     for (const auto & condition : optimize_result->prewhere_conditions)
     {
         const ActionsDAG::Node * condition_node = condition.node.getDAGNode();
         if (prewhere_conditions.insert(condition_node).second)
+        {
             prewhere_conditions_list.push_back(condition_node);
+            prehwere_conditions_score.push_back(condition.score);
+        }
     }
 
-    return {
+    return
+    {
         .prewhere_nodes = std::move(prewhere_conditions),
         .prewhere_nodes_list = std::move(prewhere_conditions_list),
-        .fully_moved_to_prewhere = optimize_result->where_conditions.empty()};
+        .prehwere_conditions_score = std::move(prehwere_conditions_score),
+        .fully_moved_to_prewhere = optimize_result->where_conditions.empty()
+    };
 }
 
 static void collectColumns(const RPNBuilderTreeNode & node, const NameSet & columns_names, NameSet & result_set, bool & has_invalid_column)
@@ -234,6 +243,10 @@ static bool isConditionGood(const RPNBuilderTreeNode & condition, const NameSet 
         const auto value = output_value.get<Float64>();
         return value < threshold || threshold < value;
     }
+    else if (type == Field::Types::String)
+    {
+        return true;
+    }
 
     return false;
 }
@@ -258,12 +271,14 @@ void MergeTreeWhereOptimizer::analyzeImpl(Conditions & res, const RPNBuilderTree
         bool has_invalid_column = false;
         collectColumns(node, table_columns, cond.table_columns, has_invalid_column);
 
-        cond.columns_size = getColumnsSize(cond.table_columns);
+        ConditionScore score;
 
-        cond.viable =
-            !has_invalid_column &&
+        score.columns_size = getColumnsSize(cond.table_columns);
+        score.num_table_columns = cond.table_columns.size();
+
+        score.viable = !has_invalid_column
             /// Condition depend on some column. Constant expressions are not moved.
-            !cond.table_columns.empty()
+            && !cond.table_columns.empty()
             && !cannotBeMoved(node, where_optimizer_context)
             /// When use final, do not take into consideration the conditions with non-sorting keys. Because final select
             /// need to use all sorting keys, it will cause correctness issues if we filter other columns before final merge.
@@ -273,28 +288,25 @@ void MergeTreeWhereOptimizer::analyzeImpl(Conditions & res, const RPNBuilderTree
             /// Do not move conditions involving all queried columns.
             && cond.table_columns.size() < queried_columns.size();
 
-        if (cond.viable)
-            cond.good = isConditionGood(node, table_columns);
-
         if (where_optimizer_context.use_statistic)
         {
-            cond.good = cond.viable;
-
-            cond.selectivity = estimator.estimateSelectivity(node);
-
-            if (node.getASTNode() != nullptr)
-                LOG_TEST(log, "Condition {} has selectivity {}", node.getASTNode()->dumpTree(), cond.selectivity);
+            score.selectivity = estimator.estimateSelectivity(node);
+            score.good = score.selectivity <= max_good_selectivity;
+            LOG_TEST(log, "Condition {} has selectivity {}", node.getColumnName(), score.good);
+        }
+        else
+        {
+            score.good = isConditionGood(node, table_columns);
         }
 
         if (where_optimizer_context.move_primary_key_columns_to_end_of_prewhere)
         {
-            /// Consider all conditions good with this setting enabled.
-            cond.good = cond.viable;
             /// Find min position in PK of any column that is used in this condition.
-            cond.min_position_in_primary_key = findMinPosition(cond.table_columns, primary_key_names_positions);
-            pk_positions.emplace(cond.min_position_in_primary_key);
+            score.min_position_in_primary_key = findMinPosition(cond.table_columns, primary_key_names_positions);
+            pk_positions.emplace(score.min_position_in_primary_key);
         }
 
+        cond.score = std::move(score);
         res.emplace_back(std::move(cond));
     }
 }
@@ -321,8 +333,8 @@ MergeTreeWhereOptimizer::Conditions MergeTreeWhereOptimizer::analyze(const RPNBu
         }
         for (auto & cond : res)
         {
-            if (cond.min_position_in_primary_key > min_valid_pk_pos)
-                cond.min_position_in_primary_key = std::numeric_limits<Int64>::max() - 1;
+            if (cond.score.min_position_in_primary_key > min_valid_pk_pos)
+                cond.score.min_position_in_primary_key = std::numeric_limits<Int64>::max() - 1;
         }
         LOG_TRACE(log, "The min valid primary key position for moving to the tail of PREWHERE is {}", min_valid_pk_pos);
     }
@@ -363,17 +375,23 @@ std::optional<MergeTreeWhereOptimizer::OptimizeResult> MergeTreeWhereOptimizer::
     /// Move condition and all other conditions depend on the same set of columns.
     auto move_condition = [&](Conditions::iterator cond_it)
     {
+        LOG_TRACE(log, "Condition {} moved to PREWHERE", cond_it->node.getColumnName());
         prewhere_conditions.splice(prewhere_conditions.end(), where_conditions, cond_it);
-        total_size_of_moved_conditions += cond_it->columns_size;
-        total_number_of_moved_columns += cond_it->table_columns.size();
+        total_size_of_moved_conditions += cond_it->score.columns_size;
+        total_number_of_moved_columns += cond_it->score.num_table_columns;
 
         /// Move all other viable conditions that depend on the same set of columns.
         for (auto jt = where_conditions.begin(); jt != where_conditions.end();)
         {
-            if (jt->viable && jt->columns_size == cond_it->columns_size && jt->table_columns == cond_it->table_columns)
+            if (jt->score.viable && jt->score.columns_size == cond_it->score.columns_size && jt->table_columns == cond_it->table_columns)
+            {
+                LOG_TRACE(log, "Condition {} moved to PREWHERE", jt->node.getColumnName());
                 prewhere_conditions.splice(prewhere_conditions.end(), where_conditions, jt++);
+            }
             else
+            {
                 ++jt;
+            }
         }
     };
 
@@ -381,10 +399,9 @@ std::optional<MergeTreeWhereOptimizer::OptimizeResult> MergeTreeWhereOptimizer::
     while (!where_conditions.empty())
     {
         /// Move the best condition to PREWHERE if it is viable.
-
         auto it = std::min_element(where_conditions.begin(), where_conditions.end());
 
-        if (!it->viable)
+        if (!it->score.viable)
             break;
 
         if (!where_optimizer_context.move_all_conditions_to_prewhere)
@@ -394,7 +411,7 @@ std::optional<MergeTreeWhereOptimizer::OptimizeResult> MergeTreeWhereOptimizer::
             {
                 /// If we know size of queried columns use it as threshold. 10% ratio is just a guess.
                 moved_enough = total_size_of_moved_conditions > 0
-                    && (total_size_of_moved_conditions + it->columns_size) * 10 > total_size_of_queried_columns;
+                    && (total_size_of_moved_conditions + it->score.columns_size) * 10 > total_size_of_queried_columns;
             }
             else
             {
