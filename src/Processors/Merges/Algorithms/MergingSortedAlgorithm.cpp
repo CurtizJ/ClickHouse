@@ -187,8 +187,12 @@ IMergingAlgorithm::Status MergingSortedAlgorithm::mergeImpl(TSortingHeap & queue
             if (!limit_reached)
                 status.required_source = source_num;
 
+            LOG_DEBUG(getLogger("KEK"), "optimized...");
+
             return status;
         }
+
+        LOG_DEBUG(getLogger("KEK"), "not optimized...");
 
         merged_data.insertRow(current->all_columns, current->getRow(), current->rows);
 
