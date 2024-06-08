@@ -1004,7 +1004,7 @@ Pipes ReadFromMergeTree::spreadMarkRangesAmongStreamsWithOrderUseLayers(
             pipe.numOutputPorts(),
             sort_description,
             block_size.max_block_size_rows,
-            /*max_block_size_bytes=*/0,
+            /*max_block_size_bytes=*/ 0,
             SortingQueueStrategy::Batch);
 
         pipe.addTransform(std::move(transform));
@@ -1077,7 +1077,6 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithOrder(
     else if (read_in_order_use_layers)
     {
         pipes = spreadMarkRangesAmongStreamsWithOrderUseLayers(std::move(parts_with_ranges), std::move(pipe_creator), num_streams, *input_order_info);
-        need_preliminary_merge = true;
     }
     else
     {

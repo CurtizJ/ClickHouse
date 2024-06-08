@@ -129,17 +129,25 @@ void AggregatingInOrderTransform::InputData::init(const Block & header, const Co
     }
 }
 
-void AggregatingInOrderTransform::OutputData::init(const Block & header, InputData & input)
+void AggregatingInOrderTransform::OutputData::init(const Block & header, InputData & input, ssize_t result_size_hint)
 {
     res_key_columns.resize(params.params.keys_size);
     for (size_t i = 0; i < params.params.keys_size; ++i)
+    {
         res_key_columns[i] = header.safeGetByPosition(i).type->createColumn();
+        if (result_size_hint != -1)
+            res_key_columns[i]->reserve(result_size_hint);
+    }
 
     if (!group_by_key)
     {
         res_aggregate_columns.resize(params.params.aggregates_size);
         for (size_t i = 0; i < params.params.aggregates_size; ++i)
+        {
             res_aggregate_columns[i] = header.safeGetByPosition(i + params.params.keys_size).type->createColumn();
+            if (result_size_hint != -1)
+                res_aggregate_columns[i]->reserve(result_size_hint);
+        }
 
         params.aggregator.addArenasToAggregateColumns(variants, res_aggregate_columns);
     }
@@ -200,12 +208,14 @@ void AggregatingInOrderTransform::consume(InputData & input, OutputData & output
     {
         ssize_t result_size_hint = estimateCardinality(input.num_rows);
         input.init(inputs.front().getHeader(), aggregates_mask, result_size_hint);
+        src_rows += input.num_rows;
     }
 
     /// If we don't have a block we create it and fill with first key
     if (!output.num_rows)
     {
-        output.init(res_header, input);
+        ssize_t result_size_hint = estimateCardinality(input.num_rows);
+        output.init(res_header, input, result_size_hint);
     }
     else if (isNewKey(input, output))
     {
@@ -318,7 +328,6 @@ IProcessor::Status AggregatingInOrderTransform::prepare()
 
     if (auto chunk = input.pull(/*set_not_needed=*/ true))
     {
-        src_rows += chunk.getNumRows();
         src_bytes += chunk.bytes();
         convertToFullIfSparse(chunk);
         current_input.emplace(std::move(chunk), *aggregate_params);

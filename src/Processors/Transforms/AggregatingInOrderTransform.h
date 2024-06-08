@@ -88,7 +88,7 @@ private:
         size_t num_bytes = 0;
         bool need_generate = false;
 
-        void init(const Block & header, InputData & input);
+        void init(const Block & header, InputData & input, ssize_t result_size_hint);
 
         void addToAggregateColumns();
         void createNewState(InputData & input, size_t key_index);
