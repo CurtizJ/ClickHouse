@@ -5,6 +5,7 @@
 #include <Processors/ISimpleTransform.h>
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Processors/Transforms/finalizeChunk.h>
+#include "Columns/IColumn.h"
 
 namespace DB
 {
@@ -41,48 +42,90 @@ public:
 
     void work() override;
 
-    void consume(Chunk chunk);
-
 private:
-    void generate();
-    void finalizeCurrentChunk(Chunk chunk, size_t key_end);
+    struct InputData
+    {
+        InputData(Chunk chunk_, AggregatingTransformParams & params_)
+            : num_rows(chunk_.getNumRows()), all_columns(chunk_.detachColumns()), params(params_)
+        {
+        }
+
+        size_t num_rows;
+        Columns all_columns;
+        AggregatingTransformParams & params;
+
+        size_t current_border = 0;
+        std::vector<size_t> borders;
+
+        Columns materialized_columns;
+        Columns key_columns;
+        ColumnRawPtrs key_columns_raw;
+        Aggregator::AggregateColumns aggregate_columns;
+
+        Aggregator::NestedColumnsHolder nested_columns_holder;
+        Aggregator::AggregateFunctionInstructions aggregate_function_instructions;
+        Aggregator::AggregateColumnsConstData aggregate_columns_data;
+
+        bool isFinished() const { return current_border == borders.size(); }
+        void init(const Block & header, const ColumnsMask & mask, ssize_t result_size_hint);
+    };
+
+    struct OutputData
+    {
+        OutputData(AggregatingTransformParams & params_, AggregatedDataVariants & variants_, bool group_by_key_)
+            : params(params_), variants(variants_), group_by_key(group_by_key_)
+        {
+        }
+
+        AggregatingTransformParams & params;
+        AggregatedDataVariants & variants;
+        bool group_by_key;
+
+        MutableColumns res_key_columns;
+        MutableColumns res_aggregate_columns;
+
+        size_t num_rows = 0;
+        size_t num_bytes = 0;
+        bool need_generate = false;
+
+        void init(const Block & header, InputData & input);
+
+        void addToAggregateColumns();
+        void createNewState(InputData & input, size_t key_index);
+        void executeAggregation(InputData & input, size_t key_begin, size_t key_end, std::atomic_bool & is_cancelled);
+    };
+
+    void generate(OutputData & output);
+    void consume(InputData & input, OutputData & output);
+
+    bool isNewKey(const InputData & input, const OutputData & output);
+    ssize_t estimateCardinality(size_t num_rows) const;
 
     size_t max_block_size;
     size_t max_block_bytes;
-    size_t cur_block_size = 0;
-    size_t cur_block_bytes = 0;
 
-    MutableColumns res_key_columns;
-    MutableColumns res_aggregate_columns;
-
-    AggregatingTransformParamsPtr params;
+    AggregatingTransformParamsPtr aggregate_params;
     ColumnsMask aggregates_mask;
 
     /// For sortBlock()
     SortDescription sort_description;
     SortDescriptionWithPositions group_by_description;
     bool group_by_key = false;
-    Block group_by_block;
-    ColumnRawPtrs key_columns_raw;
 
-    Aggregator::AggregateColumns aggregate_columns;
+    std::optional<InputData> current_input;
+    std::optional<OutputData> current_output;
 
     ManyAggregatedDataPtr many_data;
-    AggregatedDataVariants & variants;
+    AggregatedDataVariants & aggregate_variants;
 
     UInt64 src_rows = 0;
     UInt64 src_bytes = 0;
     UInt64 res_rows = 0;
 
-    bool need_generate = false;
-    bool block_end_reached = false;
-    bool is_consume_started = false;
-    bool is_consume_finished = false;
-
     Block res_header;
-    Chunk current_chunk;
     Chunk to_push_chunk;
 
+    bool is_consume_started = false;
     LoggerPtr log = getLogger("AggregatingInOrderTransform");
 };
 

@@ -454,6 +454,12 @@ MutableColumnPtr ColumnVector<T>::cloneResized(size_t size) const
 }
 
 template <typename T>
+void ColumnVector<T>::getEqualRanges(std::vector<size_t> & equal_range_borders, ssize_t result_size_hint) const
+{
+    return this->getEqualRangesImpl(equal_range_borders, result_size_hint, equals(*this, 1));
+}
+
+template <typename T>
 UInt64 ColumnVector<T>::get64(size_t n [[maybe_unused]]) const
 {
     if constexpr (is_arithmetic_v<T>)

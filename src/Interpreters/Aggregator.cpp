@@ -1426,7 +1426,11 @@ void NO_INLINE Aggregator::executeOnIntervalWithoutKey(
                 data_variants.aggregates_pool);
         else
             inst->batch_that->addBatchSinglePlace(
-                row_begin, row_end, res + inst->state_offset, inst->batch_arguments, data_variants.aggregates_pool);
+                row_begin,
+                row_end,
+                res + inst->state_offset,
+                inst->batch_arguments,
+                data_variants.aggregates_pool);
     }
 }
 
@@ -2249,7 +2253,7 @@ void Aggregator::addArenasToAggregateColumns(
 
 void Aggregator::createStatesAndFillKeyColumnsWithSingleKey(
     AggregatedDataVariants & data_variants,
-    Columns & key_columns,
+    const Columns & key_columns,
     size_t key_row,
     MutableColumns & final_key_columns) const
 {
@@ -2258,9 +2262,7 @@ void Aggregator::createStatesAndFillKeyColumnsWithSingleKey(
     data_variants.without_key = place;
 
     for (size_t i = 0; i < params.keys_size; ++i)
-    {
         final_key_columns[i]->insertFrom(*key_columns[i].get(), key_row);
-    }
 }
 
 Block Aggregator::prepareBlockAndFillWithoutKey(AggregatedDataVariants & data_variants, bool final, bool is_overflows) const

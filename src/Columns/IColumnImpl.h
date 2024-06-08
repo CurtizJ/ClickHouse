@@ -210,4 +210,69 @@ void IColumn::updatePermutationImpl(
     equal_ranges = std::move(new_ranges);
 }
 
+template <typename Equals>
+static void splitSortedByEqualRanges(
+    size_t begin,
+    size_t end,
+    std::vector<size_t> & borders,
+    ssize_t result_size_hint,
+    Equals && equals)
+{
+    struct Range
+    {
+        Range(size_t left_, size_t right_, bool start_of_group_)
+            : left(left_), right(right_), start_of_group(start_of_group_)
+        {
+        }
+
+        size_t left;
+        size_t right;
+        bool start_of_group;
+    };
+
+    std::vector<Range> stack = { Range{begin, end - 1, true} };
+    if (result_size_hint != -1)
+        stack.reserve(result_size_hint);
+
+    while (!stack.empty())
+    {
+        auto range = std::move(stack.back());
+        stack.pop_back();
+
+        if (range.start_of_group)
+            borders.push_back(range.left);
+
+        if (range.left < range.right && !equals(range.left, range.right))
+        {
+            size_t mid = (range.left + range.right) / 2;
+            stack.emplace_back(mid + 1, range.right, !equals(mid, mid + 1));
+            stack.emplace_back(range.left, mid, false);
+        }
+    }
+}
+
+template <typename Equals>
+void IColumn::getEqualRangesImpl(
+    std::vector<size_t> & equal_range_borders,
+    ssize_t result_size_hint,
+    Equals && equals) const
+{
+    std::vector<size_t> new_range_borders;
+    if (result_size_hint != -1)
+        new_range_borders.reserve(result_size_hint);
+
+    for (size_t i = 1; i < equal_range_borders.size(); ++i)
+    {
+        splitSortedByEqualRanges(
+            equal_range_borders[i - 1],
+            equal_range_borders[i],
+            new_range_borders,
+            result_size_hint,
+            equals);
+    }
+
+    new_range_borders.push_back(size());
+    equal_range_borders = std::move(new_range_borders);
+}
+
 }

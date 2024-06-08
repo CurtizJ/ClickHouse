@@ -1049,6 +1049,7 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithOrder(
     else if (read_in_order_use_layers)
     {
         pipes = spreadMarkRangesAmongStreamsWithOrderUseLayers(std::move(parts_with_ranges), std::move(pipe_creator), num_streams, *input_order_info);
+        need_preliminary_merge = true;
     }
     else
     {

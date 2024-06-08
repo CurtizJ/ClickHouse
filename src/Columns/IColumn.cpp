@@ -83,6 +83,15 @@ ColumnPtr IColumn::createWithOffsets(const Offsets & offsets, const ColumnConst 
     return res;
 }
 
+void IColumn::getEqualRanges(std::vector<size_t> & equal_range_borders, ssize_t result_size_hint) const
+{
+    return getEqualRangesImpl(equal_range_borders, result_size_hint,
+        [this](size_t lhs, size_t rhs)
+        {
+            return compareAt(lhs, rhs, *this, 1) == 0;
+        });
+}
+
 size_t IColumn::estimateCardinalityInPermutedRange(const IColumn::Permutation & /*permutation*/, const EqualRange & equal_range) const
 {
     return equal_range.size();

@@ -407,6 +407,8 @@ public:
                         "or for Array or Tuple, containing them.");
     }
 
+    virtual void getEqualRanges(std::vector<size_t> & equal_range_borders, ssize_t result_size_hint) const;
+
     /// Estimate the cardinality (number of unique values) of the values in 'equal_range' after permutation, formally: |{ column[permutation[r]] : r in equal_range }|.
     virtual size_t estimateCardinalityInPermutedRange(const Permutation & permutation, const EqualRange & equal_range) const;
 
@@ -633,6 +635,12 @@ protected:
         Equals equals,
         Sort full_sort,
         PartialSort partial_sort) const;
+
+    template <typename Equals>
+    void getEqualRangesImpl(
+        std::vector<size_t> & equal_range_borders,
+        ssize_t result_size_hint,
+        Equals && equals) const;
 };
 
 using ColumnPtr = IColumn::Ptr;
