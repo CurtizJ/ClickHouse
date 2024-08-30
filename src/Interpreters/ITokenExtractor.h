@@ -4,6 +4,7 @@
 
 #include <Interpreters/BloomFilter.h>
 #include <Interpreters/GinFilter.h>
+#include <Common/UTF8Helpers.h>
 
 namespace DB
 {
@@ -148,21 +149,35 @@ class ITokenExtractorHelper : public ITokenExtractor
 
 
 /// Parser extracting all ngrams from string.
-struct NgramTokenExtractor final : public ITokenExtractorHelper<NgramTokenExtractor>
+template <typename Derived>
+struct NgramTokenExtractorBase : public ITokenExtractorHelper<Derived>
 {
-    explicit NgramTokenExtractor(size_t n_) : n(n_) {}
+    explicit NgramTokenExtractorBase(size_t n_) : n(n_) {}
 
+    bool nextInStringLike(const char * data, size_t length, size_t * pos, String & token) const override;
+    size_t getN() const { return n; }
+
+protected:
+    virtual size_t getCharSize(UInt8 first_octet) const = 0;
+    size_t n;
+};
+
+struct NgramTokenExtractorUTF8 final : public NgramTokenExtractorBase<NgramTokenExtractorUTF8>
+{
+    explicit NgramTokenExtractorUTF8(size_t n_) : NgramTokenExtractorBase(n_) {}
     static const char * getName() { return "ngrambf_v1"; }
 
     bool nextInString(const char * data, size_t length, size_t *  __restrict pos, size_t * __restrict token_start, size_t * __restrict token_length) const override;
+    size_t getCharSize(UInt8 first_octet) const override { return UTF8::seqLength(first_octet); }
+};
 
-    bool nextInStringLike(const char * data, size_t length, size_t * pos, String & token) const override;
+struct NgramTokenExtractorASCII final : public NgramTokenExtractorBase<NgramTokenExtractorASCII>
+{
+    explicit NgramTokenExtractorASCII(size_t n_) : NgramTokenExtractorBase(n_) {}
+    static const char * getName() { return "ngrambf_v1"; }
 
-    size_t getN() const { return n; }
-
-private:
-
-    size_t n;
+    bool nextInString(const char * data, size_t length, size_t *  __restrict pos, size_t * __restrict token_start, size_t * __restrict token_length) const override;
+    size_t getCharSize(UInt8) const override { return 1; }
 };
 
 /// Parser extracting tokens (sequences of numbers and ascii letters).

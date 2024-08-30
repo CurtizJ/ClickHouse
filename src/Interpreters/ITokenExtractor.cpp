@@ -19,7 +19,7 @@
 namespace DB
 {
 
-bool NgramTokenExtractor::nextInString(const char * data, size_t length, size_t * __restrict pos, size_t * __restrict token_start, size_t * __restrict token_length) const
+bool NgramTokenExtractorUTF8::nextInString(const char * data, size_t length, size_t * __restrict pos, size_t * __restrict token_start, size_t * __restrict token_length) const
 {
     *token_start = *pos;
     *token_length = 0;
@@ -33,7 +33,19 @@ bool NgramTokenExtractor::nextInString(const char * data, size_t length, size_t 
     return code_points == n;
 }
 
-bool NgramTokenExtractor::nextInStringLike(const char * data, size_t length, size_t * pos, String & token) const
+bool NgramTokenExtractorASCII::nextInString(const char *, size_t length, size_t * __restrict pos, size_t * __restrict token_start, size_t * __restrict token_length) const
+{
+    if (*pos + n > length)
+        return false;
+
+    *token_start = *pos;
+    *token_length = n;
+    ++*pos;
+    return true;
+}
+
+template <typename Derived>
+bool NgramTokenExtractorBase<Derived>::nextInStringLike(const char * data, size_t length, size_t * pos, String & token) const
 {
     token.clear();
 
@@ -63,7 +75,7 @@ bool NgramTokenExtractor::nextInStringLike(const char * data, size_t length, siz
         }
         else
         {
-            const size_t sz = UTF8::seqLength(static_cast<UInt8>(data[i]));
+            const size_t sz = static_cast<const Derived *>(this)->getCharSize(static_cast<UInt8>(data[i]));
             for (size_t j = 0; j < sz; ++j)
                 token += data[i + j];
             i += sz;
@@ -73,7 +85,7 @@ bool NgramTokenExtractor::nextInStringLike(const char * data, size_t length, siz
 
         if (code_points == n)
         {
-            *pos += UTF8::seqLength(static_cast<UInt8>(data[*pos]));
+            *pos += static_cast<const Derived *>(this)->getCharSize(static_cast<UInt8>(data[*pos]));
             return true;
         }
     }

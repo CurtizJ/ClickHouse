@@ -738,10 +738,21 @@ MergeTreeIndexConditionPtr MergeTreeIndexBloomFilterText::createIndexCondition(
     return std::make_shared<MergeTreeConditionBloomFilterText>(filter_dag, context, index.sample_block, params, token_extractor.get());
 }
 
+std::unique_ptr<ITokenExtractor> createTokenizer(const String & encoding, size_t n)
+{
+    if (encoding == "utf8")
+        return std::make_unique<NgramTokenExtractorUTF8>(n);
+
+    if (encoding == "ascii")
+        return std::make_unique<NgramTokenExtractorASCII>(n);
+
+    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected enconding ({}) for ngrambf_v1 index", encoding);
+}
+
 MergeTreeIndexPtr bloomFilterIndexTextCreator(
     const IndexDescription & index)
 {
-    if (index.type == NgramTokenExtractor::getName())
+    if (index.type == NgramTokenExtractorUTF8::getName())
     {
         size_t n = index.arguments[0].safeGet<size_t>();
         BloomFilterParameters params(
@@ -749,7 +760,11 @@ MergeTreeIndexPtr bloomFilterIndexTextCreator(
             index.arguments[2].safeGet<size_t>(),
             index.arguments[3].safeGet<size_t>());
 
-        auto tokenizer = std::make_unique<NgramTokenExtractor>(n);
+        std::unique_ptr<ITokenExtractor> tokenizer;
+        if (index.arguments.size() == 5)
+            tokenizer = createTokenizer(index.arguments[4].safeGet<String>(), n);
+        else
+            tokenizer = std::make_unique<NgramTokenExtractorUTF8>(n);
 
         return std::make_shared<MergeTreeIndexBloomFilterText>(index, params, std::move(tokenizer));
     }
@@ -792,10 +807,10 @@ void bloomFilterIndexTextValidator(const IndexDescription & index, bool /*attach
                 "Ngram and token bloom filter indexes can only be used with column types `String`, `FixedString`, `LowCardinality(String)`, `LowCardinality(FixedString)`, `Array(String)` or `Array(FixedString)`");
     }
 
-    if (index.type == NgramTokenExtractor::getName())
+    if (index.type == NgramTokenExtractorUTF8::getName())
     {
-        if (index.arguments.size() != 4)
-            throw Exception(ErrorCodes::INCORRECT_QUERY, "`ngrambf` index must have exactly 4 arguments.");
+        if (index.arguments.size() < 4 || index.arguments.size() > 5)
+            throw Exception(ErrorCodes::INCORRECT_QUERY, "`ngrambf` index must have 3 or 4 arguments.");
     }
     else if (index.type == SplitTokenExtractor::getName())
     {
@@ -807,11 +822,15 @@ void bloomFilterIndexTextValidator(const IndexDescription & index, bool /*attach
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown index type: {}", backQuote(index.name));
     }
 
-    assert(index.arguments.size() >= 3);
+    chassert(index.arguments.size() >= 3);
 
-    for (const auto & arg : index.arguments)
-        if (arg.getType() != Field::Types::UInt64)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "All parameters to *bf_v1 index must be unsigned integers");
+    // for (size_t i = 0; i < 4; ++i)
+    //     if (index.arguments[i].getType() != Field::Types::UInt64)
+    //         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Parameter {} of *bf_v1 index must be unsigned integer", i + 1);
+
+    // if (index.arguments.size() == 4)
+    //     if (index.arguments[3].getType() != Field::Types::String)
+    //         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Parameter 4 of *bf_v1 index must be string");
 
     /// Just validate
     BloomFilterParameters params(

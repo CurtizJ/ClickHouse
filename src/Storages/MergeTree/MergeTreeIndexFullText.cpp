@@ -783,7 +783,7 @@ MergeTreeIndexPtr fullTextIndexCreator(
     /// Use SplitTokenExtractor when n is 0, otherwise use NgramTokenExtractor
     if (n > 0)
     {
-        auto tokenizer = std::make_unique<NgramTokenExtractor>(n);
+        auto tokenizer = std::make_unique<NgramTokenExtractorUTF8>(n);
         return std::make_shared<MergeTreeIndexFullText>(index, params, std::move(tokenizer));
     }
     else

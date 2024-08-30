@@ -83,7 +83,7 @@ public:
             arguments[1].column->get(0, ngram_argument_value);
             auto ngram_value = ngram_argument_value.safeGet<UInt64>();
 
-            NgramTokenExtractor extractor(ngram_value);
+            NgramTokenExtractorUTF8 extractor(ngram_value);
 
             auto result_column_string = ColumnString::create();
 
