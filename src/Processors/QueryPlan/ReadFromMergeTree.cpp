@@ -1509,20 +1509,8 @@ static void buildIndexes(
 
     const auto & settings = context->getSettingsRef();
 
-    indexes.emplace(
-        ReadFromMergeTree::Indexes{KeyCondition{filter_actions_dag, context, primary_key_column_names, primary_key.expression}});
-
-    if (metadata_snapshot->hasPartitionKey())
-    {
-        const auto & partition_key = metadata_snapshot->getPartitionKey();
-        auto minmax_columns_names = MergeTreeData::getMinMaxColumnsNames(partition_key);
-        auto minmax_expression_actions = MergeTreeData::getMinMaxExpr(partition_key, ExpressionActionsSettings::fromContext(context));
-
-        indexes->minmax_idx_condition.emplace(filter_actions_dag, context, minmax_columns_names, minmax_expression_actions);
-        indexes->partition_pruner.emplace(metadata_snapshot, filter_actions_dag, context, false /* strict */);
-    }
-
-    indexes->part_values = MergeTreeDataSelectExecutor::filterPartsByVirtualColumns(metadata_snapshot, data, parts, filter_actions_dag, context);
+    indexes.emplace(ReadFromMergeTree::Indexes{KeyCondition{filter_actions_dag, context, primary_key_column_names, primary_key.expression}});
+    indexes->part_pruner.applyFilters(filter_actions_dag, data, parts, metadata_snapshot, context);
     MergeTreeDataSelectExecutor::buildKeyConditionFromPartOffset(indexes->part_offset_condition, filter_actions_dag, context);
 
     indexes->use_skip_indexes = settings[Setting::use_skip_indexes];
@@ -1533,7 +1521,6 @@ static void buildIndexes(
         return;
 
     const auto & all_indexes = metadata_snapshot->getSecondaryIndices();
-
     if (all_indexes.empty())
         return;
 
@@ -1703,7 +1690,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
     if (!indexes)
         buildIndexes(indexes, query_info_.filter_actions_dag.get(), data, parts, mutations_snapshot, context_, query_info_, metadata_snapshot, log);
 
-    if (indexes->part_values && indexes->part_values->empty())
+    if (indexes->part_pruner.canPruneAllParts())
         return std::make_shared<AnalysisResult>(std::move(result));
 
     if (indexes->key_condition.alwaysUnknownOrTrue())
@@ -1714,7 +1701,8 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
                 "Primary key ({}) is not used and setting 'force_primary_key' is set",
                 fmt::join(primary_key_column_names, ", "));
         }
-    } else
+    }
+    else
     {
         ProfileEvents::increment(ProfileEvents::SelectQueriesWithPrimaryKeyUsage);
     }
@@ -1733,10 +1721,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
     {
         MergeTreeDataSelectExecutor::filterPartsByPartition(
             parts,
-            indexes->partition_pruner,
-            indexes->minmax_idx_condition,
-            indexes->part_values,
-            metadata_snapshot,
+            indexes->part_pruner,
             data,
             context_,
             max_block_numbers_to_read.get(),

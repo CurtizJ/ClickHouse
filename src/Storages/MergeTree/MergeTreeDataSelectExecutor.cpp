@@ -42,6 +42,7 @@
 #include <Core/Settings.h>
 #include <Common/CurrentMetrics.h>
 #include <Common/FailPoint.h>
+#include "Storages/MergeTree/PartPruner.h"
 #include <base/sleep.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeEnum.h>
@@ -511,110 +512,72 @@ void MergeTreeDataSelectExecutor::buildKeyConditionFromPartOffset(
         {}});
 }
 
-std::optional<std::unordered_set<String>> MergeTreeDataSelectExecutor::filterPartsByVirtualColumns(
-    const StorageMetadataPtr & metadata_snapshot,
-    const MergeTreeData & data,
-    const MergeTreeData::DataPartsVector & parts,
-    const ActionsDAG * filter_dag,
-    ContextPtr context)
-{
-    if (!filter_dag)
-        return {};
-
-    auto sample = data.getHeaderWithVirtualsForFilter(metadata_snapshot);
-    auto dag = VirtualColumnUtils::splitFilterDagForAllowedInputs(filter_dag->getOutputs().at(0), &sample);
-    if (!dag)
-        return {};
-
-    auto virtual_columns_block = data.getBlockWithVirtualsForFilter(metadata_snapshot, parts);
-    VirtualColumnUtils::filterBlockWithExpression(VirtualColumnUtils::buildFilterExpression(std::move(*dag), context), virtual_columns_block);
-    return VirtualColumnUtils::extractSingleValueFromBlock<String>(virtual_columns_block, "_part");
-}
-
 void MergeTreeDataSelectExecutor::filterPartsByPartition(
     MergeTreeData::DataPartsVector & parts,
-    const std::optional<PartitionPruner> & partition_pruner,
-    const std::optional<KeyCondition> & minmax_idx_condition,
-    const std::optional<std::unordered_set<String>> & part_values,
-    const StorageMetadataPtr & metadata_snapshot,
-    const MergeTreeData & data,
+    PartPruner & part_pruner,
+    const MergeTreeData & data_,
     const ContextPtr & context,
     const PartitionIdToMaxBlock * max_block_numbers_to_read,
-    LoggerPtr log,
+    LoggerPtr log_,
     ReadFromMergeTree::IndexStats & index_stats)
 {
     const Settings & settings = context->getSettingsRef();
-    DataTypes minmax_columns_types;
 
-    if (metadata_snapshot->hasPartitionKey())
+    if (settings[Setting::force_index_by_date] && part_pruner.isUseless())
     {
-        chassert(minmax_idx_condition && partition_pruner);
-        const auto & partition_key = metadata_snapshot->getPartitionKey();
-        minmax_columns_types = MergeTreeData::getMinMaxColumnsTypes(partition_key);
-
-        if (settings[Setting::force_index_by_date] && (minmax_idx_condition->alwaysUnknownOrTrue() && partition_pruner->isUseless()))
-        {
-            auto minmax_columns_names = MergeTreeData::getMinMaxColumnsNames(partition_key);
-            throw Exception(ErrorCodes::INDEX_NOT_USED,
-                "Neither MinMax index by columns ({}) nor partition expr is used and setting 'force_index_by_date' is set",
-                fmt::join(minmax_columns_names, ", "));
-        }
+        throw Exception(ErrorCodes::INDEX_NOT_USED,
+            "Neither MinMax nor partition expr is used and setting 'force_index_by_date' is set");
     }
 
     auto query_context = context->hasQueryContext() ? context->getQueryContext() : context;
     QueryStatusPtr query_status = context->getProcessListElement();
 
-    PartFilterCounters part_filter_counters;
     if (query_context->getSettingsRef()[Setting::allow_experimental_query_deduplication])
         selectPartsToReadWithUUIDFilter(
             parts,
-            part_values,
-            data.getPinnedPartUUIDs(),
-            minmax_idx_condition,
-            minmax_columns_types,
-            partition_pruner,
+            data_.getPinnedPartUUIDs(),
+            part_pruner,
             max_block_numbers_to_read,
             query_context,
-            part_filter_counters,
-            log);
+            log_);
     else
         selectPartsToRead(
             parts,
-            part_values,
-            minmax_idx_condition,
-            minmax_columns_types,
-            partition_pruner,
+            part_pruner,
             max_block_numbers_to_read,
-            part_filter_counters,
             query_status);
 
-    index_stats.emplace_back(ReadFromMergeTree::IndexStat{
-        .type = ReadFromMergeTree::IndexType::None,
-        .num_parts_after = part_filter_counters.num_initial_selected_parts,
-        .num_granules_after = part_filter_counters.num_initial_selected_granules});
+    // index_stats.emplace_back(ReadFromMergeTree::IndexStat{
+    //     .type = ReadFromMergeTree::IndexType::None,
+    //     .num_parts_after = part_filter_counters.num_initial_selected_parts,
+    //     .num_granules_after = part_filter_counters.num_initial_selected_granules});
 
-    if (minmax_idx_condition)
-    {
-        auto description = minmax_idx_condition->getDescription();
-        index_stats.emplace_back(ReadFromMergeTree::IndexStat{
-            .type = ReadFromMergeTree::IndexType::MinMax,
-            .condition = std::move(description.condition),
-            .used_keys = std::move(description.used_keys),
-            .num_parts_after = part_filter_counters.num_parts_after_minmax,
-            .num_granules_after = part_filter_counters.num_granules_after_minmax});
-        LOG_DEBUG(log, "MinMax index condition: {}", minmax_idx_condition->toString());
-    }
+    // if (minmax_idx_condition)
+    // {
+    //     auto description = minmax_idx_condition->getDescription();
+    //     index_stats.emplace_back(ReadFromMergeTree::IndexStat{
+    //         .type = ReadFromMergeTree::IndexType::MinMax,
+    //         .condition = std::move(description.condition),
+    //         .used_keys = std::move(description.used_keys),
+    //         .num_parts_after = part_filter_counters.num_parts_after_minmax,
+    //         .num_granules_after = part_filter_counters.num_granules_after_minmax});
 
-    if (partition_pruner)
-    {
-        auto description = partition_pruner->getKeyCondition().getDescription();
-        index_stats.emplace_back(ReadFromMergeTree::IndexStat{
-            .type = ReadFromMergeTree::IndexType::Partition,
-            .condition = std::move(description.condition),
-            .used_keys = std::move(description.used_keys),
-            .num_parts_after = part_filter_counters.num_parts_after_partition_pruner,
-            .num_granules_after = part_filter_counters.num_granules_after_partition_pruner});
-    }
+    //     LOG_DEBUG(log, "MinMax index condition: {}", minmax_idx_condition->toString());
+    // }
+
+    // if (partition_pruner)
+    // {
+    //     auto description = partition_pruner->getKeyCondition().getDescription();
+    //     index_stats.emplace_back(ReadFromMergeTree::IndexStat{
+    //         .type = ReadFromMergeTree::IndexType::Partition,
+    //         .condition = std::move(description.condition),
+    //         .used_keys = std::move(description.used_keys),
+    //         .num_parts_after = part_filter_counters.num_parts_after_partition_pruner,
+    //         .num_granules_after = part_filter_counters.num_granules_after_partition_pruner});
+    // }
+
+    UNUSED(index_stats);
+    UNUSED(log_);
 }
 
 RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipIndexes(
@@ -1568,12 +1531,8 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingMergedIndex(
 
 void MergeTreeDataSelectExecutor::selectPartsToRead(
     MergeTreeData::DataPartsVector & parts,
-    const std::optional<std::unordered_set<String>> & part_values,
-    const std::optional<KeyCondition> & minmax_idx_condition,
-    const DataTypes & minmax_columns_types,
-    const std::optional<PartitionPruner> & partition_pruner,
+    PartPruner & part_pruner,
     const PartitionIdToMaxBlock * max_block_numbers_to_read,
-    PartFilterCounters & counters,
     QueryStatusPtr query_status)
 {
     MergeTreeData::DataPartsVector prev_parts;
@@ -1590,9 +1549,6 @@ void MergeTreeDataSelectExecutor::selectPartsToRead(
         });
 
         const auto * part = part_or_projection->isProjectionPart() ? part_or_projection->getParentPart() : part_or_projection.get();
-        if (part_values && part_values->find(part->name) == part_values->end())
-            continue;
-
         if (part->isEmpty())
             continue;
 
@@ -1607,39 +1563,17 @@ void MergeTreeDataSelectExecutor::selectPartsToRead(
         if (num_granules && part->index_granularity.hasFinalMark())
             --num_granules;
 
-        counters.num_initial_selected_parts += 1;
-        counters.num_initial_selected_granules += num_granules;
-
-        if (minmax_idx_condition && !minmax_idx_condition->checkInHyperrectangle(
-                part->minmax_idx->hyperrectangle, minmax_columns_types).can_be_true)
-            continue;
-
-        counters.num_parts_after_minmax += 1;
-        counters.num_granules_after_minmax += num_granules;
-
-        if (partition_pruner)
-        {
-            if (partition_pruner->canBePruned(*part))
-                continue;
-        }
-
-        counters.num_parts_after_partition_pruner += 1;
-        counters.num_granules_after_partition_pruner += num_granules;
-
-        parts.push_back(part_or_projection);
+        if (!part_pruner.canBePruned(*part, num_granules))
+            parts.push_back(part_or_projection);
     }
 }
 
 void MergeTreeDataSelectExecutor::selectPartsToReadWithUUIDFilter(
     MergeTreeData::DataPartsVector & parts,
-    const std::optional<std::unordered_set<String>> & part_values,
     MergeTreeData::PinnedPartUUIDsPtr pinned_part_uuids,
-    const std::optional<KeyCondition> & minmax_idx_condition,
-    const DataTypes & minmax_columns_types,
-    const std::optional<PartitionPruner> & partition_pruner,
+    PartPruner & part_pruner,
     const PartitionIdToMaxBlock * max_block_numbers_to_read,
     ContextPtr query_context,
-    PartFilterCounters & counters,
     LoggerPtr log)
 {
     /// process_parts prepare parts that have to be read for the query,
@@ -1655,9 +1589,6 @@ void MergeTreeDataSelectExecutor::selectPartsToReadWithUUIDFilter(
         for (const auto & part_or_projection : prev_parts)
         {
             const auto * part = part_or_projection->isProjectionPart() ? part_or_projection->getParentPart() : part_or_projection.get();
-            if (part_values && part_values->find(part->name) == part_values->end())
-                continue;
-
             if (part->isEmpty())
                 continue;
 
@@ -1676,25 +1607,8 @@ void MergeTreeDataSelectExecutor::selectPartsToReadWithUUIDFilter(
             if (num_granules && part->index_granularity.hasFinalMark())
                 --num_granules;
 
-            counters.num_initial_selected_parts += 1;
-            counters.num_initial_selected_granules += num_granules;
-
-            if (minmax_idx_condition
-                && !minmax_idx_condition->checkInHyperrectangle(part->minmax_idx->hyperrectangle, minmax_columns_types)
-                        .can_be_true)
+            if (part_pruner.canBePruned(*part, num_granules))
                 continue;
-
-            counters.num_parts_after_minmax += 1;
-            counters.num_granules_after_minmax += num_granules;
-
-            if (partition_pruner)
-            {
-                if (partition_pruner->canBePruned(*part))
-                    continue;
-            }
-
-            counters.num_parts_after_partition_pruner += 1;
-            counters.num_granules_after_partition_pruner += num_granules;
 
             /// populate UUIDs and exclude ignored parts if enabled
             if (part->uuid != UUIDHelpers::Nil && pinned_part_uuids->contains(part->uuid))
@@ -1731,7 +1645,7 @@ void MergeTreeDataSelectExecutor::selectPartsToReadWithUUIDFilter(
     {
         LOG_DEBUG(log, "Found duplicate uuids locally, will retry part selection without them");
 
-        counters = PartFilterCounters();
+        part_pruner.resetCounters();
 
         /// Second attempt didn't help, throw an exception
         if (!select_parts(parts))

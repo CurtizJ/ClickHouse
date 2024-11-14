@@ -6,6 +6,7 @@
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/PartitionPruner.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include "Storages/MergeTree/PartPruner.h"
 
 
 namespace DB
@@ -121,25 +122,17 @@ private:
     ///  as well as `max_block_number_to_read`.
     static void selectPartsToRead(
         MergeTreeData::DataPartsVector & parts,
-        const std::optional<std::unordered_set<String>> & part_values,
-        const std::optional<KeyCondition> & minmax_idx_condition,
-        const DataTypes & minmax_columns_types,
-        const std::optional<PartitionPruner> & partition_pruner,
+        PartPruner & part_pruner,
         const PartitionIdToMaxBlock * max_block_numbers_to_read,
-        PartFilterCounters & counters,
         QueryStatusPtr query_status);
 
     /// Same as previous but also skip parts uuids if any to the query context, or skip parts which uuids marked as excluded.
     static void selectPartsToReadWithUUIDFilter(
         MergeTreeData::DataPartsVector & parts,
-        const std::optional<std::unordered_set<String>> & part_values,
         MergeTreeData::PinnedPartUUIDsPtr pinned_part_uuids,
-        const std::optional<KeyCondition> & minmax_idx_condition,
-        const DataTypes & minmax_columns_types,
-        const std::optional<PartitionPruner> & partition_pruner,
+        PartPruner & part_pruner,
         const PartitionIdToMaxBlock * max_block_numbers_to_read,
         ContextPtr query_context,
-        PartFilterCounters & counters,
         LoggerPtr log);
 
 public:
@@ -159,27 +152,14 @@ public:
     static void buildKeyConditionFromPartOffset(
         std::optional<KeyCondition> & part_offset_condition, const ActionsDAG * filter_dag, ContextPtr context);
 
-    /// If possible, filter using expression on virtual columns.
-    /// Example: SELECT count() FROM table WHERE _part = 'part_name'
-    /// If expression found, return a set with allowed part names (std::nullopt otherwise).
-    static std::optional<std::unordered_set<String>> filterPartsByVirtualColumns(
-        const StorageMetadataPtr & metadata_snapshot,
-        const MergeTreeData & data,
-        const MergeTreeData::DataPartsVector & parts,
-        const ActionsDAG * filter_dag,
-        ContextPtr context);
-
     /// Filter parts using minmax index and partition key.
     static void filterPartsByPartition(
         MergeTreeData::DataPartsVector & parts,
-        const std::optional<PartitionPruner> & partition_pruner,
-        const std::optional<KeyCondition> & minmax_idx_condition,
-        const std::optional<std::unordered_set<String>> & part_values,
-        const StorageMetadataPtr & metadata_snapshot,
-        const MergeTreeData & data,
+        PartPruner & part_pruner,
+        const MergeTreeData & data_,
         const ContextPtr & context,
         const PartitionIdToMaxBlock * max_block_numbers_to_read,
-        LoggerPtr log,
+        LoggerPtr log_,
         ReadFromMergeTree::IndexStats & index_stats);
 
     /// Filter parts using primary key and secondary indexes.

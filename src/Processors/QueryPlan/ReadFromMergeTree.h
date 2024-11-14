@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/MergeTreeReadPool.h>
 #include <Storages/MergeTree/AlterConversions.h>
 #include <Storages/MergeTree/PartitionPruner.h>
+#include "Storages/MergeTree/PartPruner.h"
 
 namespace DB
 {
@@ -157,13 +158,11 @@ public:
             , use_skip_indexes(false)
         {}
 
+        PartPruner part_pruner;
         KeyCondition key_condition;
-        std::optional<PartitionPruner> partition_pruner;
-        std::optional<KeyCondition> minmax_idx_condition;
         std::optional<KeyCondition> part_offset_condition;
         UsefulSkipIndexes skip_indexes;
         bool use_skip_indexes;
-        std::optional<std::unordered_set<String>> part_values;
     };
 
     static AnalysisResultPtr selectRangesToRead(

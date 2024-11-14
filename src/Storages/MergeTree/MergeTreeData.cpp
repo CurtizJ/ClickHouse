@@ -21,6 +21,10 @@
 #include <Common/quoteString.h>
 #include <Common/scope_guard_safe.h>
 #include <Common/typeid_cast.h>
+#include "Core/NamesAndTypes.h"
+#include "Storages/KeyDescription.h"
+#include "Storages/MergeTree/MergeTreeDataFormatVersion.h"
+#include "Storages/MergeTree/PartPruner.h"
 #include <Core/Settings.h>
 #include <Core/ServerSettings.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
@@ -94,6 +98,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -232,6 +237,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsFloat zero_copy_concurrent_part_removal_max_postpone_ratio;
     extern const MergeTreeSettingsUInt64 zero_copy_concurrent_part_removal_max_split_times;
     extern const MergeTreeSettingsBool prewarm_mark_cache;
+    extern const MergeTreeSettingsBool minmax_index_for_primary_key;
 }
 
 namespace ServerSetting
@@ -839,27 +845,48 @@ ExpressionActionsPtr getCombinedIndicesExpression(
 
 }
 
-ExpressionActionsPtr MergeTreeData::getMinMaxExpr(const KeyDescription & partition_key, const ExpressionActionsSettings & settings)
+NamesAndTypesList MergeTreeData::getMinMaxNamesWithTypes(const StorageMetadataPtr & metadata_snaphost) const
 {
-    NamesAndTypesList partition_key_columns;
-    if (!partition_key.column_names.empty())
-        partition_key_columns = partition_key.expression->getRequiredColumnsWithTypes();
+    NamesAndTypesList minmax_columns;
+    NameSet minmax_columns_set;
 
-    return std::make_shared<ExpressionActions>(ActionsDAG(partition_key_columns), settings);
+    auto add_key = [&](const KeyDescription & key)
+    {
+        auto key_columns = key.expression->getRequiredColumnsWithTypes();
+
+        for (const auto & column : key_columns)
+        {
+            if (minmax_columns_set.emplace(column.name).second)
+                minmax_columns.push_back(column);
+        }
+    };
+
+    if (metadata_snaphost->hasPartitionKey())
+        add_key(metadata_snaphost->getPartitionKey());
+
+    bool add_primary_key = (*getSettings())[MergeTreeSetting::minmax_index_for_primary_key]
+        && format_version >= MERGE_TREE_DATA_MIN_FORMAT_VERSION_WITH_CUSTOM_PARTITIONING;
+
+    if (add_primary_key && metadata_snaphost->hasPrimaryKey())
+        add_key(metadata_snaphost->getPrimaryKey());
+
+    return minmax_columns;
 }
 
-Names MergeTreeData::getMinMaxColumnsNames(const KeyDescription & partition_key)
+ExpressionActionsPtr MergeTreeData::getMinMaxExpression(const StorageMetadataPtr & metadata_snaphost, const ExpressionActionsSettings & settings) const
 {
-    if (!partition_key.column_names.empty())
-        return partition_key.expression->getRequiredColumns();
-    return {};
+    auto minmax_columns = getMinMaxNamesWithTypes(metadata_snaphost);
+    return std::make_shared<ExpressionActions>(ActionsDAG(minmax_columns), settings);
 }
 
-DataTypes MergeTreeData::getMinMaxColumnsTypes(const KeyDescription & partition_key)
+Names MergeTreeData::getMinMaxColumnsNames(const StorageMetadataPtr & metadata_snaphost) const
 {
-    if (!partition_key.column_names.empty())
-        return partition_key.expression->getRequiredColumnsWithTypes().getTypes();
-    return {};
+    return getMinMaxNamesWithTypes(metadata_snaphost).getNames();
+}
+
+DataTypes MergeTreeData::getMinMaxColumnsTypes(const StorageMetadataPtr & metadata_snaphost) const
+{
+    return getMinMaxNamesWithTypes(metadata_snaphost).getTypes();
 }
 
 ExpressionActionsPtr
@@ -7166,24 +7193,13 @@ Block MergeTreeData::getMinMaxCountProjectionBlock(
     }
 
     size_t rows = parts.size();
+    PartPruner part_pruner;
     ColumnPtr part_name_column;
-    std::optional<PartitionPruner> partition_pruner;
-    std::optional<KeyCondition> minmax_idx_condition;
-    DataTypes minmax_columns_types;
+
     if (filter_dag)
     {
-        if (metadata_snapshot->hasPartitionKey())
-        {
-            const auto & partition_key = metadata_snapshot->getPartitionKey();
-            auto minmax_columns_names = getMinMaxColumnsNames(partition_key);
-            minmax_columns_types = getMinMaxColumnsTypes(partition_key);
-
-            minmax_idx_condition.emplace(
-                filter_dag, query_context, minmax_columns_names,
-                getMinMaxExpr(partition_key, ExpressionActionsSettings::fromContext(query_context)));
-            partition_pruner.emplace(metadata_snapshot, filter_dag, query_context, false /* strict */);
-        }
-
+        /// Pass empty list of parts because it's needed for filtering by virtual columns but we do it manually.
+        part_pruner.applyFilters(filter_dag, *this, {}, metadata_snapshot, query_context);
         const auto * predicate = filter_dag->getOutputs().at(0);
 
         // Generate valid expressions for filtering
@@ -7212,9 +7228,6 @@ Block MergeTreeData::getMinMaxCountProjectionBlock(
         if (part->isEmpty())
             continue;
 
-        if (!part->minmax_idx->initialized)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Found a non-empty part with uninitialized minmax_idx. It's a bug");
-
         filter_column_data.emplace_back();
 
         if (max_block_numbers_to_read)
@@ -7224,15 +7237,8 @@ Block MergeTreeData::getMinMaxCountProjectionBlock(
                 continue;
         }
 
-        if (minmax_idx_condition
-            && !minmax_idx_condition->checkInHyperrectangle(part->minmax_idx->hyperrectangle, minmax_columns_types).can_be_true)
+        if (part_pruner.canBePruned(*part, /*num_granules=*/ 0))
             continue;
-
-        if (partition_pruner)
-        {
-            if (partition_pruner->canBePruned(*part))
-                continue;
-        }
 
         /// It's extremely rare that some parts have final marks while others don't. To make it
         /// straightforward, disable minmax_count projection when `max(pk)' encounters any part with

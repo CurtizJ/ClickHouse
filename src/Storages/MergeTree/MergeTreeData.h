@@ -1025,11 +1025,12 @@ public:
     Int64 minmax_idx_time_column_pos = -1; /// In other cases, minmax index often includes a dateTime column.
 
     /// Get partition key expression on required columns
-    static ExpressionActionsPtr getMinMaxExpr(const KeyDescription & partition_key, const ExpressionActionsSettings & settings);
+    ExpressionActionsPtr getMinMaxExpression(const StorageMetadataPtr & metadata_snaphost, const ExpressionActionsSettings & settings) const;
+    NamesAndTypesList getMinMaxNamesWithTypes(const StorageMetadataPtr & metadata_snaphost) const;
     /// Get column names required for partition key
-    static Names getMinMaxColumnsNames(const KeyDescription & partition_key);
+    Names getMinMaxColumnsNames(const StorageMetadataPtr & metadata_snaphost) const;
     /// Get column types required for partition key
-    static DataTypes getMinMaxColumnsTypes(const KeyDescription & partition_key);
+    DataTypes getMinMaxColumnsTypes(const StorageMetadataPtr & metadata_snaphost) const;
 
     ExpressionActionsPtr
     getPrimaryKeyAndSkipIndicesExpression(const StorageMetadataPtr & metadata_snapshot, const MergeTreeIndices & indices) const;
