@@ -1,5 +1,6 @@
--- Tags: no-parallel
+-- Tags: no-parallel, no-parallel-replicas
 -- no-parallel: looks at server-wide metrics
+-- no-parallel-replicas: profile events may differ with parallel replicas.
 
 -- Tests the skipping index cache.
 SET parallel_replicas_local_plan=1;
