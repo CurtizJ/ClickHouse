@@ -341,13 +341,13 @@ Pipe createMergeTreeSequentialSource(
         auto all_read_columns_list = storage_snapshot->getColumnsByNames(options, all_read_columns);
         info->patch_parts = info->alter_conversions->getPatchesForColumns(all_read_columns_list, need_to_filter_deleted_rows);
 
-        addPatchPartsColumns(
-            info->task_columns,
-            storage_snapshot,
-            options,
-            info->patch_parts,
-            all_read_columns,
-            need_to_filter_deleted_rows);
+        // addPatchPartsColumns(
+        //     info->task_columns,
+        //     storage_snapshot,
+        //     options,
+        //     info->patch_parts,
+        //     all_read_columns,
+        //     need_to_filter_deleted_rows);
     }
 
     auto column_part_source = std::make_shared<MergeTreeSequentialSource>(

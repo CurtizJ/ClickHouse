@@ -8270,6 +8270,7 @@ QueryPipeline StorageReplicatedMergeTree::updateLightweight(const MutationComman
     const auto zookeeper = getZooKeeperAndAssertNotReadonly();
 
     LightweightUpdateHolderInKeeper update_holder;
+    update_holder.commands = commands;
     update_holder.zookeeper = zookeeper;
     update_holder.lock = getLockForLightweightUpdateInKeeper(commands, query_context, zookeeper, zookeeper_path);
     update_holder.partition_block_numbers = allocateBlockNumbersInAffectedPartitions(commands, CommittingBlock::Op::Update, query_context, zookeeper);

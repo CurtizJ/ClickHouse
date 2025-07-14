@@ -4,6 +4,7 @@
 #include <Storages/ColumnsDescription.h>
 #include <Core/NamesAndTypes.h>
 #include <base/types.h>
+#include "Storages/ColumnSize.h"
 
 namespace DB
 {
@@ -71,6 +72,8 @@ public:
     virtual std::optional<size_t> getColumnPosition(const String & column_name) const = 0;
 
     virtual String getColumnNameWithMinimumCompressedSize(const NamesAndTypesList & available_columns) const = 0;
+
+    virtual ColumnSize getColumnSize(const String & column_name) const = 0;
 
     virtual const MergeTreeDataPartChecksums & getChecksums() const = 0;
 

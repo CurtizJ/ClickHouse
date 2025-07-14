@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
+#include "Storages/MergeTree/MarkRange.h"
 
 namespace DB
 {
@@ -136,6 +137,11 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
 
     auto sample_block = storage_snapshot->metadata->getSampleBlock();
 
+    auto get_columns_options = GetColumnsOptions(GetColumnsOptions::AllPhysical)
+        .withExtendedObjects()
+        .withVirtuals()
+        .withSubcolumns();
+
     for (const auto & part_with_ranges : parts_ranges)
     {
 #ifndef NDEBUG
@@ -160,11 +166,6 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
         read_task_info.part_starting_offset_in_query = part_with_ranges.part_starting_offset_in_query;
         read_task_info.alter_conversions = MergeTreeData::getAlterConversionsForPart(read_task_info.data_part, mutations_snapshot, getContext());
 
-        auto options = GetColumnsOptions(GetColumnsOptions::AllPhysical)
-            .withExtendedObjects()
-            .withVirtuals()
-            .withSubcolumns();
-
         LoadedMergeTreeDataPartInfoForReader part_info(part_with_ranges.data_part, read_task_info.alter_conversions);
         bool has_lightweight_delete = read_task_info.data_part->hasLightweightDelete() || read_task_info.alter_conversions->hasLightweightDelete();
 
@@ -176,9 +177,8 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
 
         if (read_task_info.alter_conversions->hasMutations())
         {
-            auto columns_list = storage_snapshot->getColumnsByNames(options, column_names);
-            auto mutation_steps
-                = read_task_info.alter_conversions->getMutationSteps(part_info, columns_list, storage_snapshot->metadata, getContext());
+            auto columns_list = storage_snapshot->getColumnsByNames(get_columns_options, column_names);
+            auto mutation_steps = read_task_info.alter_conversions->getMutationSteps(part_info, columns_list, storage_snapshot->metadata, getContext());
             std::move(mutation_steps.begin(), mutation_steps.end(), std::back_inserter(read_task_info.mutation_steps));
         }
 
@@ -195,17 +195,9 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
         if (read_task_info.alter_conversions->hasPatches())
         {
             auto all_read_columns = read_task_info.task_columns.getAllColumnNames();
-            auto all_read_columns_list = storage_snapshot->getColumnsByNames(options, all_read_columns);
+            auto all_read_columns_list = storage_snapshot->getColumnsByNames(get_columns_options, all_read_columns);
+
             read_task_info.patch_parts = read_task_info.alter_conversions->getPatchesForColumns(all_read_columns_list, reader_settings.apply_deleted_mask);
-
-            addPatchPartsColumns(
-                read_task_info.task_columns,
-                storage_snapshot,
-                options,
-                read_task_info.patch_parts,
-                all_read_columns,
-                has_lightweight_delete);
-
             ranges_in_patch_parts.addPart(part_with_ranges.data_part, read_task_info.patch_parts, part_with_ranges.ranges);
         }
 
@@ -213,32 +205,64 @@ void MergeTreeReadPoolBase::fillPerPartInfos(const Settings & settings)
         read_task_info.const_virtual_fields.emplace("_part_index", read_task_info.part_index_in_query);
         read_task_info.const_virtual_fields.emplace("_part_starting_offset", read_task_info.part_starting_offset_in_query);
 
-        if (pool_settings.preferred_block_size_bytes > 0)
-        {
-            const auto & result_column_names = read_task_info.task_columns.columns.getNames();
-            NameSet all_column_names(result_column_names.begin(), result_column_names.end());
-
-            for (const auto & pre_columns_per_step : read_task_info.task_columns.pre_columns)
-            {
-                const auto & pre_column_names = pre_columns_per_step.getNames();
-                all_column_names.insert(pre_column_names.begin(), pre_column_names.end());
-            }
-
-            read_task_info.shared_size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(
-                read_task_info.data_part,
-                Names(all_column_names.begin(), all_column_names.end()),
-                sample_block);
-        }
-
         read_task_info.deserialization_prefixes_cache = std::make_shared<DeserializationPrefixesCache>();
-
         is_part_on_remote_disk.push_back(part_with_ranges.data_part->isStoredOnRemoteDisk());
-        std::tie(read_task_info.min_marks_per_task, read_task_info.approx_size_of_mark)
-            = calculateMinMarksPerTask(part_with_ranges, column_names, read_task_info.task_columns.pre_columns, pool_settings, settings);
+
         per_part_infos.push_back(std::make_shared<MergeTreeReadTaskInfo>(std::move(read_task_info)));
     }
 
     ranges_in_patch_parts.optimize();
+    analyzePatchParts();
+
+    for (size_t i = 0; i < per_part_infos.size(); ++i)
+    {
+        auto & read_task_info = const_cast<MergeTreeReadTaskInfo &>(*per_part_infos[i]);
+        const auto & part_with_ranges = parts_ranges[i];
+
+        if (pool_settings.preferred_block_size_bytes > 0)
+        {
+            auto all_read_columns = read_task_info.task_columns.getAllColumnNames();
+
+            read_task_info.shared_size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(
+                read_task_info.data_part,
+                all_read_columns,
+                sample_block);
+        }
+
+        std::tie(read_task_info.min_marks_per_task, read_task_info.approx_size_of_mark)
+            = calculateMinMarksPerTask(part_with_ranges, column_names, read_task_info.task_columns.pre_columns, pool_settings, settings);
+    }
+}
+
+void MergeTreeReadPoolBase::analyzePatchParts()
+{
+    PatchPartReadStats stats;
+
+    auto get_columns_options = GetColumnsOptions(GetColumnsOptions::AllPhysical)
+        .withExtendedObjects()
+        .withVirtuals()
+        .withSubcolumns();
+
+    for (size_t i = 0; i < per_part_infos.size(); ++i)
+    {
+        auto & read_task_info = const_cast<MergeTreeReadTaskInfo &>(*per_part_infos[i]);
+        const auto & part_with_ranges = parts_ranges[i];
+
+        if (!read_task_info.alter_conversions->hasPatches())
+            continue;
+
+        auto patches_ranges = ranges_in_patch_parts.getRanges(read_task_info.data_part, read_task_info.patch_parts, part_with_ranges.ranges);
+        bool has_lightweight_delete = read_task_info.data_part->hasLightweightDelete() || read_task_info.alter_conversions->hasLightweightDelete();
+
+        addPatchPartsColumns(
+            read_task_info.task_columns,
+            read_task_info.patch_parts,
+            stats,
+            storage_snapshot,
+            get_columns_options,
+            patches_ranges,
+            has_lightweight_delete);
+    }
 }
 
 std::vector<size_t> MergeTreeReadPoolBase::getPerPartSumMarks() const

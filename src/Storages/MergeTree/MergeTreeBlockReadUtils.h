@@ -21,12 +21,20 @@ NameSet injectRequiredColumns(
 
 PrewhereExprStepPtr createLightweightDeleteStep(bool remove_filter_column);
 
+struct PatchPartReadStats
+{
+    size_t join_patches_uncompressed_bytes = 0;
+    size_t join_patches_max_uncompressed_bytes = 1;
+    std::set<MarkRange> join_patches_read_ranges;
+};
+
 void addPatchPartsColumns(
     MergeTreeReadTaskColumns & result,
+    PatchPartsForReader & patch_parts,
+    PatchPartReadStats & stats,
     const StorageSnapshotPtr & storage_snapshot,
     const GetColumnsOptions & options,
-    const PatchPartsForReader & patch_parts,
-    const Names & all_columns_to_read,
+    const std::vector<MarkRanges> & patch_ranges,
     bool has_lightweight_delete);
 
 MergeTreeReadTaskColumns getReadTaskColumns(

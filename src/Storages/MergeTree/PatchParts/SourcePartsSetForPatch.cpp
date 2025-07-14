@@ -5,6 +5,7 @@
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
+#include "Common/logger_useful.h"
 
 namespace DB
 {
@@ -35,6 +36,43 @@ void SourcePartsSetForPatch::addSourcePart(const String & name, UInt64 data_vers
     min_max_versions_by_part[name] = {data_version, data_version};
 }
 
+void SourcePartsSetForPatch::addMutationCommands(UInt64 data_version, const MutationCommands & commands)
+{
+    if (commands_by_version.contains(data_version))
+        throw Exception(ErrorCodes::DUPLICATE_DATA_PART, "Mutation commands for data version {} already exist", data_version);
+
+    commands_by_version[data_version] = commands;
+}
+
+MutationCommands SourcePartsSetForPatch::getMutationCommandsForParts(const Names & source_names, UInt64 source_data_version) const
+{
+    if (source_names.empty())
+        return {};
+
+    UInt64 min_version = std::numeric_limits<UInt64>::max();
+    UInt64 max_version = 0;
+
+    for (const auto & name : source_names)
+    {
+        min_version = std::min(min_version, getMinDataVersion(name));
+        max_version = std::max(max_version, getMaxDataVersion(name));
+    }
+
+    if (max_version <= source_data_version)
+        return {};
+
+    min_version = std::max(min_version, source_data_version);
+
+    auto lo = commands_by_version.lower_bound(min_version);
+    auto hi = commands_by_version.upper_bound(max_version);
+
+    MutationCommands commands;
+    for (auto jt = lo; jt != hi; ++jt)
+        commands.insert(commands.end(), jt->second.begin(), jt->second.end());
+
+    return commands;
+}
+
 void SourcePartsSetForPatch::buildSourcePartsSet()
 {
     min_data_version = 0;
@@ -42,19 +80,19 @@ void SourcePartsSetForPatch::buildSourcePartsSet()
     source_parts_by_version.clear();
 
     bool is_first = true;
-    for (const auto & [part_name, min_max] : min_max_versions_by_part)
+    for (const auto & [part_name, source_part_info] : min_max_versions_by_part)
     {
-        source_parts_by_version[min_max.second].add(part_name);
+        source_parts_by_version[source_part_info.max_version].add(part_name);
 
         if (std::exchange(is_first, false))
         {
-            min_data_version = min_max.first;
-            max_data_version = min_max.second;
+            min_data_version = source_part_info.min_version;
+            max_data_version = source_part_info.max_version;
         }
         else
         {
-            min_data_version = std::min(min_data_version, min_max.first);
-            max_data_version = std::max(max_data_version, min_max.second);
+            min_data_version = std::min(min_data_version, source_part_info.min_version);
+            max_data_version = std::max(max_data_version, source_part_info.max_version);
         }
     }
 }
@@ -96,6 +134,20 @@ PatchParts SourcePartsSetForPatch::getPatchParts(const MergeTreePartInfo & origi
 
     if (!names_for_join.empty())
     {
+        for (const auto & name : names_for_join)
+        {
+            auto min_version = getMinDataVersion(name);
+            auto max_version = getMaxDataVersion(name);
+
+            auto lo = commands_by_version.lower_bound(min_version);
+            auto hi = commands_by_version.upper_bound(max_version);
+
+            for (auto jt = lo; jt != hi; ++jt)
+            {
+                LOG_DEBUG(getLogger("KEK"), "commands for part {}: {}", name, jt->second.toString());
+            }
+        }
+
         patch_parts.push_back(PatchPartInfo
         {
             .mode = PatchMode::Join,
@@ -108,7 +160,7 @@ PatchParts SourcePartsSetForPatch::getPatchParts(const MergeTreePartInfo & origi
     return patch_parts;
 }
 
-SourcePartsSetForPatch SourcePartsSetForPatch::build(const Block & block, UInt64 data_version)
+SourcePartsSetForPatch SourcePartsSetForPatch::build(const Block & block, const MutationCommands & commands, UInt64 data_version)
 {
     const auto & column_part_name = block.getByName("_part").column;
     const auto & part_name_lc = assert_cast<const ColumnLowCardinality &>(*column_part_name);
@@ -125,6 +177,7 @@ SourcePartsSetForPatch SourcePartsSetForPatch::build(const Block & block, UInt64
             parts_set.addSourcePart(part_name, data_version);
     }
 
+    parts_set.addMutationCommands(data_version, commands);
     return parts_set;
 }
 
@@ -135,42 +188,46 @@ SourcePartsSetForPatch SourcePartsSetForPatch::merge(const DataPartsVector & sou
     for (const auto & part : source_parts)
     {
         const auto & set = part->getSourcePartsSet();
-        for (const auto & [part_name, min_max] : set.min_max_versions_by_part)
+
+        for (const auto & [part_name, source_info] : set.min_max_versions_by_part)
         {
-            auto [it, inserted] = merged_set.min_max_versions_by_part.emplace(part_name, min_max);
+            auto [it, inserted] = merged_set.min_max_versions_by_part.emplace(part_name, source_info);
 
             if (!inserted)
             {
-                auto & merged_min_max = it->second;
-                merged_min_max.first = std::min(merged_min_max.first, min_max.first);
-                merged_min_max.second = std::max(merged_min_max.second, min_max.second);
+                auto & merge_info = it->second;
+
+                merge_info.min_version = std::min(merge_info.min_version, source_info.min_version);
+                merge_info.max_version = std::max(merge_info.max_version, source_info.max_version);
             }
         }
+
+        for (const auto & [data_version, commands] : set.commands_by_version)
+            merged_set.addMutationCommands(data_version, commands);
     }
 
     merged_set.buildSourcePartsSet();
     return merged_set;
 }
 
-void SourcePartsSetForPatch::writeBinary(WriteBuffer & out) const
+void SourcePartsSetForPatch::writeSourcePartsSet(WriteBuffer & out) const
 {
-    writeBinaryLittleEndian(VERSION, out);
+    writeBinaryLittleEndian(VERSION_WITH_NUM_ROWS, out);
     writeBinaryLittleEndian(min_max_versions_by_part.size(), out);
 
-    for (const auto & [part_name, min_max] : min_max_versions_by_part)
+    for (const auto & [part_name, source_info] : min_max_versions_by_part)
     {
         writeStringBinary(part_name, out);
-        writeBinaryLittleEndian(min_max.first, out);
-        writeBinaryLittleEndian(min_max.second, out);
+        writeBinaryLittleEndian(source_info.min_version, out);
+        writeBinaryLittleEndian(source_info.max_version, out);
     }
 }
 
-void SourcePartsSetForPatch::readBinary(ReadBuffer & in)
+void SourcePartsSetForPatch::readSourcePartsSet(ReadBuffer & in)
 {
-    UInt8 version;
     readBinaryLittleEndian(version, in);
 
-    if (version != VERSION)
+    if (version > VERSION_WITH_NUM_ROWS)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Invalid version of SourcePartsSetForPatch: {}", std::to_string(version));
 
     UInt64 num_parts;
@@ -181,21 +238,31 @@ void SourcePartsSetForPatch::readBinary(ReadBuffer & in)
         String part_name;
         readStringBinary(part_name, in);
 
-        auto & min_max = min_max_versions_by_part[part_name];
-        readBinaryLittleEndian(min_max.first, in);
-        readBinaryLittleEndian(min_max.second, in);
+        auto & source_part_info = min_max_versions_by_part[part_name];
+        readBinaryLittleEndian(source_part_info.min_version, in);
+        readBinaryLittleEndian(source_part_info.max_version, in);
     }
 
     buildSourcePartsSet();
 }
 
-SourcePartsSetForPatch buildSourceSetForPatch(Block & block, UInt64 data_version)
+void SourcePartsSetForPatch::writePatchCommands(WriteBuffer & out) const
+{
+    UNUSED(out);
+}
+
+void SourcePartsSetForPatch::readPatchCommands(ReadBuffer & in)
+{
+    UNUSED(in);
+}
+
+SourcePartsSetForPatch buildSourceSetForPatch(Block & block, const MutationCommands & commands, UInt64 data_version)
 {
     /// Need to update data version column because it contains data version
     /// of source part, but we store the data version of updated data in patch part.
     auto & data_version_column = block.getByName(PartDataVersionColumn::name).column;
     data_version_column = PartDataVersionColumn::type->createColumnConst(block.rows(), data_version)->convertToFullColumnIfConst();
-    return SourcePartsSetForPatch::build(block, data_version);
+    return SourcePartsSetForPatch::build(block, commands, data_version);
 }
 
 }

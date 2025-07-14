@@ -195,6 +195,8 @@ Names getVirtualsRequiredForPatch(const PatchPartInfoForReader & patch)
         case PatchMode::Join:
             columns = {BlockNumberColumn::name, BlockOffsetColumn::name};
             break;
+        case PatchMode::Expression:
+            return {};
     }
 
     columns.push_back(PartDataVersionColumn::name);

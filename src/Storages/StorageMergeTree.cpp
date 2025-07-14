@@ -780,6 +780,7 @@ QueryPipeline StorageMergeTree::updateLightweight(const MutationCommands & comma
     auto context_copy = Context::createCopy(query_context);
 
     PlainLightweightUpdateHolder update_holder;
+    update_holder.commands = commands;
     update_holder.update_lock = getLockForLightweightUpdate(commands, context_copy);
     update_holder.block_holder = std::make_unique<PlainCommittingBlockHolder>(allocateBlockNumber(CommittingBlock::Op::Update), *this);
 

@@ -1176,10 +1176,13 @@ void IMergeTreeDataPart::loadSourcePartsSet()
     if (!info.isPatch())
         return;
 
-    if (auto in = readFileIfExists(SourcePartsSetForPatch::FILENAME))
-        source_parts_set.readBinary(*in);
+    if (auto in = readFileIfExists(SourcePartsSetForPatch::SOURCE_PARTS_SET_FILENAME))
+        source_parts_set.readSourcePartsSet(*in);
     else
-        throw Exception(ErrorCodes::CORRUPTED_DATA, "Missing file {} in patch part {}", SourcePartsSetForPatch::FILENAME, name);
+        throw Exception(ErrorCodes::CORRUPTED_DATA, "Missing file {} in patch part {}", SourcePartsSetForPatch::SOURCE_PARTS_SET_FILENAME, name);
+
+    if (auto in = readFileIfExists(SourcePartsSetForPatch::PATCH_COMMANDS_FILENAME))
+        source_parts_set.readPatchCommands(*in);
 }
 
 template <typename Writer>

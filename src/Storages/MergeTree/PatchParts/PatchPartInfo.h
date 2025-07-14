@@ -71,6 +71,8 @@ enum class PatchMode
     Merge,
     /// Apply patch via joining by key columns (_block_number, _block_offset).
     Join,
+    /// Apply patch via expression.
+    Expression,
 };
 
 template <typename TDataPartPtr>

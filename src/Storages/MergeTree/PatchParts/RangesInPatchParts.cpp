@@ -135,6 +135,8 @@ MarkRanges getRangesInPatchPart(const DataPartPtr & original_part, const PatchPa
             return getRangesInPatchPartMerge(original_part, patch, ranges);
         case PatchMode::Join:
             return getRangesInPatchPartJoin(patch);
+        case PatchMode::Expression:
+            return getRangesInPatchPartJoin(patch);
     }
 }
 

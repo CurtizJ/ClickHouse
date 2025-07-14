@@ -68,7 +68,7 @@ TemporaryPartPtr ReplicatedMergeTreeSinkPatch::writeNewTempPart(BlockWithPartiti
     auto partition_id = getPartitionIdForPatch(block.partition);
     auto data_version = getDataVersionInPartition(partition_id);
 
-    auto source_parts_set = buildSourceSetForPatch(block.block, data_version);
+    auto source_parts_set = buildSourceSetForPatch(block.block, update_holder.commands, data_version);
     return storage.writer.writeTempPatchPart(block, metadata_snapshot, std::move(partition_id), std::move(source_parts_set), context);
 }
 

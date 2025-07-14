@@ -335,9 +335,14 @@ MergedBlockOutputStream::WrittenFiles MergedBlockOutputStream::finalizePartOnDis
             const auto & source_parts = new_part->getSourcePartsSet();
             if (!source_parts.empty())
             {
-                write_hashed_file(SourcePartsSetForPatch::FILENAME, [&](auto & buffer)
+                write_hashed_file(SourcePartsSetForPatch::SOURCE_PARTS_SET_FILENAME, [&](auto & buffer)
                 {
-                    source_parts.writeBinary(buffer);
+                    source_parts.writeSourcePartsSet(buffer);
+                });
+
+                write_hashed_file(SourcePartsSetForPatch::PATCH_COMMANDS_FILENAME, [&](auto & buffer)
+                {
+                    source_parts.writePatchCommands(buffer);
                 });
             }
         }

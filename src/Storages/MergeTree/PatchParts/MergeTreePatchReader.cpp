@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/MergeTreeBlockReadUtils.h>
+#include <Interpreters/MutationsInterpreter.h>
 #include <Columns/ColumnSparse.h>
 #include <Columns/ColumnLowCardinality.h>
 #include <base/range.h>
@@ -92,7 +93,7 @@ MergeTreePatchReader::PatchReadResultPtr MergeTreePatchReaderMerge::readPatch(Ma
     return std::make_shared<PatchReadResult>(std::move(read_result), std::make_shared<PatchMergeSharedData>());
 }
 
-PatchToApplyPtr MergeTreePatchReaderMerge::applyPatch(const Block & result_block, const PatchReadResult & patch_result) const
+PatchToApplyPtr MergeTreePatchReaderMerge::applyPatch(Block & result_block, const PatchReadResult & patch_result) const
 {
     const auto & sample_block = range_reader.getSampleBlock();
     auto patch_block = sample_block.cloneWithColumns(patch_result.read_result.columns);
@@ -169,7 +170,7 @@ MergeTreePatchReader::PatchReadResultPtr MergeTreePatchReaderJoin::readPatch(Mar
     return read_patch();
 }
 
-PatchToApplyPtr MergeTreePatchReaderJoin::applyPatch(const Block & result_block, const PatchReadResult & patch_result) const
+PatchToApplyPtr MergeTreePatchReaderJoin::applyPatch(Block & result_block, const PatchReadResult & patch_result) const
 {
     const auto * patch_join_data = typeid_cast<const PatchJoinSharedData *>(patch_result.data.get());
     if (!patch_join_data)
@@ -180,15 +181,102 @@ PatchToApplyPtr MergeTreePatchReaderJoin::applyPatch(const Block & result_block,
     return applyPatchJoin(result_block, patch_block, *patch_join_data);
 }
 
+MergeTreePatchReaderExpression::MergeTreePatchReaderExpression(PatchPartInfoForReader patch_part_, MergeTreeReaderPtr reader_)
+    : MergeTreePatchReader(std::move(patch_part_), std::move(reader_))
+{
+    if (patch_part.mode != PatchMode::Expression)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Expected patch with mode Expression, got {}", patch_part.mode);
+}
+
+MergeTreePatchReader::PatchReadResultPtr MergeTreePatchReaderExpression::readPatch(MarkRanges & ranges)
+{
+    ranges.clear();
+
+    if (!initialized)
+    {
+        initialized = true;
+
+        const auto * loaded_part_info = dynamic_cast<const LoadedMergeTreeDataPartInfoForReader *>(patch_part.part.get());
+        if (!loaded_part_info)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Expected loaded part info for expression patch part");
+
+        const auto & data_part = loaded_part_info->getDataPart();
+        const auto & source_parts_set = data_part->getSourcePartsSet();
+        commands = source_parts_set.getMutationCommandsForParts(patch_part.source_parts, patch_part.source_data_version);
+
+        LOG_DEBUG(getLogger("KEK"), "patch commands: {}", commands.toString());
+
+        MutationsInterpreter::Settings settings(true);
+        settings.return_all_columns = true;
+        settings.recalculate_dependencies_of_updated_columns = false;
+
+        const auto & part = loaded_part_info->getDataPart();
+        auto alter_conversions = std::make_shared<AlterConversions>();
+        auto context = part->storage.getContext();
+
+        MutationsInterpreter interpreter(
+            const_cast<MergeTreeData &>(part->storage),
+            part,
+            alter_conversions,
+            part->storage.getInMemoryMetadataPtr(),
+            commands,
+            range_reader.getReadSampleBlock().getNames(),
+            context,
+            settings);
+
+        ExpressionActionsSettings action_settings(context);
+        auto mutation_actions = interpreter.getMutationActions();
+
+        for (auto & action : mutation_actions)
+            actions.push_back(std::make_shared<ExpressionActions>(std::move(action.dag), action_settings, action.project_input));
+    }
+
+    return std::make_shared<PatchReadResult>(ReadResult(nullptr), std::make_shared<PatchExpressionSharedData>(commands, actions));
+}
+
+PatchToApplyPtr MergeTreePatchReaderExpression::applyPatch(Block & result_block, const PatchReadResult & patch_result) const
+{
+    const auto * patch_expression_data = typeid_cast<const PatchExpressionSharedData *>(patch_result.data.get());
+    if (!patch_expression_data)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Expression data for patch is not set");
+
+    Block block_for_actions = result_block;
+    LOG_DEBUG(getLogger("KEK"), "1. result_block: {}", result_block.dumpStructure());
+
+    for (const auto & action : patch_expression_data->actions)
+        action->execute(block_for_actions);
+
+    NameSet updated_columns;
+    for (const auto & command : patch_expression_data->commands)
+    {
+        for (const auto & [column_name, _] : command.column_to_update_expression)
+            updated_columns.insert(column_name);
+    }
+
+    for (const auto & column_name : updated_columns)
+    {
+        auto & result_column = result_block.getByName(column_name);
+        auto & new_result_column = block_for_actions.getByName(column_name);
+
+        result_column.column = new_result_column.column;
+    }
+
+    LOG_DEBUG(getLogger("KEK"), "2. result_block: {}", result_block.dumpStructure());
+
+    return nullptr;
+}
+
 MergeTreePatchReaderPtr getPatchReader(PatchPartInfoForReader patch_part, MergeTreeReaderPtr reader, PatchReadResultCache * read_result_cache)
 {
-    if (patch_part.mode == PatchMode::Merge)
-        return std::make_unique<MergeTreePatchReaderMerge>(std::move(patch_part), std::move(reader));
-
-    if (patch_part.mode == PatchMode::Join)
-        return std::make_unique<MergeTreePatchReaderJoin>(std::move(patch_part), std::move(reader), read_result_cache);
-
-    throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected patch parts mode {}", patch_part.mode);
+    switch (patch_part.mode)
+    {
+        case PatchMode::Merge:
+            return std::make_unique<MergeTreePatchReaderMerge>(std::move(patch_part), std::move(reader));
+        case PatchMode::Join:
+            return std::make_unique<MergeTreePatchReaderJoin>(std::move(patch_part), std::move(reader), read_result_cache);
+        case PatchMode::Expression:
+            return std::make_unique<MergeTreePatchReaderExpression>(std::move(patch_part), std::move(reader));
+    }
 }
 
 }

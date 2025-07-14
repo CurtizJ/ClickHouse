@@ -60,6 +60,7 @@ protected:
     const Block header;
 
     void fillPerPartInfos(const Settings & settings);
+    void analyzePatchParts();
     std::vector<size_t> getPerPartSumMarks() const;
 
     MergeTreeReadTaskPtr createTask(

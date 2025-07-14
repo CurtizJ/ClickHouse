@@ -62,12 +62,14 @@ struct PlainLightweightUpdateLock
 
 struct PlainLightweightUpdateHolder
 {
+    MutationCommands commands;
     std::unique_ptr<PlainLightweightUpdateLock> update_lock;
     std::unique_ptr<PlainCommittingBlockHolder> block_holder;
 };
 
 struct LightweightUpdateHolderInKeeper
 {
+    MutationCommands commands;
     zkutil::ZooKeeperPtr zookeeper;
     zkutil::EphemeralNodeHolderPtr lock;
     PartitionBlockNumbersHolder partition_block_numbers;

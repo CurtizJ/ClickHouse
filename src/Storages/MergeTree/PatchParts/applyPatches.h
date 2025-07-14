@@ -2,6 +2,8 @@
 #include <Storages/MergeTree/PatchParts/PatchPartInfo.h>
 #include <Common/HashTable/Hash.h>
 #include <Common/PODArray.h>
+#include <Storages/MutationCommands.h>
+#include <Interpreters/ExpressionActions.h>
 #include <Core/Block.h>
 #include <absl/container/flat_hash_map.h>
 
@@ -53,6 +55,17 @@ struct PatchJoinSharedData : public PatchSharedData
     PatchHashMap hash_map;
     UInt64 min_block = 0;
     UInt64 max_block = 0;
+};
+
+struct PatchExpressionSharedData : public PatchSharedData
+{
+    PatchExpressionSharedData(MutationCommands commands_, std::vector<ExpressionActionsPtr> actions_)
+        : commands(std::move(commands_)), actions(std::move(actions_))
+    {
+    }
+
+    MutationCommands commands;
+    std::vector<ExpressionActionsPtr> actions;
 };
 
 /// Builds a hash table from patch_block.

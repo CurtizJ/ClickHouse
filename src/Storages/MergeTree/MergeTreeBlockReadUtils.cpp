@@ -281,19 +281,64 @@ PrewhereExprStepPtr createLightweightDeleteStep(bool remove_filter_column)
     return std::make_shared<PrewhereExprStep>(std::move(step));
 }
 
+static bool convertPatchJoinToExpression(
+    PatchPartInfoForReader & patch_part,
+    PatchPartReadStats & stats,
+    const MarkRanges & patch_ranges,
+    const Names & patch_columns)
+{
+    if (patch_part.mode != PatchMode::Join)
+        return false;
+
+    MarkRanges ranges_to_read;
+    const auto & index_granularity = patch_part.part->getIndexGranularity();
+
+    for (const auto & range : patch_ranges)
+    {
+        if (!stats.join_patches_read_ranges.contains(range))
+            ranges_to_read.push_back(range);
+    }
+
+    if (ranges_to_read.empty())
+        return false;
+
+    size_t uncompressed_bytes_to_read = 0;
+    size_t rows_to_read = index_granularity.getRowsCountInRanges(ranges_to_read);
+    double ratio = static_cast<double>(rows_to_read) / index_granularity.getTotalRows();
+
+    for (const auto & column_name : patch_columns)
+    {
+        auto column_size = patch_part.part->getColumnSize(column_name);
+        uncompressed_bytes_to_read += static_cast<size_t>(column_size.data_uncompressed * ratio);
+    }
+
+    if (stats.join_patches_uncompressed_bytes + uncompressed_bytes_to_read <= stats.join_patches_max_uncompressed_bytes)
+    {
+        std::move(ranges_to_read.begin(), ranges_to_read.end(), std::inserter(stats.join_patches_read_ranges, stats.join_patches_read_ranges.end()));
+        stats.join_patches_uncompressed_bytes += uncompressed_bytes_to_read;
+        return false;
+    }
+
+    patch_part.mode = PatchMode::Expression;
+    return true;
+}
+
 void addPatchPartsColumns(
     MergeTreeReadTaskColumns & result,
+    PatchPartsForReader & patch_parts,
+    PatchPartReadStats & stats,
     const StorageSnapshotPtr & storage_snapshot,
     const GetColumnsOptions & options,
-    const PatchPartsForReader & patch_parts,
-    const Names & all_columns_to_read,
+    const std::vector<MarkRanges> & patch_ranges,
     bool has_lightweight_delete)
 {
+    chassert(patch_parts.size() == patch_ranges.size());
     if (patch_parts.empty())
         return;
 
     NameSet required_virtuals;
     result.patch_columns.resize(patch_parts.size());
+    auto all_columns_to_read = result.getAllColumnNames();
 
     for (size_t i = 0; i < patch_parts.size(); ++i)
     {
@@ -325,10 +370,19 @@ void addPatchPartsColumns(
 
         auto patch_system_columns = getVirtualsRequiredForPatch(patch_parts[i]);
         patch_columns_to_read_set.insert(patch_system_columns.begin(), patch_system_columns.end());
-        required_virtuals.insert(patch_system_columns.begin(), patch_system_columns.end());
-
         Names patch_columns_to_read_names(patch_columns_to_read_set.begin(), patch_columns_to_read_set.end());
-        result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_columns_to_read_names);
+
+        if (convertPatchJoinToExpression(patch_parts[i], stats, patch_ranges[i], patch_columns_to_read_names))
+        {
+            patch_system_columns = getVirtualsRequiredForPatch(patch_parts[i]);
+            result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_system_columns);
+        }
+        else
+        {
+            result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_columns_to_read_names);
+        }
+
+        required_virtuals.insert(patch_system_columns.begin(), patch_system_columns.end());
     }
 
     auto & first_step_columns = result.pre_columns.empty() ? result.columns : result.pre_columns.front();

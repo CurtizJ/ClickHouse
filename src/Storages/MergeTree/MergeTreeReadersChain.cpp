@@ -370,7 +370,7 @@ void MergeTreeReadersChain::applyPatches(
             /// TODO: build indices once and filter them in MergeTreeRangeReader.
             auto patch_to_apply = patch_readers[i]->applyPatch(result_block, *patch_result);
 
-            if (!patch_to_apply->empty())
+            if (patch_to_apply && !patch_to_apply->empty())
                 patches_to_apply[columns_hash].push_back(std::move(patch_to_apply));
         }
     }

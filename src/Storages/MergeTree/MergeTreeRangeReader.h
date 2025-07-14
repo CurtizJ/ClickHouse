@@ -251,6 +251,7 @@ public:
         friend class MergeTreeRangeReader;
         friend class MergeTreeReadersChain;
         friend class MergeTreePatchReaderMerge;
+        friend class MergeTreePatchReaderExpression;
 
         using NumRows = std::vector<size_t>;
 

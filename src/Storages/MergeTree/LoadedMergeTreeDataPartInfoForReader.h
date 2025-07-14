@@ -65,6 +65,8 @@ public:
         return data_part->getColumnNameWithMinimumCompressedSize(available_columns);
     }
 
+    ColumnSize getColumnSize(const String & column_name) const override { return data_part->getColumnSize(column_name); }
+
     const MergeTreeDataPartChecksums & getChecksums() const override { return data_part->checksums; }
 
     void reportBroken() override { data_part->storage.reportBrokenPart(data_part); }
