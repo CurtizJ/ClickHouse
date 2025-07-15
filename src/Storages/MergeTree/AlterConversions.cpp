@@ -365,7 +365,7 @@ std::vector<MutationActions> AlterConversions::getMutationActions(
     }
 
     addColumnsRequiredForMaterialized(storage_read_columns, storage_read_columns_set, metadata_snapshot, context);
-    auto filtered_commands = filterMutationCommands(storage_read_columns, std::move(storage_read_columns_set));
+    auto filtered_commands = filterMutationCommands(storage_read_columns, mutation_commands, std::move(storage_read_columns_set));
 
     if (filtered_commands.empty())
         return {};
@@ -426,14 +426,14 @@ void AlterConversions::addColumnsRequiredForMaterialized(
     }
 }
 
-MutationCommands AlterConversions::filterMutationCommands(Names & read_columns, NameSet read_columns_set) const
+MutationCommands AlterConversions::filterMutationCommands(Names & read_columns, const MutationCommands & commands, NameSet read_columns_set)
 {
     MutationCommands filtered_commands;
 
     /// We need to read all columns that are used in mutation.
     /// Therefore we need to add all previous mutations that affects such columns.
     /// Because of that we iterate over commands backwards.
-    for (const auto & command : mutation_commands | std::views::reverse)
+    for (const auto & command : commands | std::views::reverse)
     {
         IdentifierNameSet source_columns;
         if (command.type == MutationCommand::Type::DELETE)

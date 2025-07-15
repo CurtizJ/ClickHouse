@@ -46,6 +46,9 @@ public:
     static bool isSupportedAlterMutation(MutationCommand::Type type);
     static bool isSupportedMetadataMutation(MutationCommand::Type type);
 
+    /// Returns only mutations commands that affect columns from set.
+    static MutationCommands filterMutationCommands(Names & read_columns, const MutationCommands & commands, NameSet read_columns_set);
+
     const NameSet & getAllUpdatedColumns() const { return all_updated_columns; }
     const NameSet & getColumnsUpdatedInPatches() const { return columns_updated_in_patches; }
 
@@ -83,9 +86,6 @@ private:
         NameSet & read_columns_set,
         const StorageMetadataPtr & metadata_snapshot,
         const ContextPtr & context) const;
-
-    /// Returns only mutations commands that affect columns from set.
-    MutationCommands filterMutationCommands(Names & read_columns, NameSet read_columns_set) const;
 
     /// Rename map new_name -> old_name.
     std::vector<RenamePair> rename_map;

@@ -338,45 +338,39 @@ static void addColumnsForPatchExpression(
     const auto & source_parts_set = data_part->getSourcePartsSet();
     auto commands = source_parts_set.getMutationCommandsForParts(patch_part.source_parts, patch_part.source_data_version);
 
-    MutationsInterpreter::Settings settings(true);
-    settings.return_all_columns = true;
-    settings.recalculate_dependencies_of_updated_columns = false;
+    NameSet columns_from_previous_steps;
 
-    auto alter_conversions = std::make_shared<AlterConversions>();
-    auto context = data_part->storage.getContext();
-    auto all_columns = result.getAllColumnNames();
-
-    MutationsInterpreter interpreter(
-        const_cast<MergeTreeData &>(data_part->storage),
-        data_part,
-        alter_conversions,
-        data_part->storage.getInMemoryMetadataPtr(),
-        commands,
-        all_columns,
-        context,
-        settings);
-
-    ExpressionActionsSettings action_settings(context);
-    auto mutation_actions = interpreter.getMutationActions();
-
-    auto & first_step_columns = result.pre_columns.empty() ? result.columns : result.pre_columns.front();
-    auto first_step_columns_set = first_step_columns.getNameSet();
-
-    NameSet required_columns;
-    for (const auto & action : mutation_actions)
+    auto analyze_commands_for_step = [&](auto & step_columns)
     {
-        auto required_for_step = action.dag.getRequiredColumnsNames();
-        required_columns.insert(required_for_step.begin(), required_for_step.end());
-    }
+        Names new_step_columns;
+        NameSet new_step_columns_set;
 
-    for (const auto & column_name : required_columns)
-    {
-        if (!first_step_columns_set.contains(column_name))
+        auto step_columns_set = step_columns.getNameSet();
+        auto step_commands = AlterConversions::filterMutationCommands(new_step_columns, commands, step_columns_set);
+
+        for (const auto & column_name : new_step_columns)
         {
-            auto column = storage_snapshot->getColumn(options, column_name);
-            first_step_columns.push_back(std::move(column));
+            if (columns_from_previous_steps.emplace(column_name).second)
+            {
+                step_columns.push_back(storage_snapshot->getColumn(options, column_name));
+                new_step_columns_set.insert(column_name);
+            }
         }
+
+        return new_step_columns_set;
+    };
+
+    for (size_t i = 0; i < result.pre_columns.size(); ++i)
+    {
+        auto new_step_columns_set = analyze_commands_for_step(result.pre_columns[i]);
+
+        for (size_t j = i + 1; j < result.pre_columns.size(); ++j)
+            result.pre_columns[j] = result.pre_columns[j].eraseNames(new_step_columns_set);
+
+        result.columns = result.columns.eraseNames(new_step_columns_set);
     }
+
+    analyze_commands_for_step(result.columns);
 }
 
 void addPatchPartsColumns(
