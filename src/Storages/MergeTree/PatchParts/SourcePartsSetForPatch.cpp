@@ -134,20 +134,6 @@ PatchParts SourcePartsSetForPatch::getPatchParts(const MergeTreePartInfo & origi
 
     if (!names_for_join.empty())
     {
-        for (const auto & name : names_for_join)
-        {
-            auto min_version = getMinDataVersion(name);
-            auto max_version = getMaxDataVersion(name);
-
-            auto lo = commands_by_version.lower_bound(min_version);
-            auto hi = commands_by_version.upper_bound(max_version);
-
-            for (auto jt = lo; jt != hi; ++jt)
-            {
-                LOG_DEBUG(getLogger("KEK"), "commands for part {}: {}", name, jt->second.toString());
-            }
-        }
-
         patch_parts.push_back(PatchPartInfo
         {
             .mode = PatchMode::Join,

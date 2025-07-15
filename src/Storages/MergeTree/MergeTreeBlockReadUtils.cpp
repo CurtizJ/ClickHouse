@@ -8,12 +8,14 @@
 #include <Core/NamesAndTypes.h>
 #include <Common/checkStackSize.h>
 #include <Common/typeid_cast.h>
+#include "Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h"
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 #include <Columns/ColumnConst.h>
 #include <IO/WriteBufferFromString.h>
 #include <IO/Operators.h>
 #include <Interpreters/ExpressionActions.h>
+#include <Interpreters/MutationsInterpreter.h>
 
 #include <algorithm>
 #include <unordered_set>
@@ -281,14 +283,14 @@ PrewhereExprStepPtr createLightweightDeleteStep(bool remove_filter_column)
     return std::make_shared<PrewhereExprStep>(std::move(step));
 }
 
-static bool convertPatchJoinToExpression(
+static void convertPatchJoinToExpression(
     PatchPartInfoForReader & patch_part,
     PatchPartReadStats & stats,
     const MarkRanges & patch_ranges,
     const Names & patch_columns)
 {
     if (patch_part.mode != PatchMode::Join)
-        return false;
+        return;
 
     MarkRanges ranges_to_read;
     const auto & index_granularity = patch_part.part->getIndexGranularity();
@@ -300,7 +302,7 @@ static bool convertPatchJoinToExpression(
     }
 
     if (ranges_to_read.empty())
-        return false;
+        return;
 
     size_t uncompressed_bytes_to_read = 0;
     size_t rows_to_read = index_granularity.getRowsCountInRanges(ranges_to_read);
@@ -316,11 +318,65 @@ static bool convertPatchJoinToExpression(
     {
         std::move(ranges_to_read.begin(), ranges_to_read.end(), std::inserter(stats.join_patches_read_ranges, stats.join_patches_read_ranges.end()));
         stats.join_patches_uncompressed_bytes += uncompressed_bytes_to_read;
-        return false;
+        return;
     }
 
     patch_part.mode = PatchMode::Expression;
-    return true;
+}
+
+static void addColumnsForPatchExpression(
+    MergeTreeReadTaskColumns & result,
+    PatchPartInfoForReader & patch_part,
+    const StorageSnapshotPtr & storage_snapshot,
+    const GetColumnsOptions & options)
+{
+    const auto * loaded_part_info = dynamic_cast<const LoadedMergeTreeDataPartInfoForReader *>(patch_part.part.get());
+    if (!loaded_part_info)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Expected loaded part info for expression patch part");
+
+    const auto & data_part = loaded_part_info->getDataPart();
+    const auto & source_parts_set = data_part->getSourcePartsSet();
+    auto commands = source_parts_set.getMutationCommandsForParts(patch_part.source_parts, patch_part.source_data_version);
+
+    MutationsInterpreter::Settings settings(true);
+    settings.return_all_columns = true;
+    settings.recalculate_dependencies_of_updated_columns = false;
+
+    auto alter_conversions = std::make_shared<AlterConversions>();
+    auto context = data_part->storage.getContext();
+    auto all_columns = result.getAllColumnNames();
+
+    MutationsInterpreter interpreter(
+        const_cast<MergeTreeData &>(data_part->storage),
+        data_part,
+        alter_conversions,
+        data_part->storage.getInMemoryMetadataPtr(),
+        commands,
+        all_columns,
+        context,
+        settings);
+
+    ExpressionActionsSettings action_settings(context);
+    auto mutation_actions = interpreter.getMutationActions();
+
+    auto & first_step_columns = result.pre_columns.empty() ? result.columns : result.pre_columns.front();
+    auto first_step_columns_set = first_step_columns.getNameSet();
+
+    NameSet required_columns;
+    for (const auto & action : mutation_actions)
+    {
+        auto required_for_step = action.dag.getRequiredColumnsNames();
+        required_columns.insert(required_for_step.begin(), required_for_step.end());
+    }
+
+    for (const auto & column_name : required_columns)
+    {
+        if (!first_step_columns_set.contains(column_name))
+        {
+            auto column = storage_snapshot->getColumn(options, column_name);
+            first_step_columns.push_back(std::move(column));
+        }
+    }
 }
 
 void addPatchPartsColumns(
@@ -372,16 +428,16 @@ void addPatchPartsColumns(
         patch_columns_to_read_set.insert(patch_system_columns.begin(), patch_system_columns.end());
         Names patch_columns_to_read_names(patch_columns_to_read_set.begin(), patch_columns_to_read_set.end());
 
-        if (convertPatchJoinToExpression(patch_parts[i], stats, patch_ranges[i], patch_columns_to_read_names))
+        convertPatchJoinToExpression(patch_parts[i], stats, patch_ranges[i], patch_columns_to_read_names);
+
+        if (patch_parts[i].mode == PatchMode::Expression)
         {
             patch_system_columns = getVirtualsRequiredForPatch(patch_parts[i]);
-            result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_system_columns);
-        }
-        else
-        {
-            result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_columns_to_read_names);
+            patch_columns_to_read_names = patch_system_columns;
+            addColumnsForPatchExpression(result, patch_parts[i], storage_snapshot, options);
         }
 
+        result.patch_columns[i] = storage_snapshot->getColumnsByNames(options, patch_columns_to_read_names);
         required_virtuals.insert(patch_system_columns.begin(), patch_system_columns.end());
     }
 

@@ -7,6 +7,7 @@
 #include <Columns/ColumnSparse.h>
 #include <Columns/ColumnLowCardinality.h>
 #include <base/range.h>
+#include "Common/logger_useful.h"
 #include <Common/Stopwatch.h>
 #include <Common/SipHash.h>
 #include <Common/ProfileEvents.h>
@@ -204,23 +205,23 @@ MergeTreePatchReader::PatchReadResultPtr MergeTreePatchReaderExpression::readPat
         const auto & source_parts_set = data_part->getSourcePartsSet();
         commands = source_parts_set.getMutationCommandsForParts(patch_part.source_parts, patch_part.source_data_version);
 
-        LOG_DEBUG(getLogger("KEK"), "patch commands: {}", commands.toString());
-
         MutationsInterpreter::Settings settings(true);
         settings.return_all_columns = true;
         settings.recalculate_dependencies_of_updated_columns = false;
 
-        const auto & part = loaded_part_info->getDataPart();
         auto alter_conversions = std::make_shared<AlterConversions>();
-        auto context = part->storage.getContext();
+        auto context = data_part->storage.getContext();
+        // auto all_columns = range_reader.getReadSampleBlock().getNames();
+        auto metadata_snapshot = data_part->storage.getInMemoryMetadataPtr();
+        auto all_columns = metadata_snapshot->getColumns().getAll().getNames();
 
         MutationsInterpreter interpreter(
-            const_cast<MergeTreeData &>(part->storage),
-            part,
+            const_cast<MergeTreeData &>(data_part->storage),
+            data_part,
             alter_conversions,
-            part->storage.getInMemoryMetadataPtr(),
+            metadata_snapshot,
             commands,
-            range_reader.getReadSampleBlock().getNames(),
+            all_columns,
             context,
             settings);
 
@@ -228,7 +229,7 @@ MergeTreePatchReader::PatchReadResultPtr MergeTreePatchReaderExpression::readPat
         auto mutation_actions = interpreter.getMutationActions();
 
         for (auto & action : mutation_actions)
-            actions.push_back(std::make_shared<ExpressionActions>(std::move(action.dag), action_settings, action.project_input));
+            actions.push_back(std::make_shared<ExpressionActions>(std::move(action.dag), action_settings, false));
     }
 
     return std::make_shared<PatchReadResult>(ReadResult(nullptr), std::make_shared<PatchExpressionSharedData>(commands, actions));
@@ -241,8 +242,6 @@ PatchToApplyPtr MergeTreePatchReaderExpression::applyPatch(Block & result_block,
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Expression data for patch is not set");
 
     Block block_for_actions = result_block;
-    LOG_DEBUG(getLogger("KEK"), "1. result_block: {}", result_block.dumpStructure());
-
     for (const auto & action : patch_expression_data->actions)
         action->execute(block_for_actions);
 
@@ -260,8 +259,6 @@ PatchToApplyPtr MergeTreePatchReaderExpression::applyPatch(Block & result_block,
 
         result_column.column = new_result_column.column;
     }
-
-    LOG_DEBUG(getLogger("KEK"), "2. result_block: {}", result_block.dumpStructure());
 
     return nullptr;
 }
