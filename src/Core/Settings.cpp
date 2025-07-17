@@ -4780,6 +4780,9 @@ If true, mutations (UPDATEs and DELETEs) which are not materialized in data part
     DECLARE(Bool, apply_patch_parts, true, R"(
 If true, patch parts (that represent lightweight updates) are applied on SELECTs.
 )", 0) \
+    DECLARE(UInt64, apply_patch_parts_join_max_uncompressed_bytes, 0, R"(
+The maximum uncompressed size of patch parts to apply on SELECTs in Join mode.
+)", 0) \
     DECLARE(AlterUpdateMode, alter_update_mode, AlterUpdateMode::HEAVY, R"(
 A mode for `ALTER` queries that have the `UPDATE` commands.
 
