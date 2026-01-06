@@ -182,17 +182,23 @@ public:
         NodesReplacementMap replacements;
         Names original_inputs = actions_dag.getRequiredColumnsNames();
         const auto * filter_node = &actions_dag.findInOutputs(filter_column_name);
+        /// Cache for added input nodes for each search query.
+        std::unordered_map<UInt128, const ActionsDAG::Node *> search_query_to_node;
 
         for (ActionsDAG::Node & node : actions_dag.nodes)
         {
-            auto replaced = tryReplaceFunctionNode(node, context);
+            auto replaced = tryReplaceFunctionNode(node, search_query_to_node, context);
 
             if (replaced.has_value())
             {
                 replacements[&node] = replaced->node;
 
                 for (const auto & [index_name, column_name] : replaced->index_name_to_virtual_column)
-                    result.added_columns[index_name].emplace_back(column_name, std::make_shared<DataTypeUInt8>());
+                {
+                    auto & added_columns = result.added_columns[index_name];
+                    if (!added_columns.contains(column_name))
+                        added_columns.emplace_back(column_name, std::make_shared<DataTypeUInt8>());
+                }
             }
         }
 
@@ -235,7 +241,10 @@ private:
 
     /// Attempts to add a new node with the replacement virtual column.
     /// Returns the pair of (index name, virtual column name) if the replacement is successful.
-    std::optional<NodeReplacement> tryReplaceFunctionNode(ActionsDAG::Node & function_node, const ContextPtr & context)
+    std::optional<NodeReplacement> tryReplaceFunctionNode(
+        ActionsDAG::Node & function_node,
+        std::unordered_map<UInt128, const ActionsDAG::Node *> & search_query_to_node,
+        const ContextPtr & context)
     {
         if (function_node.type != ActionsDAG::ActionType::FUNCTION || !function_node.function || !function_node.function_base)
             return std::nullopt;
@@ -292,32 +301,38 @@ private:
             return lhs.virtual_column_name < rhs.virtual_column_name;
         });
 
+        auto add_condition_to_input = [&](const SelectedCondition & condition)
+        {
+            replacement.index_name_to_virtual_column[condition.index_name] = condition.virtual_column_name;
+            UInt128 condition_hash = condition.search_query->getHash().get128();
+            auto [it, inserted] = search_query_to_node.try_emplace(condition_hash);
+
+            if (inserted)
+                it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
+
+            return it->second;
+        };
+
         /// If we have only one condition with exact search, we can use
         /// only virtual column and remove the original condition.
         if (selected_conditions.size() == 1 && has_exact_search)
         {
-            const auto & condition = selected_conditions.front();
-            replacement.index_name_to_virtual_column[condition.index_name] = condition.virtual_column_name;
-            replacement.node = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-            return replacement;
+            replacement.node = add_condition_to_input(selected_conditions.front());
         }
-
-        /// Otherwise, combine all conditions with the AND function.
-        ActionsDAG::NodeRawConstPtrs children;
-        auto function_builder = FunctionFactory::instance().get("and", context);
-
-        for (const auto & condition : selected_conditions)
+        else /// Otherwise, combine all conditions with the AND function.
         {
-            replacement.index_name_to_virtual_column[condition.index_name] = condition.virtual_column_name;
-            children.push_back(&actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>()));
+            ActionsDAG::NodeRawConstPtrs children;
+            auto function_builder = FunctionFactory::instance().get("and", context);
+
+            for (const auto & condition : selected_conditions)
+                children.push_back(add_condition_to_input(condition));
+
+            if (!has_exact_search)
+                children.push_back(&function_node);
+
+            replacement.node = &actions_dag.addFunction(function_builder, children, "");
         }
 
-        if (!has_exact_search)
-        {
-            children.push_back(&function_node);
-        }
-
-        replacement.node = &actions_dag.addFunction(function_builder, children, "");
         return replacement;
     }
 };
