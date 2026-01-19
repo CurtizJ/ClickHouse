@@ -358,7 +358,6 @@ public:
 
     ~MergeTreeIndexText() override = default;
 
-    bool supportsReadingOnParallelReplicas() const override { return true; }
     MergeTreeIndexTextParams getParams() const { return params; }
     bool isTextIndex() const override { return true; }
 
