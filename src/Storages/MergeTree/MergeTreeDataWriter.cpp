@@ -717,6 +717,8 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
     }
 
     ColumnsStatistics statistics;
+    ColumnsStatistics statistics_for_serializations;
+
     if (context->getSettingsRef()[Setting::materialize_statistics_on_insert])
     {
         ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::MergeTreeDataWriterStatisticsCalculationMicroseconds);
@@ -794,7 +796,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
     if ((*data.storage_settings.get())[MergeTreeSetting::assign_part_uuids])
         new_data_part->uuid = UUIDHelpers::generateV4();
 
-    SerializationInfo::Settings settings
+    SerializationInfo::Settings serialization_settings
     {
         (*data_settings)[MergeTreeSetting::ratio_of_defaults_for_sparse_serialization],
         true,
@@ -802,8 +804,19 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
         (*data_settings)[MergeTreeSetting::string_serialization_version],
         (*data_settings)[MergeTreeSetting::nullable_serialization_version],
     };
-    SerializationInfoByName infos(columns, settings);
-    infos.add(block);
+
+    SerializationInfoByName infos({});
+
+    if (serialization_settings.version >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+    {
+        infos = loadSerializationInfosFromStatistics(statistics_for_serializations, serialization_settings);
+    }
+    else
+    {
+        statistics_for_serializations = getImplicitStatisticsForSparseSerialization(block, serialization_settings);
+        statistics_for_serializations.build(block);
+        infos = loadSerializationInfosFromStatistics(statistics_for_serializations, serialization_settings);
+    }
 
     for (const auto & [column_name, _] : columns)
     {
@@ -966,8 +979,9 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
         (*data_settings)[MergeTreeSetting::string_serialization_version],
         (*data_settings)[MergeTreeSetting::nullable_serialization_version],
     };
+
     SerializationInfoByName infos(columns, settings);
-    infos.add(block);
+    // infos.add(block);
 
     new_data_part->setColumns(columns, infos, metadata_snapshot->getMetadataVersion());
 

@@ -45,6 +45,7 @@ public:
     /// Estimate the cardinality of the column.
     /// Throws if the statistics object is not able to do a meaningful estimation.
     virtual UInt64 estimateCardinality() const;
+    virtual UInt64 estimateDefaults() const;
 
     /// Per-value estimations.
     /// Throws if the statistics object is not able to do a meaningful estimation.
@@ -65,6 +66,7 @@ struct Estimate
     std::set<StatisticsType> types;
     UInt64 rows_count = 0;
     std::optional<UInt64> estimated_cardinality;
+    std::optional<UInt64> estimated_defaults;
     std::optional<Float64> estimated_min;
     std::optional<Float64> estimated_max;
 };

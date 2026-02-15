@@ -44,67 +44,6 @@ bool SerializationInfoTuple::structureEquals(const SerializationInfo & rhs) cons
     return true;
 }
 
-void SerializationInfoTuple::add(const IColumn & column)
-{
-    SerializationInfo::add(column);
-
-    const auto & column_tuple = assert_cast<const ColumnTuple &>(column);
-    const auto & right_elems = column_tuple.getColumns();
-    assert(elems.size() == right_elems.size());
-
-    for (size_t i = 0; i < elems.size(); ++i)
-        elems[i]->add(*right_elems[i]);
-}
-
-void SerializationInfoTuple::add(const SerializationInfo & other)
-{
-    SerializationInfo::add(other);
-
-    const auto & other_info = assert_cast<const SerializationInfoTuple &>(other);
-    for (const auto & [name, elem] : name_to_elem)
-    {
-        auto it = other_info.name_to_elem.find(name);
-        if (it != other_info.name_to_elem.end())
-            elem->add(*it->second);
-        else
-            elem->addDefaults(other_info.getData().num_rows);
-    }
-}
-
-void SerializationInfoTuple::remove(const SerializationInfo & other)
-{
-    if (!structureEquals(other))
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Cannot remove from serialization info different structure");
-
-    SerializationInfo::remove(other);
-    const auto & other_elems = assert_cast<const SerializationInfoTuple &>(other).elems;
-    chassert(elems.size() == other_elems.size());
-
-    for (size_t i = 0; i < elems.size(); ++i)
-        elems[i]->remove(*other_elems[i]);
-}
-
-void SerializationInfoTuple::addDefaults(size_t length)
-{
-    SerializationInfo::addDefaults(length);
-
-    for (const auto & elem : elems)
-        elem->addDefaults(length);
-}
-
-void SerializationInfoTuple::replaceData(const SerializationInfo & other)
-{
-    SerializationInfo::replaceData(other);
-
-    const auto & other_info = assert_cast<const SerializationInfoTuple &>(other);
-    for (const auto & [name, elem] : name_to_elem)
-    {
-        auto it = other_info.name_to_elem.find(name);
-        if (it != other_info.name_to_elem.end())
-            elem->replaceData(*it->second);
-    }
-}
-
 MutableSerializationInfoPtr SerializationInfoTuple::clone() const
 {
     MutableSerializationInfos elems_cloned;
@@ -113,7 +52,6 @@ MutableSerializationInfoPtr SerializationInfoTuple::clone() const
         elems_cloned.push_back(elem ? elem->clone() : nullptr);
 
     auto ret = std::make_shared<SerializationInfoTuple>(std::move(elems_cloned), names);
-    ret->data = data;
     return ret;
 }
 

@@ -36,7 +36,7 @@ MergedBlockOutputStream::MergedBlockOutputStream(
     const WriteSettings & write_settings_,
     WrittenOffsetSubstreams * written_offset_substreams)
     : IMergedBlockOutputStream(
-          std::move(data_settings), data_part->getDataPartStoragePtr(), metadata_snapshot_, columns_list_, reset_columns_)
+          std::move(data_settings), data_part->getDataPartStoragePtr(), metadata_snapshot_, reset_columns_)
     , columns_list(columns_list_)
     , default_codec(default_codec_)
 {
@@ -216,17 +216,19 @@ MergedBlockOutputStream::Finalizer MergedBlockOutputStream::finalizePartAsync(
     }
 
     NameSet files_to_remove_after_sync;
-    if (reset_columns)
-    {
-        auto part_columns = total_columns_list ? *total_columns_list : columns_list;
-        auto serialization_infos = new_part->getSerializationInfos();
+    UNUSED(total_columns_list);
 
-        serialization_infos.replaceData(new_serialization_infos);
-        files_to_remove_after_sync
-            = removeEmptyColumnsFromPart(new_part, part_columns, new_part->expired_columns, serialization_infos, checksums);
+    // if (reset_columns)
+    // {
+    //     auto part_columns = total_columns_list ? *total_columns_list : columns_list;
+    //     auto serialization_infos = new_part->getSerializationInfos();
 
-        new_part->setColumns(part_columns, serialization_infos, metadata_snapshot->getMetadataVersion());
-    }
+    //     serialization_infos.replaceData(new_serialization_infos);
+    //     files_to_remove_after_sync
+    //         = removeEmptyColumnsFromPart(new_part, part_columns, new_part->expired_columns, serialization_infos, checksums);
+
+    //     new_part->setColumns(part_columns, serialization_infos, metadata_snapshot->getMetadataVersion());
+    // }
 
     std::vector<std::unique_ptr<WriteBufferFromFileBase>> written_files;
     written_files = finalizePartOnDisk(new_part, checksums, gathered_data);
@@ -429,9 +431,6 @@ void MergedBlockOutputStream::writeImpl(const Block & block, const IColumn::Perm
         return;
 
     writer->write(block, permutation);
-    if (reset_columns)
-        new_serialization_infos.add(block);
-
     rows_count += rows;
 }
 

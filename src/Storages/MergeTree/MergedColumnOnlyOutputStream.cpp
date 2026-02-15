@@ -22,7 +22,6 @@ MergedColumnOnlyOutputStream::MergedColumnOnlyOutputStream(
           std::move(data_settings),
           data_part->getDataPartStoragePtr(),
           metadata_snapshot_,
-          columns_list_,
           /*reset_columns=*/true)
 {
     /// Save marks in memory if prewarm is enabled to avoid re-reading marks file.
@@ -65,7 +64,6 @@ void MergedColumnOnlyOutputStream::write(const Block & block)
         return;
 
     writer->write(block, nullptr);
-    new_serialization_infos.add(block);
 }
 
 void MergedColumnOnlyOutputStream::finalizeIndexGranularity()
@@ -93,7 +91,6 @@ MergeTreeData::DataPart::Checksums MergedColumnOnlyOutputStream::fillChecksums(M
 
     auto columns = new_part->getColumns();
     auto serialization_infos = new_part->getSerializationInfos();
-    serialization_infos.replaceData(new_serialization_infos);
 
     NameSet empty_columns;
     for (const auto & column : writer->getColumnsSample())

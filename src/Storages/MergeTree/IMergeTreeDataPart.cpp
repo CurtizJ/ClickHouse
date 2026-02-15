@@ -1879,7 +1879,16 @@ void IMergeTreeDataPart::loadColumns(bool require, bool load_metadata_version)
 
     SerializationInfoByName infos({});
     if (auto in = readFileIfExists(SERIALIZATION_FILE_NAME))
-        infos = SerializationInfoByName::readJSON(loaded_columns, *in);
+    {
+        auto result = loadSerializationInfosFromBuffer(*in);
+        infos = result.infos;
+
+        if (result.stats)
+        {
+            std::lock_guard lock(estimates_mutex);
+            estimates = std::move(*result.stats);
+        }
+    }
 
     std::optional<int32_t> loaded_metadata_version;
     if (load_metadata_version)

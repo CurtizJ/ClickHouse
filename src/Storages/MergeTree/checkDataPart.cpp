@@ -201,7 +201,7 @@ static IMergeTreeDataPart::Checksums checkDataPart(
         try
         {
             auto serialization_file = data_part_storage.readFile(IMergeTreeDataPart::SERIALIZATION_FILE_NAME, read_settings, std::nullopt);
-            serialization_infos = SerializationInfoByName::readJSON(columns_txt, *serialization_file);
+            serialization_infos = loadSerializationInfosFromBuffer(*serialization_file).infos;
         }
         catch (...)
         {

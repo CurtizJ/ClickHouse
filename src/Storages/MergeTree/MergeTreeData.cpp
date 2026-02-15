@@ -10089,10 +10089,12 @@ static void updateSerializationHintsForPart(const DataPartPtr & part, const Colu
             continue;
 
         chassert(new_hint->structureEquals(*info));
-        if (remove)
-            new_hint->remove(*info);
-        else
-            new_hint->add(*info);
+        // if (remove)
+        //     new_hint->remove(*info);
+        // else
+        //     new_hint->add(*info);
+
+        UNUSED(remove);
     }
 }
 

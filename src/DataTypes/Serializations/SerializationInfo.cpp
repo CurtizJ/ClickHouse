@@ -38,83 +38,14 @@ constexpr auto KEY_NULLABLE_SERIALIZATION_VERSION = "nullable";
 
 }
 
-void SerializationInfo::Data::add(const IColumn & column)
-{
-    size_t rows = column.size();
-    double ratio = column.getRatioOfDefaultRows(ColumnSparse::DEFAULT_ROWS_SEARCH_SAMPLE_RATIO);
-
-    num_rows += rows;
-    num_defaults += static_cast<size_t>(ratio * static_cast<double>(rows));
-}
-
-void SerializationInfo::Data::add(const Data & other)
-{
-    num_rows += other.num_rows;
-    num_defaults += other.num_defaults;
-}
-
-void SerializationInfo::Data::remove(const Data & other)
-{
-    num_rows -= other.num_rows;
-    num_defaults -= other.num_defaults;
-}
-
-void SerializationInfo::Data::addDefaults(size_t length)
-{
-    num_rows += length;
-    num_defaults += length;
-}
-
 SerializationInfo::SerializationInfo(ISerialization::KindStack kind_stack_, const Settings & settings_)
-    : settings(settings_)
-    , kind_stack(kind_stack_)
+    : settings(settings_), kind_stack(kind_stack_)
 {
-}
-
-SerializationInfo::SerializationInfo(ISerialization::KindStack kind_stack_, const Settings & settings_, const Data & data_)
-    : settings(settings_)
-    , kind_stack(kind_stack_)
-    , data(data_)
-{
-}
-
-void SerializationInfo::add(const IColumn & column)
-{
-    data.add(column);
-    if (settings.choose_kind)
-        kind_stack = chooseKindStack(data, settings);
-}
-
-void SerializationInfo::add(const SerializationInfo & other)
-{
-    data.add(other.data);
-    if (settings.choose_kind)
-        kind_stack = chooseKindStack(data, settings);
-}
-
-void SerializationInfo::remove(const SerializationInfo & other)
-{
-    data.remove(other.data);
-    if (settings.choose_kind)
-        kind_stack = chooseKindStack(data, settings);
-}
-
-
-void SerializationInfo::addDefaults(size_t length)
-{
-    data.addDefaults(length);
-    if (settings.choose_kind)
-        kind_stack = chooseKindStack(data, settings);
-}
-
-void SerializationInfo::replaceData(const SerializationInfo & other)
-{
-    data = other.data;
 }
 
 MutableSerializationInfoPtr SerializationInfo::clone() const
 {
-    return std::make_shared<SerializationInfo>(kind_stack, settings, data);
+    return std::make_shared<SerializationInfo>(kind_stack, settings);
 }
 
 /// Returns true if all rows with default values of type 'lhs'
@@ -250,29 +181,34 @@ void SerializationInfo::deserializeFromKindsBinary(ReadBuffer & in)
 void SerializationInfo::toJSON(Poco::JSON::Object & object) const
 {
     object.set(KEY_KIND, ISerialization::kindStackToString(kind_stack));
-    object.set(KEY_NUM_DEFAULTS, data.num_defaults);
-    object.set(KEY_NUM_ROWS, data.num_rows);
+}
+
+void SerializationInfo::toJSONWithStats(Poco::JSON::Object & object, const Estimate & stats) const
+{
+    object.set(KEY_KIND, ISerialization::kindStackToString(kind_stack));
+    object.set(KEY_NUM_DEFAULTS, stats.estimated_defaults.value_or(0));
+    object.set(KEY_NUM_ROWS, stats.rows_count);
 }
 
 void SerializationInfo::fromJSON(const Poco::JSON::Object & object)
+{
+    if (!object.has(KEY_KIND))
+        throw Exception(ErrorCodes::CORRUPTED_DATA, "Missed field '{}' in SerializationInfo", KEY_KIND);
+
+    kind_stack = ISerialization::stringToKindStack(object.getValue<String>(KEY_KIND));
+}
+
+void SerializationInfo::fromJSONWithStats(const Poco::JSON::Object & object, Estimate & stats)
 {
     if (!object.has(KEY_KIND) || !object.has(KEY_NUM_DEFAULTS) || !object.has(KEY_NUM_ROWS))
         throw Exception(ErrorCodes::CORRUPTED_DATA,
             "Missed field '{}' or '{}' or '{}' in SerializationInfo of columns",
             KEY_KIND, KEY_NUM_DEFAULTS, KEY_NUM_ROWS);
 
-    data.num_rows = object.getValue<size_t>(KEY_NUM_ROWS);
-    data.num_defaults = object.getValue<size_t>(KEY_NUM_DEFAULTS);
+    stats.types.insert(StatisticsType::Defaults);
+    stats.rows_count = object.getValue<size_t>(KEY_NUM_ROWS);
+    stats.estimated_defaults = object.getValue<size_t>(KEY_NUM_DEFAULTS);
     kind_stack = ISerialization::stringToKindStack(object.getValue<String>(KEY_KIND));
-}
-
-ISerialization::KindStack SerializationInfo::chooseKindStack(const Data & data, const Settings & settings)
-{
-    ISerialization::KindStack kind_stack = {ISerialization::Kind::DEFAULT};
-    double ratio = data.num_rows ? std::min(static_cast<double>(data.num_defaults) / static_cast<double>(data.num_rows), 1.0) : 0.0;
-    if (ratio > settings.ratio_of_defaults_for_sparse)
-        kind_stack.push_back(ISerialization::Kind::SPARSE);
-    return kind_stack;
 }
 
 SerializationInfoByName::SerializationInfoByName(const SerializationInfo::Settings & settings_)
@@ -296,42 +232,6 @@ SerializationInfoByName::SerializationInfoByName(const NamesAndTypesList & colum
     }
 }
 
-void SerializationInfoByName::add(const Block & block)
-{
-    for (const auto & column : block)
-    {
-        auto it = find(column.name);
-        if (it == end())
-            continue;
-
-        it->second->add(*column.column);
-    }
-}
-
-void SerializationInfoByName::add(const SerializationInfoByName & other)
-{
-    for (const auto & [name, info] : other)
-        add(name, *info);
-}
-
-void SerializationInfoByName::add(const String & name, const SerializationInfo & info)
-{
-    if (auto it = find(name); it != end())
-        it->second->add(info);
-}
-
-void SerializationInfoByName::remove(const SerializationInfoByName & other)
-{
-    for (const auto & [name, info] : other)
-        remove(name, *info);
-}
-
-void SerializationInfoByName::remove(const String & name, const SerializationInfo & info)
-{
-    if (auto it = find(name); it != end())
-        it->second->remove(info);
-}
-
 SerializationInfoPtr SerializationInfoByName::tryGet(const String & name) const
 {
     auto it = find(name);
@@ -342,19 +242,6 @@ MutableSerializationInfoPtr SerializationInfoByName::tryGet(const String & name)
 {
     auto it = find(name);
     return it == end() ? nullptr : it->second;
-}
-
-void SerializationInfoByName::replaceData(const SerializationInfoByName & other)
-{
-    for (const auto & [name, new_info] : other)
-    {
-        auto & old_info = (*this)[name];
-
-        if (old_info)
-            old_info->replaceData(*new_info);
-        else
-            old_info = new_info->clone();
-    }
 }
 
 ISerialization::KindStack SerializationInfoByName::getKindStack(const String & column_name) const
@@ -373,20 +260,21 @@ bool SerializationInfoByName::needsPersistence() const
     return !empty() || getVersion() > MergeTreeSerializationInfoVersion::BASIC;
 }
 
-void SerializationInfoByName::writeJSON(WriteBuffer & out) const
+template <typename ElementWriter>
+void SerializationInfoByName::writeJSONImpl(WriteBuffer & out, ElementWriter && write_element) const
 {
+    auto version = getVersion();
     Poco::JSON::Object object;
     Poco::JSON::Array column_infos;
 
     for (const auto & [name, info] : *this)
     {
         Poco::JSON::Object info_json;
-        info->toJSON(info_json);
         info_json.set(KEY_NAME, name);
+        write_element(name, *info, info_json);
         column_infos.add(std::move(info_json)); /// NOLINT
     }
 
-    auto version = getVersion();
     object.set(KEY_VERSION, static_cast<uint8_t>(version));
     object.set(KEY_COLUMNS, std::move(column_infos)); /// NOLINT
 
@@ -394,8 +282,10 @@ void SerializationInfoByName::writeJSON(WriteBuffer & out) const
     {
         Poco::JSON::Object type_versions_obj;
         type_versions_obj.set(KEY_STRING_SERIALIZATION_VERSION, static_cast<size_t>(settings.string_serialization_version));
+
         if (settings.nullable_serialization_version != MergeTreeNullableSerializationVersion::BASIC)
             type_versions_obj.set(KEY_NULLABLE_SERIALIZATION_VERSION, static_cast<size_t>(settings.nullable_serialization_version));
+
         object.set(KEY_TYPES_SERIALIZATION_VERSIONS, type_versions_obj);
     }
 
@@ -406,6 +296,28 @@ void SerializationInfoByName::writeJSON(WriteBuffer & out) const
     writeString(oss.str(), out);
 }
 
+void SerializationInfoByName::writeJSON(WriteBuffer & out) const
+{
+    writeJSONImpl(out,
+        [&](const String &, const SerializationInfo & info, Poco::JSON::Object & info_json)
+        {
+            info.toJSON(info_json);
+        });
+}
+
+void SerializationInfoByName::writeJSONWithStats(WriteBuffer & out, const Estimates & stats) const
+{
+    writeJSONImpl(out,
+        [&](const String & name, const SerializationInfo & info, Poco::JSON::Object & info_json)
+        {
+            auto it = stats.find(name);
+            if (it == stats.end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Missed statistics for column {}", name);
+
+            info.toJSONWithStats(info_json, it->second);
+        });
+}
+
 SerializationInfoByName SerializationInfoByName::clone() const
 {
     SerializationInfoByName res(settings);
@@ -414,7 +326,7 @@ SerializationInfoByName SerializationInfoByName::clone() const
     return res;
 }
 
-SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesAndTypesList & columns, const std::string & json_str)
+SerializationInfosLoadResult loadSerializationInfosFromString(const std::string & json_str)
 {
     Poco::JSON::Parser parser;
     auto object = parser.parse(json_str).extract<Poco::JSON::Object::Ptr>();
@@ -428,11 +340,13 @@ SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesA
         auto maybe_enum = magic_enum::enum_cast<MergeTreeSerializationInfoVersion>(version_value);
         if (!maybe_enum)
             throw Exception(ErrorCodes::CORRUPTED_DATA, "Unknown version of serialization infos ({})", version_value);
+
         version = *maybe_enum;
     }
 
     Poco::JSON::Array::Ptr columns_array;
     Poco::JSON::Object::Ptr type_versions_obj;
+
     for (const auto & [key, value] : *object)
     {
         if (key == KEY_VERSION)
@@ -455,6 +369,7 @@ SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesA
 
     MergeTreeStringSerializationVersion string_serialization_version = MergeTreeStringSerializationVersion::SINGLE_STREAM;
     MergeTreeNullableSerializationVersion nullable_serialization_version = MergeTreeNullableSerializationVersion::BASIC;
+
     if (version >= MergeTreeSerializationInfoVersion::WITH_TYPES)
     {
         /// types_serialization_versions is mandatory in WITH_TYPES mode
@@ -473,6 +388,7 @@ SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesA
                 auto maybe_enum = magic_enum::enum_cast<MergeTreeStringSerializationVersion>(version_value);
                 if (!maybe_enum.has_value())
                     throw Exception(ErrorCodes::CORRUPTED_DATA, "Invalid version {} for type '{}'", version_value, type_name);
+
                 string_serialization_version = *maybe_enum;
             }
             else if (type_name == KEY_NULLABLE_SERIALIZATION_VERSION)
@@ -480,6 +396,7 @@ SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesA
                 auto maybe_enum = magic_enum::enum_cast<MergeTreeNullableSerializationVersion>(version_value);
                 if (!maybe_enum.has_value())
                     throw Exception(ErrorCodes::CORRUPTED_DATA, "Invalid version {} for type '{}'", version_value, type_name);
+
                 nullable_serialization_version = *maybe_enum;
             }
             else
@@ -496,42 +413,104 @@ SerializationInfoByName SerializationInfoByName::readJSONFromString(const NamesA
         string_serialization_version,
         nullable_serialization_version);
 
+    std::optional<Estimates> stats;
     SerializationInfoByName infos(settings);
-    if (columns_array)
+
+    if (version >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
     {
-        std::unordered_map<std::string_view, const IDataType *> column_type_by_name;
-        for (const auto & [name, type] : columns)
-            column_type_by_name.emplace(name, type.get());
+        stats = Estimates();
+    }
 
-        for (const auto & elem : *columns_array)
+    if (!columns_array)
+        return {infos, stats};
+
+    for (const auto & elem : *columns_array)
+    {
+        const auto & elem_object = elem.extract<Poco::JSON::Object::Ptr>();
+
+        if (!elem_object->has(KEY_NAME))
+            throw Exception(ErrorCodes::CORRUPTED_DATA, "Missed field '{}' in serialization infos", KEY_NAME);
+
+        auto name = elem_object->getValue<String>(KEY_NAME);
+        auto kind_stack = ISerialization::KindStack{ISerialization::Kind::DEFAULT};
+        auto info = std::make_shared<SerializationInfo>(kind_stack, settings);
+
+        if (version >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
         {
-            const auto & elem_object = elem.extract<Poco::JSON::Object::Ptr>();
-
-            if (!elem_object->has(KEY_NAME))
-                throw Exception(ErrorCodes::CORRUPTED_DATA,
-                    "Missed field '{}' in serialization infos", KEY_NAME);
-
-            auto name = elem_object->getValue<String>(KEY_NAME);
-            auto it = column_type_by_name.find(name);
-
-            if (it == column_type_by_name.end())
-                throw Exception(ErrorCodes::CORRUPTED_DATA,
-                    "Found unexpected column '{}' in serialization infos", name);
-
-            auto info = it->second->createSerializationInfo(infos.settings);
             info->fromJSON(*elem_object);
-            infos.emplace(name, std::move(info));
         }
+        else
+        {
+            auto & current_stats = stats.value()[name];
+            info->fromJSONWithStats(*elem_object, current_stats);
+        }
+
+        infos.emplace(name, std::move(info));
+    }
+
+    return {infos, stats};
+}
+
+SerializationInfosLoadResult loadSerializationInfosFromBuffer(ReadBuffer & in)
+{
+    String json_str;
+    readString(json_str, in);
+    return loadSerializationInfosFromString(json_str);
+}
+
+SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatistics & statistics, const SerializationInfoSettings & settings)
+{
+    SerializationInfoByName infos(settings);
+    if (settings.isAlwaysDefault())
+        return infos;
+
+    for (const auto & [column_name, column_stats] : statistics)
+    {
+        size_t num_rows = column_stats->getNumRows();
+        auto data_type = column_stats->getDataType();
+        const auto & stats = column_stats->getStats();
+
+        if (data_type->supportsSparseSerialization() && stats.contains(StatisticsType::Defaults))
+        {
+            size_t num_defaults = stats.at(StatisticsType::Defaults)->estimateDefaults();
+            Float64 ratio = static_cast<Float64>(num_defaults) / static_cast<Float64>(num_rows);
+
+            if (ratio > settings.ratio_of_defaults_for_sparse)
+            {
+                auto kind_stack = ISerialization::KindStack{ISerialization::Kind::DEFAULT, ISerialization::Kind::SPARSE};
+                infos.emplace(column_name, std::make_shared<SerializationInfo>(kind_stack, settings));
+                continue;
+            }
+        }
+
+        auto kind_stack = ISerialization::KindStack{ISerialization::Kind::DEFAULT};
+        infos.emplace(column_name, std::make_shared<SerializationInfo>(kind_stack, settings));
     }
 
     return infos;
 }
 
-SerializationInfoByName SerializationInfoByName::readJSON(const NamesAndTypesList & columns, ReadBuffer & in)
+ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings)
 {
-    String json_str;
-    readString(json_str, in);
-    return readJSONFromString(columns, json_str);
+    if (settings.ratio_of_defaults_for_sparse >= 1.0)
+        return {};
+
+    ColumnsStatistics statistics;
+    for (const auto & column : block)
+    {
+        if (!column.type->supportsSparseSerialization())
+            continue;
+
+        ColumnStatisticsDescription desc;
+        SingleStatisticsDescription stat_desc(StatisticsType::Defaults, nullptr, true);
+
+        desc.data_type = column.type;
+        desc.types_to_desc.emplace(StatisticsType::Defaults, std::move(stat_desc));
+
+        statistics.emplace(column.name, MergeTreeStatisticsFactory::instance().get(desc));
+    }
+
+    return statistics;
 }
 
 }

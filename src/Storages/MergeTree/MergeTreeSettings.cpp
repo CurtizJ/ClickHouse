@@ -266,7 +266,7 @@ namespace ErrorCodes
     DECLARE(Bool, escape_variant_subcolumn_filenames, true, R"(
     Escape special symbols in filenames created for subcolumns of Variant data type in Wide parts of MergeTree table. Needed for compatibility.
     )", 0) \
-    DECLARE(MergeTreeSerializationInfoVersion, serialization_info_version, "with_types", R"(
+    DECLARE(MergeTreeSerializationInfoVersion, serialization_info_version, "without_data", R"(
     Serialization info version used when writing `serialization.json`.
     This setting is required for compatibility during cluster upgrades.
 

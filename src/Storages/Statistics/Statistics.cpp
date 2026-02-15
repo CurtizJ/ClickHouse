@@ -15,6 +15,7 @@
 #include <Storages/Statistics/StatisticsMinMax.h>
 #include <Storages/Statistics/StatisticsTDigest.h>
 #include <Storages/Statistics/StatisticsUniq.h>
+#include <Storages/Statistics/StatisticDefaults.h>
 #include <Storages/StatisticsDescription.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ExpressionElementParsers.h>
@@ -116,6 +117,11 @@ std::shared_ptr<ColumnStatistics> ColumnStatistics::cloneEmpty() const
 UInt64 IStatistics::estimateCardinality() const
 {
     throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Cardinality estimation is not implemented for this type of statistics");
+}
+
+UInt64 IStatistics::estimateDefaults() const
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Defaults estimation is not implemented for this type of statistics");
 }
 
 Float64 IStatistics::estimateEqual(const Field & /*val*/) const
@@ -228,6 +234,14 @@ UInt64 ColumnStatistics::estimateCardinality() const
     return UInt64(static_cast<Float64>(rows) * ConditionSelectivityEstimator::default_cardinality_ratio);
 }
 
+UInt64 ColumnStatistics::estimateDefaults() const
+{
+    if (stats.contains(StatisticsType::Defaults))
+    {
+        return stats.at(StatisticsType::Defaults)->estimateDefaults();
+    }
+    return 0;
+}
 Estimate ColumnStatistics::getEstimate() const
 {
     Estimate info;
@@ -388,6 +402,9 @@ MergeTreeStatisticsFactory::MergeTreeStatisticsFactory()
 
     registerValidator(StatisticsType::Uniq, uniqStatisticsValidator);
     registerCreator(StatisticsType::Uniq, uniqStatisticsCreator);
+
+    registerValidator(StatisticsType::Defaults, defaultsStatisticsValidator);
+    registerCreator(StatisticsType::Defaults, defaultsStatisticsCreator);
 
 #if USE_DATASKETCHES
     registerValidator(StatisticsType::CountMinSketch, countMinSketchStatisticsValidator);

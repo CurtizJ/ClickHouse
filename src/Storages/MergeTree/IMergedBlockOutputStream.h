@@ -20,7 +20,6 @@ public:
         MergeTreeSettingsPtr storage_settings_,
         MutableDataPartStoragePtr data_part_storage_,
         const StorageMetadataPtr & metadata_snapshot_,
-        const NamesAndTypesList & columns_list,
         bool reset_columns_);
 
     virtual ~IMergedBlockOutputStream() = default;
@@ -31,6 +30,7 @@ public:
         MergeTreeData::DataPart::Checksums checksums;
         ColumnsSubstreams columns_substreams;
         ColumnsStatistics statistics;
+        ColumnsStatistics statistics_for_serializations;
     };
 
     virtual void write(const Block & block) = 0;
@@ -75,8 +75,6 @@ protected:
     MergeTreeDataPartWriterPtr writer;
 
     bool reset_columns = false;
-    SerializationInfo::Settings info_settings;
-    SerializationInfoByName new_serialization_infos{{}};
 };
 
 using IMergedBlockOutputStreamPtr = std::shared_ptr<IMergedBlockOutputStream>;

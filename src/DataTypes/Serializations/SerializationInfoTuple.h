@@ -13,12 +13,6 @@ public:
     bool hasCustomSerialization() const override;
     bool structureEquals(const SerializationInfo & rhs) const override;
 
-    void add(const IColumn & column) override;
-    void add(const SerializationInfo & other) override;
-    void remove(const SerializationInfo & other) override;
-    void addDefaults(size_t length) override;
-    void replaceData(const SerializationInfo & other) override;
-
     MutableSerializationInfoPtr clone() const override;
 
     MutableSerializationInfoPtr createWithType(
