@@ -280,7 +280,7 @@ void MergeTextIndexesTask::readDictionaryBlock(size_t source_num)
     if (data_buffer->eof())
         return;
 
-    inputs[source_num] = TextIndexSerialization::deserializeDictionaryBlock(*data_buffer, posting_list_codec);
+    inputs[source_num] = TextIndexSerialization::deserializeDictionaryBlock(*data_buffer, posting_list_codec, postings_serialization);
     const auto & tokens = inputs[source_num].tokens;
     cursors[source_num].reset({tokens}, getHeader(), tokens->size());
     queue.push(cursors[source_num]);
@@ -301,7 +301,7 @@ std::vector<PostingListPtr> MergeTextIndexesTask::readPostingLists(size_t source
     for (const auto offset_in_file : token_info.offsets)
     {
         stream->seekToMark({offset_in_file, 0});
-        postings.emplace_back(PostingsSerialization::deserialize(*data_buffer, token_info.header, token_info.cardinality, posting_list_codec));
+        postings.emplace_back(postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality, posting_list_codec));
     }
 
     return postings;

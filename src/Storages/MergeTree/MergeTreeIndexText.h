@@ -139,6 +139,8 @@ struct TokenPostingsInfo;
 
 struct PostingsSerialization
 {
+    PostingsSerialization();
+
     enum Flags : UInt64
     {
         /// If set, the posting list is serialized as raw UInt32 values encoded as VarUInt.
@@ -156,7 +158,16 @@ struct PostingsSerialization
     static void serialize(PostingListBuilder & postings, TokenPostingsInfo & info, size_t posting_list_block_size, PostingListCodecPtr posting_list_codec, WriteBuffer & ostr);
     static void serialize(const PostingList & postings, TokenPostingsInfo & info, size_t posting_list_block_size, PostingListCodecPtr posting_list_codec, WriteBuffer & ostr);
     static void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
-    static PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, PostingListCodecPtr posting_list_codec);
+    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, PostingListCodecPtr posting_list_codec);
+
+    /// Advances the read buffer past the postings data without allocating Roaring bitmaps.
+    /// Only supports RawPostings format (used by embedded postings).
+    static void skipPostings(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
+
+private:
+    /// Reusable buffers to avoid repeated heap allocations during deserialization.
+    std::vector<UInt32> raw_postings_buffer;
+    std::vector<char> deserialization_buffer;
 };
 
 /// Closed range of rows.
@@ -176,8 +187,8 @@ struct TokenPostingsInfo
 {
     UInt64 header = 0;
     UInt32 cardinality = 0;
-    std::vector<UInt64> offsets;
-    std::vector<RowsRange> ranges;
+    absl::InlinedVector<UInt64, 1> offsets;
+    absl::InlinedVector<RowsRange, 1> ranges;
     PostingListPtr embedded_postings;
 
     /// Returns indexes of posting list blocks to read for the given range of rows.
@@ -242,8 +253,13 @@ struct TextIndexSerialization
     static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr);
 
     static DictionarySparseIndex deserializeSparseIndex(ReadBuffer & istr);
-    static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingListCodecPtr posting_list_codec);
-    static DictionaryBlock deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec);
+    static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, bool skip_postings = false);
+
+    /// Deserializes a dictionary block into a new DictionaryBlock.
+    static DictionaryBlock deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, bool skip_postings = false);
+
+    /// Deserializes a dictionary block into an existing DictionaryBlock, reusing its token_infos vector capacity.
+    static void deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, DictionaryBlock & result, bool skip_postings = false);
 };
 
 
@@ -281,13 +297,14 @@ public:
         MergeTreeIndexDeserializationState & state,
         const TokenPostingsInfo & token_info,
         size_t block_idx,
-        PostingListCodecPtr posting_list_codec);
+        PostingListCodecPtr posting_list_codec,
+        PostingsSerialization & postings_serialization);
 
 private:
     void readSparseIndex(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state);
     /// Reads dictionary blocks and analyzes them for tokens.
-    void analyzeDictionary(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state);
-    void readPostingsForRareTokens(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state);
+    void analyzeDictionary(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state, PostingsSerialization & postings_serialization);
+    void readPostingsForRareTokens(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state, PostingsSerialization & postings_serialization);
 
     /// If adding significantly large members here make sure to add them to memoryUsageBytes()
     MergeTreeIndexTextParams params;

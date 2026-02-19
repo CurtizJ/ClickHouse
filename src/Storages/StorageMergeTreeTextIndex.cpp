@@ -176,7 +176,7 @@ private:
 
                 size_t block_idx = matching_blocks[next_matching_block++];
                 dictionary_buf->seek(sparse_index.getOffsetInFile(block_idx), 0);
-                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec);
+                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec, postings_serialization, true);
             }
             else /// Sequential reading without filtering.
             {
@@ -186,7 +186,7 @@ private:
                     continue;
                 }
 
-                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec);
+                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec, postings_serialization, true);
             }
         }
     }
@@ -288,6 +288,7 @@ private:
     DictionarySparseIndex sparse_index;
     std::vector<size_t> matching_blocks;
     size_t next_matching_block = 0;
+    PostingsSerialization postings_serialization;
 };
 
 class ReadFromMergeTreeTextIndex : public SourceStepWithFilter
