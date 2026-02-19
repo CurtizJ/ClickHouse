@@ -260,6 +260,17 @@ struct TextIndexSerialization
 
     /// Deserializes a dictionary block into an existing DictionaryBlock, reusing its token_infos vector capacity.
     static void deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, DictionaryBlock & result, bool skip_postings = false);
+
+    /// Deserializes a dictionary block but only fully deserializes TokenPostingsInfo for tokens
+    /// matching `needed_tokens`. For each matching token, calls `on_match(token_view, token_info)`.
+    /// `needed_tokens` must be sorted.
+    template <typename Callback>
+    static void deserializeDictionaryBlockSelective(
+        ReadBuffer & istr,
+        PostingListCodecPtr posting_list_codec,
+        PostingsSerialization & postings_serialization,
+        const std::vector<std::string_view> & needed_tokens,
+        Callback && on_match);
 };
 
 

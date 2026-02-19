@@ -376,37 +376,57 @@ void MergeTreeIndexGranuleText::analyzeDictionary(MergeTreeIndexReaderStream & s
     }
 
     auto * data_buffer = stream.getDataBuffer();
+    const String & data_path = state.part.getDataPartStorage().getFullPath();
+    const String & index_name = state.index.getFileName();
+    const auto & cache = condition_text.dictionaryBlockCache();
 
-    /// Either retrieves a dictionary block from cache or from disk when cache is disabled.
-    const auto get_dictionary_block = [&](size_t block_id)
+    for (auto & [block_idx, tokens] : block_to_tokens)
     {
-        const auto load_dictionary_block = [&] -> TextIndexDictionaryBlockCacheEntryPtr
+        auto hash = TextIndexDictionaryBlockCache::hash(data_path, index_name, block_idx);
+
+        /// Try the cache first.
+        if (auto cached_block = cache->get(hash))
         {
-            UInt64 offset_in_file = sparse_index->getOffsetInFile(block_id);
-            stream.seekToMark({offset_in_file, 0});
-            return std::make_shared<TextIndexDictionaryBlockCacheEntry>(TextIndexSerialization::deserializeDictionaryBlock(*data_buffer, posting_list_codec, postings_serialization));
-        };
-
-        auto hash = TextIndexDictionaryBlockCache::hash(state.part.getDataPartStorage().getFullPath(), state.index.getFileName(), block_id);
-        return condition_text.dictionaryBlockCache()->getOrSet(hash, load_dictionary_block);
-    };
-
-    for (const auto & [block_idx, tokens] : block_to_tokens)
-    {
-        const auto dictionary_block = get_dictionary_block(block_idx);
-
-        for (const auto & token : tokens)
-        {
-            auto * token_info = dictionary_block->getTokenInfo(token);
-
-            if (token_info)
+            for (const auto & token : tokens)
             {
-                remaining_tokens.emplace(token, *token_info);
+                auto * token_info = cached_block->getTokenInfo(token);
+
+                if (token_info)
+                {
+                    remaining_tokens.emplace(token, *token_info);
+                }
+                else if (global_search_mode == TextSearchMode::All)
+                {
+                    remaining_tokens.clear();
+                    return;
+                }
             }
-            else if (global_search_mode == TextSearchMode::All)
+            continue;
+        }
+
+        /// Cache miss: use selective deserialization to skip posting lists
+        /// for tokens that are not in the search set.
+        UInt64 offset_in_file = sparse_index->getOffsetInFile(block_idx);
+        stream.seekToMark({offset_in_file, 0});
+
+        std::sort(tokens.begin(), tokens.end());
+
+        TextIndexSerialization::deserializeDictionaryBlockSelective(
+            *data_buffer, posting_list_codec, postings_serialization, tokens,
+            [&](std::string_view token, TokenPostingsInfo && info)
             {
-                remaining_tokens.clear();
-                return;
+                remaining_tokens.emplace(token, std::move(info));
+            });
+
+        if (global_search_mode == TextSearchMode::All)
+        {
+            for (const auto & token : tokens)
+            {
+                if (!remaining_tokens.contains(token))
+                {
+                    remaining_tokens.clear();
+                    return;
+                }
             }
         }
     }
@@ -932,6 +952,82 @@ DictionaryBlock TextIndexSerialization::deserializeDictionaryBlock(ReadBuffer & 
 
     DictionaryBlock result{std::move(tokens_column), std::move(token_infos), tokens_format};
     return result;
+}
+
+template <typename Callback>
+void TextIndexSerialization::deserializeDictionaryBlockSelective(
+    ReadBuffer & istr,
+    PostingListCodecPtr posting_list_codec,
+    PostingsSerialization & postings_serialization,
+    const std::vector<std::string_view> & needed_tokens,
+    Callback && on_match)
+{
+    ProfileEvents::increment(ProfileEvents::TextIndexReadDictionaryBlocks);
+
+    UInt64 tokens_format;
+    readVarUInt(tokens_format, istr);
+
+    size_t num_tokens = 0;
+    readVarUInt(num_tokens, istr);
+
+    ColumnPtr tokens_column;
+    switch (tokens_format)
+    {
+        case static_cast<UInt64>(TextIndexSerialization::TokensFormat::RawStrings):
+            tokens_column = deserializeTokensRaw(istr, num_tokens);
+            break;
+        case static_cast<UInt64>(TextIndexSerialization::TokensFormat::FrontCodedStrings):
+            tokens_column = deserializeTokensFrontCoding(istr, num_tokens);
+            break;
+        default:
+            throw Exception(ErrorCodes::CORRUPTED_DATA, "Unknown tokens serialization format ({}) in dictionary block", tokens_format);
+    }
+
+    const auto & tokens = assert_cast<const ColumnString &>(*tokens_column);
+
+    /// Use binary search to find indices of matched tokens in the block.
+    /// matched_indices stores pairs of (block_index, index_in_needed_tokens).
+    std::vector<std::pair<size_t, size_t>> matched_indices;
+    matched_indices.reserve(needed_tokens.size());
+
+    for (size_t j = 0; j < needed_tokens.size(); ++j)
+    {
+        /// Binary search for needed_tokens[j] in the tokens column.
+        size_t lo = 0;
+        size_t hi = num_tokens;
+        while (lo < hi)
+        {
+            size_t mid = lo + (hi - lo) / 2;
+            if (tokens.getDataAt(mid) < needed_tokens[j])
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        if (lo < num_tokens && tokens.getDataAt(lo) == needed_tokens[j])
+            matched_indices.emplace_back(lo, j);
+    }
+
+    if (matched_indices.empty())
+        return;
+
+    /// matched_indices is already sorted by block index because tokens in both
+    /// the block and needed_tokens are sorted, and lower_bound preserves order.
+
+    size_t last_matched_block_idx = matched_indices.back().first;
+    size_t match_pos = 0;
+
+    for (size_t i = 0; i <= last_matched_block_idx; ++i)
+    {
+        bool is_match = (match_pos < matched_indices.size() && matched_indices[match_pos].first == i);
+        auto info = deserializeTokenInfo(istr, posting_list_codec, postings_serialization, /*skip_postings=*/ !is_match);
+
+        if (is_match)
+        {
+            on_match(needed_tokens[matched_indices[match_pos].second], std::move(info));
+            ++match_pos;
+        }
+    }
 }
 
 template <typename Stream>
