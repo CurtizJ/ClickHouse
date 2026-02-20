@@ -252,6 +252,7 @@ struct TextIndexSerialization
 
     static DictionarySparseIndex deserializeSparseIndex(ReadBuffer & istr);
     static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization);
+    static void skipTokenInfo(ReadBuffer & istr);
 
     /// Deserializes `TokenPostingsInfo` only for tokens at the given sorted indices, skipping postings for others.
     /// Returns a vector parallel to `matched_indices`.

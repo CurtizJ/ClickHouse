@@ -878,10 +878,8 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
         if (skip_postings)
         {
             chassert(info.header & RawPostings);
-
-            UInt64 dummy;
             for (size_t i = 0; i < info.cardinality; ++i)
-                readVarUInt(dummy, istr);
+                skipVarUInt(istr);
         }
         else
         {
@@ -912,6 +910,38 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
         }
     }
     return info;
+}
+
+void TextIndexSerialization::skipTokenInfo(ReadBuffer & istr)
+{
+    using enum PostingsSerialization::Flags;
+
+    UInt64 header;
+    UInt64 cardinality;
+
+    readVarUInt(header, istr);
+    readVarUInt(cardinality, istr);
+
+    if (header & EmbeddedPostings)
+    {
+        chassert(header & RawPostings);
+        for (size_t i = 0; i < cardinality; ++i)
+            skipVarUInt(istr);
+    }
+    else
+    {
+        UInt64 num_postings_blocks = 1;
+
+        if (!(header & SingleBlock))
+            readVarUInt(num_postings_blocks, istr);
+
+        for (size_t j = 0; j < num_postings_blocks; ++j)
+        {
+            skipVarUInt(istr);
+            skipVarUInt(istr);
+            skipVarUInt(istr);
+        }
+    }
 }
 
 std::pair<ColumnPtr, UInt64> TextIndexSerialization::deserializeTokens(ReadBuffer & istr)
@@ -948,21 +978,17 @@ std::vector<TokenPostingsInfo> TextIndexSerialization::deserializeTokenInfos(
     if (matched_indices.empty())
         return result;
 
-    size_t match_pos = 0;
-    for (size_t i = 0; i <= matched_indices.back(); ++i)
+    for (size_t i = 0, j = 0; i < num_tokens && j < matched_indices.size(); ++i)
     {
-        bool is_match = (match_pos < matched_indices.size() && matched_indices[match_pos] == i);
+        if (matched_indices[j] != i)
+        {
+            skipTokenInfo(istr);
+            continue;
+        }
 
-        if (is_match)
-        {
-            auto info = deserializeTokenInfo(istr, &postings_serialization);
-            result.emplace_back(std::move(info));
-            ++match_pos;
-        }
-        else
-        {
-            deserializeTokenInfo(istr, nullptr);
-        }
+        auto info = deserializeTokenInfo(istr, &postings_serialization);
+        result.emplace_back(std::move(info));
+        ++j;
     }
 
     return result;

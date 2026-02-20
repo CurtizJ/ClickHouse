@@ -91,6 +91,24 @@ inline void ALWAYS_INLINE readVarUInt(UInt64 & x, ReadBuffer & istr)
     }
 }
 
+template <bool check_eof>
+inline void ALWAYS_INLINE skipVarUInt(ReadBuffer & istr)
+{
+    for (size_t i = 0; i < 10; ++i)
+    {
+        if constexpr (check_eof)
+            if (istr.eof()) [[unlikely]]
+                throwReadAfterEOF();
+
+        if (!(*istr.position() & 0x80))
+        {
+            ++istr.position();
+            return;
+        }
+        ++istr.position();
+    }
+}
+
 }
 
 inline void ALWAYS_INLINE readVarUInt(UInt64 & x, ReadBuffer & istr)
@@ -99,6 +117,15 @@ inline void ALWAYS_INLINE readVarUInt(UInt64 & x, ReadBuffer & istr)
         varint_impl::readVarUInt<false>(x, istr);
     else
         varint_impl::readVarUInt<true>(x, istr);
+}
+
+/// Advances past a VarUInt without decoding it.
+inline void ALWAYS_INLINE skipVarUInt(ReadBuffer & istr)
+{
+    if (istr.buffer().end() - istr.position() >= 10)
+        varint_impl::skipVarUInt<false>(istr);
+    else
+        varint_impl::skipVarUInt<true>(istr);
 }
 
 inline const char * ALWAYS_INLINE readVarUInt(UInt64 & x, const char * istr, size_t size)
