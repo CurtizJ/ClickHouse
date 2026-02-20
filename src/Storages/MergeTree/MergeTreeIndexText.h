@@ -139,7 +139,7 @@ struct TokenPostingsInfo;
 
 struct PostingsSerialization
 {
-    PostingsSerialization();
+    explicit PostingsSerialization(PostingListCodecPtr posting_list_codec_ = nullptr);
 
     enum Flags : UInt64
     {
@@ -158,11 +158,13 @@ struct PostingsSerialization
     static void serialize(PostingListBuilder & postings, TokenPostingsInfo & info, size_t posting_list_block_size, PostingListCodecPtr posting_list_codec, WriteBuffer & ostr);
     static void serialize(const PostingList & postings, TokenPostingsInfo & info, size_t posting_list_block_size, PostingListCodecPtr posting_list_codec, WriteBuffer & ostr);
     static void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
-    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, PostingListCodecPtr posting_list_codec);
+    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
 
     /// Advances the read buffer past the postings data without allocating Roaring bitmaps.
     /// Only supports RawPostings format (used by embedded postings).
     static void skipPostings(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
+
+    PostingListCodecPtr posting_list_codec;
 
 private:
     /// Reusable buffers to avoid repeated heap allocations during deserialization.
@@ -253,24 +255,21 @@ struct TextIndexSerialization
     static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr);
 
     static DictionarySparseIndex deserializeSparseIndex(ReadBuffer & istr);
-    static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, bool skip_postings = false);
+    static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization);
+
+    /// Deserializes `TokenPostingsInfo` only for tokens at the given sorted indices, skipping postings for others.
+    /// Returns a vector parallel to `matched_indices`.
+    static std::vector<TokenPostingsInfo> deserializeTokenInfos(
+        ReadBuffer & istr,
+        size_t num_tokens,
+        const std::vector<size_t> & matched_indices,
+        PostingsSerialization & postings_serialization);
+
+    /// Deserializes tokens from a dictionary block. Returns the tokens column and the tokens format.
+    static std::pair<ColumnPtr, UInt64> deserializeTokens(ReadBuffer & istr);
 
     /// Deserializes a dictionary block into a new DictionaryBlock.
-    static DictionaryBlock deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, bool skip_postings = false);
-
-    /// Deserializes a dictionary block into an existing DictionaryBlock, reusing its token_infos vector capacity.
-    static void deserializeDictionaryBlock(ReadBuffer & istr, PostingListCodecPtr posting_list_codec, PostingsSerialization & postings_serialization, DictionaryBlock & result, bool skip_postings = false);
-
-    /// Deserializes a dictionary block but only fully deserializes TokenPostingsInfo for tokens
-    /// matching `needed_tokens`. For each matching token, calls `on_match(token_view, token_info)`.
-    /// `needed_tokens` must be sorted.
-    template <typename Callback>
-    static void deserializeDictionaryBlockSelective(
-        ReadBuffer & istr,
-        PostingListCodecPtr posting_list_codec,
-        PostingsSerialization & postings_serialization,
-        const std::vector<std::string_view> & needed_tokens,
-        Callback && on_match);
+    static DictionaryBlock deserializeDictionaryBlock(ReadBuffer & istr, PostingsSerialization * postings_serialization);
 };
 
 
@@ -278,7 +277,7 @@ struct TextIndexSerialization
 struct MergeTreeIndexGranuleText final : public IMergeTreeIndexGranule
 {
 public:
-    using TokenToPostingsInfosMap = absl::flat_hash_map<std::string_view, TokenPostingsInfo>;
+    using TokenToPostingsInfosMap = absl::flat_hash_map<String, TokenPostingsInfo>;
     using TokenToPostingsMap = absl::flat_hash_map<std::string_view, PostingListPtr>;
 
     explicit MergeTreeIndexGranuleText(MergeTreeIndexTextParams params_, PostingListCodecPtr posting_list_codec_);
@@ -308,7 +307,6 @@ public:
         MergeTreeIndexDeserializationState & state,
         const TokenPostingsInfo & token_info,
         size_t block_idx,
-        PostingListCodecPtr posting_list_codec,
         PostingsSerialization & postings_serialization);
 
 private:

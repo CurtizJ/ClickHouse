@@ -52,7 +52,6 @@ public:
         , token_key_condition(std::move(token_key_condition_))
     {
         const auto & text_index = typeid_cast<const MergeTreeIndexText &>(*index_ptr);
-        posting_list_codec = text_index.getPostingListCodec();
 
         for (const auto & substream : text_index.getSubstreams())
         {
@@ -176,7 +175,7 @@ private:
 
                 size_t block_idx = matching_blocks[next_matching_block++];
                 dictionary_buf->seek(sparse_index.getOffsetInFile(block_idx), 0);
-                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec, postings_serialization, true);
+                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, /*postings_serialization*/ nullptr);
             }
             else /// Sequential reading without filtering.
             {
@@ -186,7 +185,7 @@ private:
                     continue;
                 }
 
-                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, posting_list_codec, postings_serialization, true);
+                return TextIndexSerialization::deserializeDictionaryBlock(*dictionary_buf, /*postings_serialization*/ nullptr);
             }
         }
     }
@@ -273,7 +272,6 @@ private:
     SharedHeader header;
     std::shared_ptr<MergeTreeData::DataPartsVector> data_parts;
     std::shared_ptr<std::atomic<size_t>> part_index;
-    PostingListCodecPtr posting_list_codec;
     ReadSettings read_settings;
     size_t max_block_size;
     String dict_file_name;
@@ -288,7 +286,6 @@ private:
     DictionarySparseIndex sparse_index;
     std::vector<size_t> matching_blocks;
     size_t next_matching_block = 0;
-    PostingsSerialization postings_serialization;
 };
 
 class ReadFromMergeTreeTextIndex : public SourceStepWithFilter
