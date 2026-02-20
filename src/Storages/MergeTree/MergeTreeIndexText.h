@@ -160,10 +160,6 @@ struct PostingsSerialization
     static void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
     PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
 
-    /// Advances the read buffer past the postings data without allocating Roaring bitmaps.
-    /// Only supports RawPostings format (used by embedded postings).
-    static void skipPostings(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
-
     PostingListCodecPtr posting_list_codec;
 
 private:

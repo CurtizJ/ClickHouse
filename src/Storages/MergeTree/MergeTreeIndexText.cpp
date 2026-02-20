@@ -168,24 +168,6 @@ void PostingsSerialization::serialize(PostingListBuilder & postings, TokenPostin
     }
 }
 
-void PostingsSerialization::skipPostings(ReadBuffer & istr, UInt64 header, UInt64 cardinality)
-{
-    chassert(!(header & IsCompressed));
-
-    if (header & RawPostings)
-    {
-        UInt64 dummy;
-        for (size_t i = 0; i < cardinality; ++i)
-            readVarUInt(dummy, istr);
-    }
-    else
-    {
-        size_t num_bytes;
-        readVarUInt(num_bytes, istr);
-        istr.ignore(num_bytes);
-    }
-}
-
 PostingListPtr PostingsSerialization::deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality)
 {
     if (header & IsCompressed)
@@ -895,7 +877,11 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
     {
         if (skip_postings)
         {
-            PostingsSerialization::skipPostings(istr, info.header, info.cardinality);
+            chassert(info.header & RawPostings);
+
+            UInt64 dummy;
+            for (size_t i = 0; i < info.cardinality; ++i)
+                readVarUInt(dummy, istr);
         }
         else
         {
