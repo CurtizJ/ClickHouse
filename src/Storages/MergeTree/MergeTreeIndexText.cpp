@@ -376,40 +376,15 @@ void MergeTreeIndexGranuleText::analyzeDictionary(MergeTreeIndexReaderStream & s
     }
 
     auto * data_buffer = stream.getDataBuffer();
-    const String & data_path = state.part.getDataPartStorage().getFullPath();
-    const String & index_name = state.index.getFileName();
-    const auto & cache = condition_text.dictionaryBlockCache();
 
-    for (auto & [block_idx, tokens] : block_to_tokens)
+    for (const auto & [block_idx, tokens] : block_to_tokens)
     {
-        auto hash = TextIndexDictionaryBlockCache::hash(data_path, index_name, block_idx);
+        chassert(std::is_sorted(tokens.begin(), tokens.end()));
 
-        /// Try the cache first.
-        if (auto cached_block = cache->get(hash))
-        {
-            for (const auto & token : tokens)
-            {
-                auto * token_info = cached_block->getTokenInfo(token);
-
-                if (token_info)
-                {
-                    remaining_tokens.emplace(token, *token_info);
-                }
-                else if (global_search_mode == TextSearchMode::All)
-                {
-                    remaining_tokens.clear();
-                    return;
-                }
-            }
-            continue;
-        }
-
-        /// Cache miss: use selective deserialization to skip posting lists
+        /// Use selective deserialization to skip posting lists
         /// for tokens that are not in the search set.
         UInt64 offset_in_file = sparse_index->getOffsetInFile(block_idx);
         stream.seekToMark({offset_in_file, 0});
-
-        std::sort(tokens.begin(), tokens.end());
 
         TextIndexSerialization::deserializeDictionaryBlockSelective(
             *data_buffer, posting_list_codec, postings_serialization, tokens,

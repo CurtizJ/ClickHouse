@@ -420,10 +420,6 @@ BlockIO InterpreterSystemQuery::execute()
             getContext()->checkAccess(AccessType::SYSTEM_DROP_VECTOR_SIMILARITY_INDEX_CACHE);
             system_context->clearVectorSimilarityIndexCache();
             break;
-        case Type::CLEAR_TEXT_INDEX_DICTIONARY_CACHE:
-            getContext()->checkAccess(AccessType::SYSTEM_DROP_TEXT_INDEX_DICTIONARY_CACHE);
-            system_context->clearTextIndexDictionaryBlockCache();
-            break;
         case Type::CLEAR_TEXT_INDEX_HEADER_CACHE:
             getContext()->checkAccess(AccessType::SYSTEM_DROP_TEXT_INDEX_HEADER_CACHE);
             system_context->clearTextIndexHeaderCache();
@@ -434,7 +430,6 @@ BlockIO InterpreterSystemQuery::execute()
             break;
         case Type::CLEAR_TEXT_INDEX_CACHES:
             getContext()->checkAccess(AccessType::SYSTEM_DROP_TEXT_INDEX_CACHES);
-            system_context->clearTextIndexDictionaryBlockCache();
             system_context->clearTextIndexHeaderCache();
             system_context->clearTextIndexPostingsCache();
             break;
@@ -2009,7 +2004,6 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
         case Type::CLEAR_INDEX_MARK_CACHE:
         case Type::CLEAR_INDEX_UNCOMPRESSED_CACHE:
         case Type::CLEAR_VECTOR_SIMILARITY_INDEX_CACHE:
-        case Type::CLEAR_TEXT_INDEX_DICTIONARY_CACHE:
         case Type::CLEAR_TEXT_INDEX_HEADER_CACHE:
         case Type::CLEAR_TEXT_INDEX_POSTINGS_CACHE:
         case Type::CLEAR_TEXT_INDEX_CACHES:
