@@ -183,6 +183,21 @@ void MergeTreeIndexReader::adjustRightMark(size_t right_mark)
         stream->adjustRightMark(right_mark);
 }
 
+void MergeTreeIndexReader::prefetchBeginOfRange(size_t from_mark, Priority priority)
+{
+    initStreamIfNeeded();
+
+    auto it = streams.find(MergeTreeIndexSubstream::Type::Regular);
+    if (it == streams.end())
+        return;
+
+    auto * stream = it->second;
+    stream->seekToMark(from_mark);
+    if (auto * buf = stream->getDataBuffer())
+        buf->prefetch(priority);
+    stream_mark = from_mark;
+}
+
 MergeTreeReaderSettings MergeTreeIndexReader::patchSettings(MergeTreeReaderSettings settings, MergeTreeIndexSubstream::Type substream)
 {
     using enum MergeTreeIndexSubstream::Type;

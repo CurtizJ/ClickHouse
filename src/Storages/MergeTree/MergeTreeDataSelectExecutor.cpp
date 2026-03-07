@@ -1,3 +1,4 @@
+#include <future>
 #include <optional>
 #include <unordered_set>
 #include <boost/rational.hpp> /// For calculations related to sampling coefficients.
@@ -804,7 +805,8 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
         auto [limits, leaf_limits] = getRowLimits(settings, query_info);
         std::atomic<size_t> total_rows{0};
 
-        auto process_part = [&](size_t part_index)
+        /// Phase 1: PK analysis — determine which parts survive and their mark ranges.
+        auto process_part_pk = [&](size_t part_index)
         {
             if (query_status)
                 query_status->checkTimeLimit();
@@ -845,6 +847,15 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
             {
                 ranges.ranges_snapshot_after_pk_analysis = ranges.ranges;
             }
+        };
+
+        /// Phase 2: Skip index analysis — filter mark ranges using skip indexes.
+        /// prefetched_readers[part_index][index_idx] may hold a pre-created reader with async prefetch.
+        std::vector<std::vector<PrefetchedIndexReader>> prefetched_readers(parts_with_ranges.size());
+
+        auto process_part_skip_indexes = [&](size_t part_index)
+        {
+            auto & ranges = parts_with_ranges[part_index];
 
             if (!skip_indexes.empty())
             {
@@ -858,7 +869,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
                         return {};
 
                     auto options = GetColumnsOptions(GetColumnsOptions::Kind::All).withSubcolumns();
-                    auto required_columns_names = index ->getColumnsRequiredForIndexCalc();
+                    auto required_columns_names = index->getColumnsRequiredForIndexCalc();
                     auto required_columns_list = metadata_snapshot->getColumns().getByNames(options, required_columns_names);
 
                     auto it = std::ranges::find_if(required_columns_list, [&](const auto & column)
@@ -911,6 +922,11 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
 
                     if (!is_index_supported_on_data_read(index_and_condition.index))
                     {
+                        PrefetchedIndexReader * prefetched = nullptr;
+                        if (!prefetched_readers[part_index].empty()
+                            && prefetched_readers[part_index][index_idx].reader)
+                            prefetched = &prefetched_readers[part_index][index_idx];
+
                         std::tie(ranges.ranges, ranges.read_hints) = filterMarksUsingIndex(
                             index_and_condition.index,
                             index_and_condition.condition,
@@ -924,7 +940,8 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
                             vector_similarity_index_cache.get(),
                             use_skip_indexes_for_disjunctions,
                             partial_eval_results,
-                            log);
+                            log,
+                            prefetched);
                     }
 
                     stat.granules_dropped.fetch_add(total_granules - ranges.ranges.getNumberOfMarks(), std::memory_order_relaxed);
@@ -945,7 +962,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
 
             }
 
-            /// Optimize ORDER BY <col> LIMIT n - if <col> is scalar numeric / date / datetime and has a minmax index
+            /// Optimize ORDER BY <col> LIMIT n — if <col> is scalar numeric / date / datetime and has a minmax index
             if (perform_top_k_optimization)
             {
                 ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::FilteringMarksWithSecondaryKeysMicroseconds);
@@ -999,42 +1016,130 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
 
         LOG_TRACE(log, "Filtering marks by primary and secondary keys");
 
-        if (num_threads <= 1)
+        auto run_over_parts = [&](auto && func)
         {
-            for (size_t part_index = 0; part_index < parts_with_ranges.size(); ++part_index)
-                process_part(part_index);
-        }
-        else
+            if (num_threads <= 1)
+            {
+                for (size_t part_index = 0; part_index < parts_with_ranges.size(); ++part_index)
+                    func(part_index);
+            }
+            else
+            {
+                /// Parallel loading and filtering of data parts.
+                ThreadPool pool(
+                    CurrentMetrics::MergeTreeDataSelectExecutorThreads,
+                    CurrentMetrics::MergeTreeDataSelectExecutorThreadsActive,
+                    CurrentMetrics::MergeTreeDataSelectExecutorThreadsScheduled,
+                    num_threads);
+
+                /// Instances of ThreadPool "borrow" threads from the global thread pool.
+                /// We intentionally use scheduleOrThrow here to avoid a deadlock.
+                for (size_t part_index = 0; part_index < parts_with_ranges.size(); ++part_index)
+                {
+                    pool.scheduleOrThrow(
+                        [&, part_index, thread_group = CurrentThread::getGroup()]
+                        {
+                            ThreadGroupSwitcher switcher(thread_group, ThreadName::MERGETREE_INDEX);
+                            func(part_index);
+                        },
+                        Priority{},
+                        context->getSettingsRef()[Setting::lock_acquire_timeout].totalMicroseconds());
+                }
+
+                pool.wait();
+            }
+        };
+
+        /// Phase 1: PK analysis (parallel).
+        run_over_parts(process_part_pk);
+
+        /// Phase 1.5: Create readers and issue prefetch requests for skip index data.
+        /// This overlaps I/O latency with the Phase 2 computation on remote filesystems.
+        if (!skip_indexes.empty())
         {
-            /// Parallel loading and filtering of data parts.
-            ThreadPool pool(
-                CurrentMetrics::MergeTreeDataSelectExecutorThreads,
-                CurrentMetrics::MergeTreeDataSelectExecutorThreadsActive,
-                CurrentMetrics::MergeTreeDataSelectExecutorThreadsScheduled,
-                num_threads);
+            auto & prefetch_threadpool = context->getPrefetchThreadpool();
+            const bool has_prefetch_limit = reader_settings.filesystem_prefetches_limit > 0;
+            size_t prefetch_budget = reader_settings.filesystem_prefetches_limit;
 
-
-            /// Instances of ThreadPool "borrow" threads from the global thread pool.
-            /// We intentionally use scheduleOrThrow here to avoid a deadlock.
-            /// For example, queries can already be running with threads from the
-            /// global pool, and if we saturate max_thread_pool_size whilst requesting
-            /// more in this loop, queries will block infinitely.
-            /// So we wait until lock_acquire_timeout, and then raise an exception.
             for (size_t part_index = 0; part_index < parts_with_ranges.size(); ++part_index)
             {
-                pool.scheduleOrThrow(
-                    [&, part_index, thread_group = CurrentThread::getGroup()]
+                auto & ranges = parts_with_ranges[part_index];
+                if (ranges.ranges.empty())
+                    continue;
+
+                const auto num_indexes = skip_indexes.useful_indices.size();
+                prefetched_readers[part_index].resize(num_indexes);
+
+                for (size_t index_idx = 0; index_idx < num_indexes; ++index_idx)
+                {
+                    auto & index_and_condition = skip_indexes.useful_indices[index_idx];
+                    auto index_helper = index_and_condition.index;
+
+                    if (!index_helper->getDeserializedFormat(ranges.data_part->checksums, index_helper->getFileName()))
+                        continue;
+
+                    /// Vector similarity indexes require all marks — skip prefetch.
+                    if (index_helper->isVectorSimilarityIndex())
+                        continue;
+
+                    /// Indexes deferred to data-read phase do not need prefetch here.
+                    if (is_index_supported_on_data_read(index_helper))
+                        continue;
+
+                    auto skip_granularity = index_helper->index.granularity;
+                    size_t marks_count_for_index = ranges.data_part->index_granularity->getMarksCountForSkipIndex(skip_granularity);
+
+                    MarkRanges index_ranges;
+                    for (const auto & range : ranges.ranges)
                     {
-                        ThreadGroupSwitcher switcher(thread_group, ThreadName::MERGETREE_INDEX);
+                        index_ranges.emplace_back(
+                            range.begin / skip_granularity,
+                            (range.end + skip_granularity - 1) / skip_granularity);
+                    }
 
-                        process_part(part_index);
-                    },
-                    Priority{},
-                    context->getSettingsRef()[Setting::lock_acquire_timeout].totalMicroseconds());
+                    auto reader = std::make_unique<MergeTreeIndexReader>(
+                        index_helper, ranges.data_part, marks_count_for_index, index_ranges,
+                        mark_cache.get(), uncompressed_cache.get(),
+                        vector_similarity_index_cache.get(), reader_settings);
+
+                    bool can_prefetch = !has_prefetch_limit || prefetch_budget > 0;
+
+                    PrefetchedIndexReader entry;
+                    entry.reader = std::move(reader);
+
+                    if (can_prefetch && !index_ranges.empty())
+                    {
+                        size_t first_mark = index_ranges.front().begin;
+                        auto promise = std::make_shared<std::promise<void>>();
+                        entry.prefetch_future = promise->get_future();
+
+                        auto * reader_ptr = entry.reader.get();
+                        prefetch_threadpool.scheduleOrThrowOnError(
+                            [reader_ptr, first_mark, promise, thread_group = CurrentThread::getGroup()]
+                            {
+                                try
+                                {
+                                    ThreadGroupSwitcher switcher(thread_group, ThreadName::MERGETREE_INDEX, /*allow_existing_group=*/ true);
+                                    reader_ptr->prefetchBeginOfRange(first_mark, Priority{});
+                                    promise->set_value();
+                                }
+                                catch (...)
+                                {
+                                    promise->set_exception(std::current_exception());
+                                }
+                            });
+
+                        if (has_prefetch_limit)
+                            --prefetch_budget;
+                    }
+
+                    prefetched_readers[part_index][index_idx] = std::move(entry);
+                }
             }
-
-            pool.wait();
         }
+
+        /// Phase 2: Skip index analysis (parallel).
+        run_over_parts(process_part_skip_indexes);
 
     }
 
@@ -1834,13 +1939,17 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
     VectorSimilarityIndexCache * vector_similarity_index_cache,
     bool use_skip_indexes_for_disjunctions,
     PartialDisjunctionResult & partial_disjunction_result,
-    LoggerPtr log)
+    LoggerPtr log,
+    PrefetchedIndexReader * prefetched)
 {
-    if (!index_helper->getDeserializedFormat(part->checksums, index_helper->getFileName()))
+    if (!prefetched)
     {
-        LOG_DEBUG(log, "File for index {} does not exist ({}.*). Skipping it.", backQuote(index_helper->index.name),
-            (fs::path(part->getDataPartStorage().getFullPath()) / index_helper->getFileName()).string());
-        return {ranges, in_read_hints};
+        if (!index_helper->getDeserializedFormat(part->checksums, index_helper->getFileName()))
+        {
+            LOG_DEBUG(log, "File for index {} does not exist ({}.*). Skipping it.", backQuote(index_helper->index.name),
+                (fs::path(part->getDataPartStorage().getFullPath()) / index_helper->getFileName()).string());
+            return {ranges, in_read_hints};
+        }
     }
 
     /// Whether we should use a more optimal filtering.
@@ -1872,14 +1981,27 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
         index_ranges.push_back(index_range);
     }
 
-    MergeTreeIndexReader reader(
-        index_helper, part,
-        part->index_granularity->getMarksCountForSkipIndex(skip_index_granularity),
-        index_ranges,
-        mark_cache,
-        uncompressed_cache,
-        vector_similarity_index_cache,
-        reader_settings);
+    /// Use the pre-created reader if available, otherwise create one inline.
+    std::unique_ptr<MergeTreeIndexReader> owned_reader;
+    MergeTreeIndexReader * reader_ptr = nullptr;
+
+    if (prefetched)
+    {
+        prefetched->wait();
+        reader_ptr = prefetched->reader.get();
+    }
+    else
+    {
+        owned_reader = std::make_unique<MergeTreeIndexReader>(
+            index_helper, part,
+            part->index_granularity->getMarksCountForSkipIndex(skip_index_granularity),
+            index_ranges,
+            mark_cache,
+            uncompressed_cache,
+            vector_similarity_index_cache,
+            reader_settings);
+        reader_ptr = owned_reader.get();
+    }
 
     MarkRanges res;
     size_t ranges_size = ranges.size();
@@ -1901,7 +2023,7 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
     if (index_helper->isTextIndex())
     {
         MergeTreeIndexGranulePtr granule;
-        reader.read(0, condition.get(), granule);
+        reader_ptr->read(0, condition.get(), granule);
         auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
 
         for (const auto & range : ranges)
@@ -1938,7 +2060,7 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
 
             for (size_t index_mark = index_range.begin; index_mark < index_range.end; ++index_mark)
             {
-                reader.read(index_mark, current_granule_num, granules);
+                reader_ptr->read(index_mark, current_granule_num, granules);
                 ++current_granule_num;
             }
         }
@@ -1993,7 +2115,7 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
             {
                 if (index_mark != index_range.begin || !granule || last_index_mark != index_range.begin)
                 {
-                    reader.read(index_mark, condition.get(), granule);
+                    reader_ptr->read(index_mark, condition.get(), granule);
                 }
 
                 if (index_helper->isVectorSimilarityIndex())

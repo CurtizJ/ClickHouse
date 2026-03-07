@@ -11,13 +11,30 @@
 
 #include <boost/dynamic_bitset.hpp>
 
+#include <future>
+
 namespace DB
 {
 
 class KeyCondition;
+class MergeTreeIndexReader;
 class VectorSimilarityIndexCache;
 struct ProjectionDescription;
 using ProjectionDescriptionRawPtr = const ProjectionDescription *;
+
+/// Holds a pre-created MergeTreeIndexReader and an optional future
+/// that completes when the async prefetch for that reader finishes.
+struct PrefetchedIndexReader
+{
+    std::unique_ptr<MergeTreeIndexReader> reader;
+    std::future<void> prefetch_future;
+
+    void wait()
+    {
+        if (prefetch_future.valid())
+            prefetch_future.get();
+    }
+};
 
 /** Executes SELECT queries on data from the merge tree.
   */
@@ -93,7 +110,8 @@ public:
         VectorSimilarityIndexCache * vector_similarity_index_cache,
         bool use_skip_indexes_for_disjunctions,
         PartialDisjunctionResult & partial_disjunction_result,
-        LoggerPtr log);
+        LoggerPtr log,
+        PrefetchedIndexReader * prefetched = nullptr);
 
     static MergeTreeIndexBulkGranulesMinMaxPtr getMinMaxIndexGranules(
         MergeTreeData::DataPartPtr part,
