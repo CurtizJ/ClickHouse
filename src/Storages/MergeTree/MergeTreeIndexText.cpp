@@ -386,6 +386,18 @@ void MergeTreeIndexGranuleText::analyzeDictionary(
         blocks_to_read.back().second.emplace_back(token);
     }
 
+    /// Tokens that were searched in dictionary blocks and confirmed absent.
+    std::vector<std::string_view> absent_tokens;
+
+    auto cache_absent_tokens = [&]()
+    {
+        for (const auto & token : absent_tokens)
+        {
+            auto token_hash = TextIndexTokensCache::hash(index_id_for_caches, token);
+            tokens_cache->set(token_hash, std::make_shared<TokenPostingsInfo>());
+        }
+    };
+
     for (const auto & [block_idx, needed_tokens] : blocks_to_read)
     {
         /// Seek to the dictionary block and deserialize tokens.
@@ -418,10 +430,13 @@ void MergeTreeIndexGranuleText::analyzeDictionary(
 
             if (idx_in_block < num_tokens && block_tokens.getDataAt(idx_in_block) == token)
                 matched_indices.emplace_back(idx_in_block);
+            else
+                absent_tokens.emplace_back(token);
         }
 
         if (global_search_mode == TextSearchMode::All && matched_indices.size() != needed_tokens.size())
         {
+            cache_absent_tokens();
             remaining_tokens.clear();
             return;
         }
@@ -446,6 +461,8 @@ void MergeTreeIndexGranuleText::analyzeDictionary(
             remaining_tokens.emplace(std::move(token), std::move(token_info));
         }
     }
+
+    cache_absent_tokens();
 }
 
 std::vector<String> MergeTreeIndexGranuleText::fillTokensFromCache(MergeTreeIndexDeserializationState & state)
@@ -467,8 +484,12 @@ std::vector<String> MergeTreeIndexGranuleText::fillTokensFromCache(MergeTreeInde
     {
         if (cached_infos[i])
         {
-            remaining_tokens.emplace(all_search_tokens[i], cached_infos[i]);
             ProfileEvents::increment(ProfileEvents::TextIndexTokensCacheHits);
+
+            /// Negative cache hit: token is known to not exist in this part's dictionary.
+            /// Do not add to remaining_tokens (token absent) nor to tokens_to_read (no I/O needed).
+            if (!cached_infos[i]->isMissing())
+                remaining_tokens.emplace(all_search_tokens[i], cached_infos[i]);
         }
         else
         {

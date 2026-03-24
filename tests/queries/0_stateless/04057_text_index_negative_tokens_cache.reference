@@ -1,0 +1,17 @@
+--- cache miss on a non-existent token.
+0
+cache_hits = 0, cache_misses = 1
+--- negative cache hit on the same non-existent token.
+0
+cache_hits = 1, cache_misses = 0
+--- cache miss on an existing token.
+1
+cache_hits = 0, cache_misses = 1
+--- positive cache hit on the same existing token.
+1
+cache_hits = 1, cache_misses = 0
+--- negative cache hit after clearing and re-caching.
+0
+cache_hits = 0, cache_misses = 1
+0
+cache_hits = 1, cache_misses = 0

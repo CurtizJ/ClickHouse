@@ -193,6 +193,9 @@ struct TokenPostingsInfo
     absl::InlinedVector<RowsRange, 1> ranges;
     PostingListPtr embedded_postings;
 
+    /// Returns true if this is a negative cache entry (token not found in dictionary).
+    bool isMissing() const { return ranges.empty(); }
+
     /// Returns indexes of posting list blocks to read for the given range of rows.
     std::vector<size_t> getBlocksToRead(const RowsRange & range) const;
     size_t bytesAllocated() const;
