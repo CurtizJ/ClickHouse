@@ -30,7 +30,7 @@ struct Pool
 /// Intentionally leaked to avoid static destruction order issues: the custom
 /// shared_ptr deleters reference the pool, but those deleters can fire from
 /// any thread (including during thread_local / static destruction of caches
-/// such as DataTypesCache or ColumnObject's getDynamicSerialization).  If the
+/// such as SimpleDataTypeCache or ColumnObject's getDynamicSerialization).  If the
 /// pool were a regular static it could already be destroyed at that point.
 Pool & getPool()
 {

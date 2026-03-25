@@ -398,7 +398,7 @@ ISerialization::DeserializeBinaryBulkStatePtr SerializationDynamic::deserializeD
                 else
                 {
                     readStringBinary(data_type_name, *structure_stream);
-                    structure_state->flattened_data_types.push_back(getDataTypesCache().getType(data_type_name));
+                    structure_state->flattened_data_types.push_back(getSimpleDataTypeCache().getType(data_type_name));
                 }
             }
 
@@ -427,7 +427,7 @@ ISerialization::DeserializeBinaryBulkStatePtr SerializationDynamic::deserializeD
                 for (size_t i = 0; i != structure_state->num_dynamic_types; ++i)
                 {
                     readStringBinary(data_type_name, *structure_stream);
-                    variants.push_back(getDataTypesCache().getType(data_type_name));
+                    variants.push_back(getSimpleDataTypeCache().getType(data_type_name));
                 }
             }
             /// Add shared variant, Dynamic column should always have it.
@@ -730,9 +730,8 @@ void SerializationDynamic::serializeBinary(const ColumnDynamic & dynamic_column,
     }
 
     const auto & variant_type = assert_cast<const DataTypeVariant &>(*variant_info.variant_type).getVariant(global_discr);
-    const auto & variant_type_name = variant_info.variant_names[global_discr];
     encodeDataType(variant_type, ostr);
-    getDataTypesCache().getSerialization(variant_type_name)->serializeBinary(variant_column.getVariantByGlobalDiscriminator(global_discr), variant_column.offsetAt(row_num), ostr, settings);
+    variant_info.variant_serializations[global_discr]->serializeBinary(variant_column.getVariantByGlobalDiscriminator(global_discr), variant_column.offsetAt(row_num), ostr, settings);
 }
 
 void SerializationDynamic::serializeForHashCalculation(const IColumn & column, size_t row_num, WriteBuffer & ostr) const
@@ -756,18 +755,17 @@ void SerializationDynamic::serializeForHashCalculation(const IColumn & column, s
         ReadBufferFromMemory value_buf(value);
         auto type = decodeDataType(value_buf);
         auto type_name = type->getName();
-        auto serialization = getDataTypesCache().getSerialization(type_name);
+        auto serialization = getSimpleDataTypeCache().getSerialization(type_name);
         auto tmp_column = type->createColumn();
         serialization->deserializeBinary(*tmp_column, value_buf, {});
         serializeVariantForHashCalculation(*tmp_column, serialization, type, 0, ostr);
         return;
     }
 
-    const auto & variant_type_name = variant_info.variant_names[global_discr];
     const auto & variant_type = assert_cast<const DataTypeVariant &>(*variant_info.variant_type).getVariant(global_discr);
     serializeVariantForHashCalculation(
         variant_column.getVariantByGlobalDiscriminator(global_discr),
-        getDataTypesCache().getSerialization(variant_type_name),
+        variant_info.variant_serializations[global_discr],
         variant_type,
         variant_column.offsetAt(row_num),
         ostr);
@@ -783,7 +781,7 @@ void SerializationDynamic::serializeVariantForHashCalculation(const IColumn & co
 template <typename ReturnType = void, typename DeserializeFunc>
 static ReturnType deserializeVariant(
     ColumnVariant & variant_column,
-    const SerializationPtr & variant_serialization,
+    const ISerialization & variant_serialization,
     ColumnVariant::Discriminator global_discr,
     ReadBuffer & istr,
     DeserializeFunc deserialize)
@@ -791,12 +789,12 @@ static ReturnType deserializeVariant(
     auto & variant = variant_column.getVariantByGlobalDiscriminator(global_discr);
     if constexpr (std::is_same_v<ReturnType, bool>)
     {
-        if (!deserialize(*variant_serialization, variant, istr))
+        if (!deserialize(variant_serialization, variant, istr))
             return ReturnType(false);
     }
     else
     {
-        deserialize(*variant_serialization, variant, istr);
+        deserialize(variant_serialization, variant, istr);
     }
     variant_column.getLocalDiscriminators().push_back(variant_column.localDiscriminatorByGlobal(global_discr));
     variant_column.getOffsets().push_back(variant.size() - 1);
@@ -810,36 +808,57 @@ void SerializationDynamic::deserializeBinary(IColumn & column, ReadBuffer & istr
 
 void SerializationDynamic::deserializeBinary(ColumnDynamic & dynamic_column, ReadBuffer & istr, const FormatSettings & settings) const
 {
-    auto variant_type = decodeDataType(istr);
-    if (isNothing(variant_type))
+    auto deserialize = [&](const IDataType & variant_type, const String & variant_type_name, const ISerialization & variant_serialization)
     {
-        dynamic_column.insertDefault();
-        return;
-    }
+        if (isNothing(variant_type))
+        {
+            dynamic_column.insertDefault();
+            return;
+        }
 
-    auto variant_type_name = variant_type->getName();
-    const auto & variant_serialization = dynamic_column.getVariantSerialization(variant_type, variant_type_name);
-    const auto & variant_info = dynamic_column.getVariantInfo();
-    auto it = variant_info.variant_name_to_discriminator.find(variant_type_name);
-    if (it != variant_info.variant_name_to_discriminator.end())
+        const auto & variant_info = dynamic_column.getVariantInfo();
+        auto it = variant_info.variant_name_to_discriminator.find(variant_type_name);
+
+        if (it != variant_info.variant_name_to_discriminator.end())
+        {
+            deserializeVariant(dynamic_column.getVariantColumn(), variant_serialization, it->second, istr, [&settings](const ISerialization & serialization, IColumn & variant, ReadBuffer & buf){ serialization.deserializeBinary(variant, buf, settings); });
+            return;
+        }
+
+        auto variant_type_ptr = variant_type.getPtr();
+
+        /// We don't have this variant yet. Let's try to add it.
+        if (dynamic_column.addNewVariant(variant_type_ptr))
+        {
+            auto discr = variant_info.variant_name_to_discriminator.at(variant_type_name);
+            deserializeVariant(dynamic_column.getVariantColumn(), variant_serialization, discr, istr, [&settings](const ISerialization & serialization, IColumn & variant, ReadBuffer & buf){ serialization.deserializeBinary(variant, buf, settings); });
+            return;
+        }
+
+        /// We reached maximum number of variants and couldn't add new variant.
+        /// In this case we insert this value into shared variant in binary form.
+        auto tmp_variant_column = variant_type_ptr->createColumn();
+        variant_serialization.deserializeBinary(*tmp_variant_column, istr, settings);
+        dynamic_column.insertValueIntoSharedVariant(*tmp_variant_column, variant_type_ptr, variant_type_name, 0);
+    };
+
+    char type_code;
+    istr.peek(type_code);
+    const auto & cache = getSimpleDataTypeCache();
+
+    if (cache.hasElement(static_cast<BinaryTypeIndex>(type_code)))
     {
-        deserializeVariant(dynamic_column.getVariantColumn(), variant_serialization, it->second, istr, [&settings](const ISerialization & serialization, IColumn & variant, ReadBuffer & buf){ serialization.deserializeBinary(variant, buf, settings); });
-        return;
+        ++istr.position();
+        const auto & element = cache.getElement(static_cast<BinaryTypeIndex>(type_code));
+        deserialize(*element.type, element.name, *element.serialization);
     }
-
-    /// We don't have this variant yet. Let's try to add it.
-    if (dynamic_column.addNewVariant(variant_type))
+    else
     {
-        auto discr = variant_info.variant_name_to_discriminator.at(variant_type_name);
-        deserializeVariant(dynamic_column.getVariantColumn(), variant_serialization, discr, istr, [&settings](const ISerialization & serialization, IColumn & variant, ReadBuffer & buf){ serialization.deserializeBinary(variant, buf, settings); });
-        return;
+        auto variant_type = decodeDataType(istr);
+        const auto & variant_serialization = variant_type->getDefaultSerialization();
+        auto variant_type_name = variant_type->getName();
+        deserialize(*variant_type, variant_type_name, *variant_serialization);
     }
-
-    /// We reached maximum number of variants and couldn't add new variant.
-    /// In this case we insert this value into shared variant in binary form.
-    auto tmp_variant_column = variant_type->createColumn();
-    variant_serialization->deserializeBinary(*tmp_variant_column, istr, settings);
-    dynamic_column.insertValueIntoSharedVariant(*tmp_variant_column, variant_type, variant_type_name, 0);
 }
 
 template <typename ReadFieldFunc, typename TryDeserializeVariantFunc, typename DeserializeVariant>
@@ -874,7 +893,7 @@ static void deserializeTextImpl(
             if (i != shared_variant_discr
                 && deserializeVariant<bool>(
                     variant_column,
-                    dynamic_column.getVariantSerialization(variant_types[i], variant_info.variant_names[i]),
+                    *variant_info.variant_serializations[i],
                     i,
                     *field_buf,
                     try_deserialize_variant))
@@ -892,7 +911,7 @@ static void deserializeTextImpl(
     {
         auto field_buf = std::make_unique<ReadBufferFromString>(field);
         auto discr = variant_info.variant_name_to_discriminator.at(variant_type->getName());
-        deserializeVariant(dynamic_column.getVariantColumn(), dynamic_column.getVariantSerialization(variant_type), discr, *field_buf, deserialize_variant);
+        deserializeVariant(dynamic_column.getVariantColumn(), *variant_info.variant_serializations[discr], discr, *field_buf, deserialize_variant);
         return;
     }
 
@@ -918,16 +937,35 @@ static void serializeTextImpl(
     {
         auto value = dynamic_column.getSharedVariant().getDataAt(variant_column.offsetAt(row_num));
         ReadBufferFromMemory buf(value);
-        auto variant_type = decodeDataType(buf);
-        auto tmp_variant_column = variant_type->createColumn();
-        auto variant_serialization = variant_type->getDefaultSerialization();
-        variant_serialization->deserializeBinary(*tmp_variant_column, buf, FormatSettings{});
-        nested_serialize(*variant_serialization, *tmp_variant_column, 0, ostr);
+
+        auto serialize = [&](const auto & variant_type, const ISerialization & variant_serialization)
+        {
+            auto tmp_variant_column = variant_type.createColumn();
+            variant_serialization.deserializeBinary(*tmp_variant_column, buf, FormatSettings{});
+            nested_serialize(variant_serialization, *tmp_variant_column, 0, ostr);
+        };
+
+        char type_code;
+        buf.peek(type_code);
+        const auto & cache = getSimpleDataTypeCache();
+
+        if (cache.hasElement(static_cast<BinaryTypeIndex>(type_code)))
+        {
+            ++buf.position();
+            const auto & element = cache.getElement(static_cast<BinaryTypeIndex>(type_code));
+            serialize(*element.type, *element.serialization);
+        }
+        else
+        {
+            auto variant_type = decodeDataType(buf);
+            auto variant_serialization = variant_type->getDefaultSerialization();
+            serialize(*variant_type, *variant_serialization);
+        }
     }
     /// Otherwise just use serialization for Variant.
     else
     {
-        nested_serialize(*dynamic_column.getVariantInfo().variant_type->getDefaultSerialization(), variant_column, row_num, ostr);
+        nested_serialize(*dynamic_column.getVariantInfo().variant_type_serialization, variant_column, row_num, ostr);
     }
 }
 

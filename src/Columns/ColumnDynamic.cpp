@@ -100,15 +100,19 @@ void ColumnDynamic::setMaxDynamicPaths(size_t max_dynamic_type_)
 void ColumnDynamic::createVariantInfo(const DataTypePtr & variant_type)
 {
     variant_info.variant_type = variant_type;
+    variant_info.variant_type_serialization = variant_type->getDefaultSerialization();
     variant_info.variant_name = variant_type->getName();
     const auto & variants = assert_cast<const DataTypeVariant &>(*variant_type).getVariants();
     variant_info.variant_names.clear();
     variant_info.variant_names.reserve(variants.size());
+    variant_info.variant_serializations.clear();
+    variant_info.variant_serializations.reserve(variants.size());
     variant_info.variant_name_to_discriminator.clear();
     variant_info.variant_name_to_discriminator.reserve(variants.size());
     for (ColumnVariant::Discriminator discr = 0; discr != variants.size(); ++discr)
     {
         const auto & variant_name = variant_info.variant_names.emplace_back(variants[discr]->getName());
+        variant_info.variant_serializations.emplace_back(variants[discr]->getDefaultSerialization());
         variant_info.variant_name_to_discriminator[variant_name] = discr;
     }
 
@@ -361,7 +365,7 @@ void ColumnDynamic::doInsertFrom(const IColumn & src_, size_t n)
         auto type_name = type->getName();
         /// Check if we have this variant and deserialize value into variant from shared variant data.
         if (auto it = variant_info.variant_name_to_discriminator.find(type_name); it != variant_info.variant_name_to_discriminator.end())
-            variant_col.deserializeBinaryIntoVariant(it->second, getVariantSerialization(type, type_name), buf, getFormatSettings());
+            variant_col.deserializeBinaryIntoVariant(it->second, variant_info.variant_serializations[it->second], buf, getFormatSettings());
         /// Otherwise just insert it into our shared variant.
         else
             variant_col.insertIntoVariantFrom(getSharedVariantDiscriminator(), src_shared_variant, src_offset);
@@ -465,7 +469,7 @@ void ColumnDynamic::doInsertRangeFrom(const IColumn & src_, size_t start, size_t
                 {
                     auto local_discr = variant_col.localDiscriminatorByGlobal(it->second);
                     auto & variant = variant_col.getVariantByLocalDiscriminator(local_discr);
-                    getVariantSerialization(type, type_name)->deserializeBinary(variant, buf, getFormatSettings());
+                    variant_info.variant_serializations[it->second]->deserializeBinary(variant, buf, getFormatSettings());
                     /// Local discriminators were already filled in ColumnVariant::insertRangeFrom and this row should contain
                     /// shared_variant_local_discr. Change it to local discriminator of the found variant and update offsets.
                     local_discriminators[prev_size + i] = local_discr;
@@ -581,7 +585,7 @@ void ColumnDynamic::doInsertRangeFrom(const IColumn & src_, size_t start, size_t
                 if (auto it = variant_info.variant_name_to_discriminator.find(type_name); it != variant_info.variant_name_to_discriminator.end())
                 {
                     auto local_discr = variant_col.localDiscriminatorByGlobal(it->second);
-                    getVariantSerialization(type, type_name)->deserializeBinary(*variant_columns[local_discr], buf, getFormatSettings());
+                    variant_info.variant_serializations[it->second]->deserializeBinary(*variant_columns[local_discr], buf, getFormatSettings());
                     local_discriminators.push_back(local_discr);
                     offsets.push_back(variant_columns[local_discr]->size() - 1);
                 }
@@ -605,7 +609,7 @@ void ColumnDynamic::doInsertRangeFrom(const IColumn & src_, size_t start, size_t
                         shared_variant,
                         *src_variant_columns[src_local_discr],
                         src_variants[src_global_discr],
-                        getVariantSerialization(src_variants[src_global_discr], dynamic_src.variant_info.variant_names[src_global_discr]),
+                        dynamic_src.variant_info.variant_serializations[src_global_discr],
                         src_offset);
                     local_discriminators.push_back(shared_variant_local_discr);
                     offsets.push_back(shared_variant.size() - 1);
@@ -657,7 +661,7 @@ void ColumnDynamic::doInsertManyFrom(const IColumn & src_, size_t position, size
             /// Deserialize value into temporary column and use it in insertManyIntoVariantFrom.
             auto tmp_column = type->createColumn();
             tmp_column->reserve(1);
-            getVariantSerialization(type, type_name)->deserializeBinary(*tmp_column, buf, getFormatSettings());
+            variant_info.variant_serializations[it->second]->deserializeBinary(*tmp_column, buf, getFormatSettings());
             variant_col.insertManyIntoVariantFrom(it->second, *tmp_column, 0, length);
         }
         /// Otherwise just insert it into our shared variant.
@@ -700,7 +704,7 @@ void ColumnDynamic::doInsertManyFrom(const IColumn & src_, size_t position, size
         *tmp_shared_variant,
         src_variant_col.getVariantByGlobalDiscriminator(src_global_discr),
         variant_type,
-        getVariantSerialization(variant_type, dynamic_src.variant_info.variant_names[src_global_discr]),
+        dynamic_src.variant_info.variant_serializations[src_global_discr],
         src_offset);
 
     variant_col.insertManyIntoVariantFrom(getSharedVariantDiscriminator(), *tmp_shared_variant, 0, length);
@@ -759,7 +763,7 @@ std::string_view ColumnDynamic::serializeValueIntoArena(size_t n, Arena & arena,
     {
         const auto & variant_type = assert_cast<const DataTypeVariant &>(*variant_info.variant_type).getVariant(discr);
         encodeDataType(variant_type, buf);
-        variant_type->getDefaultSerialization()->serializeBinary(variant_col.getVariantByGlobalDiscriminator(discr), variant_col.offsetAt(n), buf, getFormatSettings());
+        variant_info.variant_serializations[discr]->serializeBinary(variant_col.getVariantByGlobalDiscriminator(discr), variant_col.offsetAt(n), buf, getFormatSettings());
         type_and_value = buf.str();
     }
 
@@ -798,13 +802,13 @@ void ColumnDynamic::deserializeAndInsertFromArena(ReadBuffer & in, const IColumn
     auto it = variant_info.variant_name_to_discriminator.find(variant_name);
     if (it != variant_info.variant_name_to_discriminator.end())
     {
-        variant_col.deserializeBinaryIntoVariant(it->second, getVariantSerialization(variant_type, variant_name), buf, getFormatSettings());
+        variant_col.deserializeBinaryIntoVariant(it->second, variant_info.variant_serializations[it->second], buf, getFormatSettings());
     }
     /// If we don't have such variant, try to add it.
     else if (likely(addNewVariant(variant_type)))
     {
         auto discr = variant_info.variant_name_to_discriminator[variant_name];
-        variant_col.deserializeBinaryIntoVariant(discr, getVariantSerialization(variant_type, variant_name), buf, getFormatSettings());
+        variant_col.deserializeBinaryIntoVariant(discr, variant_info.variant_serializations[discr], buf, getFormatSettings());
     }
     /// Otherwise insert this value into shared variant.
     else

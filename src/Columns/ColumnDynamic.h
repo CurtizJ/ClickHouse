@@ -67,10 +67,14 @@ public:
     struct VariantInfo
     {
         DataTypePtr variant_type;
+        /// Serialization of the whole variant type to not call getDefaultSerialization() every time.
+        SerializationPtr variant_type_serialization;
         /// Name of the whole variant to not call getName() every time.
         String variant_name;
         /// Names of variants to not call getName() every time on variants.
         Names variant_names;
+        /// Serializations of variants to not call getDefaultSerialization() every time on variants.
+        Serializations variant_serializations;
         /// Mapping (variant name) -> (global discriminator).
         /// It's used during variant extension.
         UnorderedMapWithMemoryTracking<String, UInt8> variant_name_to_discriminator;

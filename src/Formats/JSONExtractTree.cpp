@@ -2043,7 +2043,7 @@ private:
         {
             case ElementType::BOOL:
             {
-                if (variant_info.variant_name_to_discriminator.contains("Bool") || column_dynamic.addNewVariant(getDataTypesCache().getType("Bool"), "Bool"))
+                if (variant_info.variant_name_to_discriminator.contains("Bool") || column_dynamic.addNewVariant(getSimpleDataTypeCache().getType("Bool"), "Bool"))
                 {
                     insertValueIntoNumericVariant<ColumnUInt8, UInt8>(variant_info, variant_column, element.getBool(), "Bool");
                     return true;
@@ -2053,7 +2053,7 @@ private:
             }
             case ElementType::INT64:
             {
-                if (variant_info.variant_name_to_discriminator.contains("Int64") || column_dynamic.addNewVariant(getDataTypesCache().getType("Int64"), "Int64"))
+                if (variant_info.variant_name_to_discriminator.contains("Int64") || column_dynamic.addNewVariant(getSimpleDataTypeCache().getType("Int64"), "Int64"))
                 {
                     insertValueIntoNumericVariant<ColumnInt64, Int64>(variant_info, variant_column, element.getInt64(), "Int64");
                     return true;
@@ -2063,7 +2063,7 @@ private:
             }
             case ElementType::UINT64:
             {
-                if (variant_info.variant_name_to_discriminator.contains("UInt64") || column_dynamic.addNewVariant(getDataTypesCache().getType("UInt64"), "UInt64"))
+                if (variant_info.variant_name_to_discriminator.contains("UInt64") || column_dynamic.addNewVariant(getSimpleDataTypeCache().getType("UInt64"), "UInt64"))
                 {
                     insertValueIntoNumericVariant<ColumnUInt64, UInt64>(variant_info, variant_column, element.getUInt64(), "UInt64");
                     return true;
@@ -2073,7 +2073,7 @@ private:
             }
             case ElementType::DOUBLE:
             {
-                if (variant_info.variant_name_to_discriminator.contains("Float64") || column_dynamic.addNewVariant(getDataTypesCache().getType("Float64"), "Float64"))
+                if (variant_info.variant_name_to_discriminator.contains("Float64") || column_dynamic.addNewVariant(getSimpleDataTypeCache().getType("Float64"), "Float64"))
                 {
                     insertValueIntoNumericVariant<ColumnFloat64, Float64>(variant_info, variant_column, element.getDouble(), "Float64");
                     return true;
@@ -2089,7 +2089,7 @@ private:
                 /// If inference is disabled, just insert String.
                 if (!format_settings.try_infer_dates && !format_settings.try_infer_datetimes)
                 {
-                    if (variant_info.variant_name_to_discriminator.contains("String") || column_dynamic.addNewVariant(getDataTypesCache().getType("String"), "String"))
+                    if (variant_info.variant_name_to_discriminator.contains("String") || column_dynamic.addNewVariant(getSimpleDataTypeCache().getType("String"), "String"))
                     {
                         insertValueIntoStringVariant(variant_column, data, variant_info.variant_name_to_discriminator.at("String"));
                         return true;
@@ -2152,25 +2152,25 @@ private:
         {
             case ElementType::BOOL:
             {
-                encodeDataType(getDataTypesCache().getType("Bool"), buf);
+                encodeDataType(getSimpleDataTypeCache().getType("Bool"), buf);
                 writeBinary(element.getBool(), buf);
                 return true;
             }
             case ElementType::INT64:
             {
-                encodeDataType(getDataTypesCache().getType("Int64"), buf);
+                encodeDataType(getSimpleDataTypeCache().getType("Int64"), buf);
                 writeBinaryLittleEndian(element.getInt64(), buf);
                 return true;
             }
             case ElementType::UINT64:
             {
-                encodeDataType(getDataTypesCache().getType("UInt64"), buf);
+                encodeDataType(getSimpleDataTypeCache().getType("UInt64"), buf);
                 writeBinaryLittleEndian(element.getUInt64(), buf);
                 return true;
             }
             case ElementType::DOUBLE:
             {
-                encodeDataType(getDataTypesCache().getType("Float64"), buf);
+                encodeDataType(getSimpleDataTypeCache().getType("Float64"), buf);
                 writeBinaryLittleEndian(element.getDouble(), buf);
                 return true;
             }
@@ -2180,7 +2180,7 @@ private:
 
                 if (!format_settings.try_infer_dates && !format_settings.try_infer_datetimes)
                 {
-                    encodeDataType(getDataTypesCache().getType("String"), buf);
+                    encodeDataType(getSimpleDataTypeCache().getType("String"), buf);
                     writeStringBinary(data, buf);
                     return true;
                 }
@@ -2190,7 +2190,7 @@ private:
                     DayNum date;
                     if (tryInferDateFromString(data, date))
                     {
-                        encodeDataType(getDataTypesCache().getType("Date"), buf);
+                        encodeDataType(getSimpleDataTypeCache().getType("Date"), buf);
                         writeBinaryLittleEndian(static_cast<UInt16>(date), buf);
                         return true;
                     }
@@ -2201,7 +2201,7 @@ private:
                     time_t value;
                     if (tryInferDateTimeFromString(data, value, format_settings, time_zone_for_schema_inference, utc_time_zone_for_schema_inference))
                     {
-                        encodeDataType(getDataTypesCache().getType("DateTime"), buf);
+                        encodeDataType(getSimpleDataTypeCache().getType("DateTime"), buf);
                         writeBinaryLittleEndian(static_cast<UInt32>(value), buf);
                         return true;
                     }
@@ -2211,13 +2211,13 @@ private:
                     DateTime64 value;
                     if (tryInferDateTime64FromString(data, value, format_settings, time_zone_for_schema_inference, utc_time_zone_for_schema_inference))
                     {
-                        encodeDataType(getDataTypesCache().getType("DateTime64(9)"), buf);
+                        encodeDataType(getSimpleDataTypeCache().getType("DateTime64(9)"), buf);
                         writeBinaryLittleEndian(value, buf);
                         return true;
                     }
                 }
 
-                encodeDataType(getDataTypesCache().getType("String"), buf);
+                encodeDataType(getSimpleDataTypeCache().getType("String"), buf);
                 writeStringBinary(data, buf);
                 return true;
             }
