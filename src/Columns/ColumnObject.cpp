@@ -1,7 +1,7 @@
 #include <DataTypes/DataTypesBinaryEncoding.h>
-#include <DataTypes/DataTypeDynamic.h>
 #include <Columns/ColumnObject.h>
 #include <Columns/ColumnCompressed.h>
+#include <DataTypes/Serializations/SerializationDynamic.h>
 #include <IO/Operators.h>
 #include <IO/WriteBufferFromString.h>
 #include <Common/Arena.h>
@@ -29,9 +29,9 @@ const FormatSettings & getFormatSettings()
     return settings;
 }
 
-const SerializationPtr & getDynamicSerialization()
+const std::shared_ptr<SerializationDynamic> & getDynamicSerialization()
 {
-    static thread_local const SerializationPtr dynamic_serialization = DataTypeDynamic().getDefaultSerialization();
+    static thread_local const std::shared_ptr<SerializationDynamic> dynamic_serialization = std::make_shared<SerializationDynamic>();
     return dynamic_serialization;
 }
 
