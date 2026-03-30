@@ -12,6 +12,7 @@
 #    include <unicode/urename.h>
 #    include <unicode/utypes.h>
 #    include <Common/StringUtils.h>
+#    include <Common/formatReadable.h>
 
 namespace DB
 {
@@ -58,15 +59,27 @@ struct LowerUpperUTF8Impl
         size_t curr_offset = 0;
         for (size_t row_i = 0; row_i < input_rows_count; ++row_i)
         {
+            error_code = U_ZERO_ERROR;
             const auto * src = reinterpret_cast<const char *>(&data[offsets[row_i - 1]]);
             size_t src_size = offsets[row_i] - offsets[row_i - 1];
 
+            if (src_size > INT32_MAX)
+            {
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "Function {} doesn't support strings larger than {}",
+                    upper ? "upperUTF8" : "lowerUTF8", ReadableSize(INT32_MAX));
+            }
+
+            /// Clamp capacity to INT32_MAX to avoid overflow.
+            /// This capacity is sufficient for a single string.
+            int32_t dst_capacity = static_cast<int32_t>(std::min<size_t>(res_data.size() - curr_offset, INT32_MAX));
             int32_t dst_size;
+
             if constexpr (upper)
                 dst_size = ucasemap_utf8ToUpper(
                     case_map,
                     reinterpret_cast<char *>(&res_data[curr_offset]),
-                    static_cast<int32_t>(res_data.size() - curr_offset),
+                    dst_capacity,
                     src,
                     static_cast<int32_t>(src_size),
                     &error_code);
@@ -74,7 +87,7 @@ struct LowerUpperUTF8Impl
                 dst_size = ucasemap_utf8ToLower(
                     case_map,
                     reinterpret_cast<char *>(&res_data[curr_offset]),
-                    static_cast<int32_t>(res_data.size() - curr_offset),
+                    dst_capacity,
                     src,
                     static_cast<int32_t>(src_size),
                     &error_code);
@@ -83,13 +96,14 @@ struct LowerUpperUTF8Impl
             {
                 size_t new_size = curr_offset + dst_size;
                 res_data.resize(new_size);
-
+                dst_capacity = static_cast<int32_t>(std::min<size_t>(res_data.size() - curr_offset, INT32_MAX));
                 error_code = U_ZERO_ERROR;
+
                 if constexpr (upper)
                     dst_size = ucasemap_utf8ToUpper(
                         case_map,
                         reinterpret_cast<char *>(&res_data[curr_offset]),
-                        static_cast<int32_t>(res_data.size() - curr_offset),
+                        dst_capacity,
                         src,
                         static_cast<int32_t>(src_size),
                         &error_code);
@@ -97,7 +111,7 @@ struct LowerUpperUTF8Impl
                     dst_size = ucasemap_utf8ToLower(
                         case_map,
                         reinterpret_cast<char *>(&res_data[curr_offset]),
-                        static_cast<int32_t>(res_data.size() - curr_offset),
+                        dst_capacity,
                         src,
                         static_cast<int32_t>(src_size),
                         &error_code);
