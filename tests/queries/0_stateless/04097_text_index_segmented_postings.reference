@@ -1,0 +1,47 @@
+hasToken hello
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+hasToken world
+1
+3
+5
+7
+9
+11
+13
+15
+17
+19
+hasToken common
+20
+hasAllTokens
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+hasAnyToken
+20
+index granules skipped
+10
+after merge hasToken hello
+20
+after merge hasToken world
+20
+after merge hasAllTokens
+20
+after merge forced index
+20

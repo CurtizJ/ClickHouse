@@ -78,6 +78,7 @@ struct MergeTreeIndexTextParams
     size_t dictionary_block_size = 0;
     size_t dictionary_block_frontcoding_compression = 1;
     size_t posting_list_block_size = 1024 * 1024;
+    size_t segment_size = SegmentedPostingList::DEFAULT_SEGMENT_SIZE;
     ASTPtr preprocessor;
 };
 
@@ -102,7 +103,7 @@ public:
     /// Adds a value to small array or to the large SegmentedPostingList.
     /// If small array is converted after adding a value,
     /// posting list is created in the postings_holder and reference to it is saved.
-    void add(UInt64 value, PostingListsHolder & postings_holder);
+    void add(UInt64 value, PostingListsHolder & postings_holder, size_t segment_size = SegmentedPostingList::DEFAULT_SEGMENT_SIZE);
 
     size_t size() const { return isSmall() ? small_size : large->cardinality(); }
     bool isEmpty() const { return size() == 0; }
@@ -232,6 +233,8 @@ struct TextIndexSerialization
     enum class SparseIndexVersion
     {
         Initial = 0,
+        /// Adds a segment table before the sparse index for >4B row support.
+        Segmented = 1,
     };
 
     enum class TokensFormat : UInt64
@@ -248,9 +251,21 @@ struct TextIndexSerialization
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
-    static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr);
+    /// Writes the sparse index. If segment_size < DEFAULT_SEGMENT_SIZE and total_rows exceeds it,
+    /// writes version 1 with a segment table. Otherwise writes version 0.
+    static void serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr,
+        size_t segment_size = SegmentedPostingList::DEFAULT_SEGMENT_SIZE, size_t total_rows = 0);
 
-    static DictionarySparseIndex deserializeSparseIndex(ReadBuffer & istr);
+    struct SegmentTableInfo
+    {
+        size_t segment_size = SegmentedPostingList::DEFAULT_SEGMENT_SIZE;
+        std::vector<size_t> segment_row_counts; /// empty for version 0 (single segment)
+
+        bool isMultiSegment() const { return segment_row_counts.size() > 1; }
+        size_t segmentRowBegin(size_t idx) const;
+    };
+
+    static std::pair<DictionarySparseIndex, SegmentTableInfo> deserializeSparseIndexWithSegments(ReadBuffer & istr);
     /// If postings_serialization is null, embedded postings are skipped.
     static TokenPostingsInfo deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization);
     static void skipTokenInfo(ReadBuffer & istr);
@@ -311,7 +326,8 @@ public:
         const TokenPostingsInfo & token_info,
         size_t block_idx,
         PostingsSerialization & postings_serialization,
-        const String & index_id_for_caches);
+        const String & index_id_for_caches,
+        size_t segment_size = SegmentedPostingList::DEFAULT_SEGMENT_SIZE);
 
 private:
     /// Reads dictionary blocks and analyzes them for tokens.
@@ -330,6 +346,8 @@ private:
     bool can_use_like_dictionary_scan = false;
     /// If adding significantly large members here make sure to add them to memoryUsageBytes()
     MergeTreeIndexTextParams params;
+    /// Segment table read from the sparse index (for >4B row support).
+    TextIndexSerialization::SegmentTableInfo segment_table;
     /// Tokens that are in the index granule after analysis.
     TokenToPostingsInfosMap remaining_tokens;
     /// Tokens that are in the index granule after analysis of patterns.
@@ -357,7 +375,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
         SortedTokensAndPostings && tokens_and_postings_,
         TokenToPostingsBuilderMap && tokens_map_,
         std::list<PostingList> && posting_lists_,
-        std::unique_ptr<Arena> && arena_);
+        std::unique_ptr<Arena> && arena_,
+        size_t total_rows_ = 0);
 
     ~MergeTreeIndexGranuleTextWritable() override = default;
 
@@ -376,6 +395,7 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     /// tokens_and_postings has references to data held in the fields below.
     TokenToPostingsBuilderMap tokens_map;
     std::list<PostingList> posting_lists;
+    size_t total_rows = 0;
     std::unique_ptr<Arena> arena;
     LoggerPtr logger;
 };

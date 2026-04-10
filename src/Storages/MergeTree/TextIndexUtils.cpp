@@ -225,6 +225,7 @@ MergeTextIndexesTask::MergeTextIndexesTask(
 
     output_tokens = ColumnString::create();
     params = typeid_cast<const MergeTreeIndexText &>(*index_ptr).getParams();
+    output_postings = PostingList(params.segment_size);
     sparse_index_tokens = ColumnString::create();
     sparse_index_offsets = ColumnUInt64::create();
 
@@ -307,8 +308,8 @@ std::vector<PostingListPtr> MergeTextIndexesTask::readPostingLists(size_t source
         stream->seekToMark({token_info.offsets[i], 0});
         size_t seg_begin = 0;
         if (i < token_info.ranges.size())
-            seg_begin = (token_info.ranges[i].begin / PostingList::DEFAULT_SEGMENT_SIZE) * PostingList::DEFAULT_SEGMENT_SIZE;
-        postings.emplace_back(postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality, PostingList::DEFAULT_SEGMENT_SIZE, seg_begin));
+            seg_begin = (token_info.ranges[i].begin / params.segment_size) * params.segment_size;
+        postings.emplace_back(postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality, params.segment_size, seg_begin));
     }
 
     return postings;
@@ -323,7 +324,7 @@ PostingListPtr MergeTextIndexesTask::adjustPartOffsets(size_t source_num, Postin
     posting_list->toUint64Array(values.data());
     size_t part_index = segments[source_num].part_index;
 
-    auto result = std::make_shared<PostingList>();
+    auto result = std::make_shared<PostingList>(params.segment_size);
     for (auto src_abs : values)
     {
         UInt64 dest_abs = (*merged_part_offsets)[part_index, src_abs];

@@ -220,7 +220,8 @@ private:
                 auto idx_file = storage.readFile(sparse_file_name, read_settings, part->checksums.files.at(sparse_file_name).file_size);
 
                 CompressedReadBufferFromFile idx_buf(std::move(idx_file));
-                sparse_index = TextIndexSerialization::deserializeSparseIndex(idx_buf);
+                auto [sparse_idx, seg_info] = TextIndexSerialization::deserializeSparseIndexWithSegments(idx_buf);
+                sparse_index = std::move(sparse_idx);
 
                 if (sparse_index.empty())
                     continue;

@@ -77,6 +77,7 @@ static constexpr UInt64 DEFAULT_DICTIONARY_BLOCK_SIZE = 512;
 static constexpr bool DEFAULT_DICTIONARY_BLOCK_USE_FRONTCODING = true;
 static constexpr UInt64 DEFAULT_POSTING_LIST_BLOCK_SIZE = 1024 * 1024;
 static constexpr String DEFAULT_POSTING_LIST_CODEC = "none";
+static constexpr UInt64 DEFAULT_SEGMENT_SIZE = SegmentedPostingList::DEFAULT_SEGMENT_SIZE;
 
 bool DictionaryBlockBase::empty() const
 {
@@ -172,6 +173,15 @@ void PostingsSerialization::serialize(PostingListBuilder & postings, TokenPostin
             if (!seg_roaring.isEmpty())
                 serialize(seg_roaring, info, posting_list_block_size, ostr);
         }
+    }
+    else if (postings.isLarge() && (info.header & RawPostings))
+    {
+        /// RawPostings + large: serialize as absolute UInt64 VarUInt values.
+        UInt64 card = postings.getLarge().cardinality();
+        std::vector<UInt64> values(card);
+        postings.getLarge().toUint64Array(values.data());
+        for (size_t i = 0; i < card; ++i)
+            writeVarUInt(values[i], ostr);
     }
     else if (postings.isLarge())
     {
@@ -608,7 +618,8 @@ DictionarySparseIndexPtr MergeTreeIndexGranuleText::loadSparseIndex(MergeTreeInd
     const auto load_sparse_index = [&]
     {
         header_stream.seekToStart();
-        auto index = TextIndexSerialization::deserializeSparseIndex(*header_stream.getDataBuffer());
+        auto [index, seg_info] = TextIndexSerialization::deserializeSparseIndexWithSegments(*header_stream.getDataBuffer());
+        segment_table = std::move(seg_info);
         return std::make_shared<DictionarySparseIndex>(std::move(index));
     };
 
@@ -623,12 +634,12 @@ PostingListPtr MergeTreeIndexGranuleText::readPostingsBlock(
     const TokenPostingsInfo & token_info,
     size_t block_idx,
     PostingsSerialization & postings_serialization,
-    const String & index_id_for_caches)
+    const String & index_id_for_caches,
+    size_t segment_size)
 {
     auto * data_buffer = stream.getDataBuffer();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
 
-    size_t segment_size = PostingList::DEFAULT_SEGMENT_SIZE;
     size_t segment_row_begin = 0;
     if (!token_info.ranges.empty() && block_idx < token_info.ranges.size())
     {
@@ -662,7 +673,7 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
         else if (token_info->header & SingleBlock)
         {
             chassert(token_info->offsets.size() == 1);
-            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches, params.segment_size);
             rare_tokens_postings.emplace(token, std::move(block));
         }
     };
@@ -701,7 +712,7 @@ bool MergeTreeIndexGranuleText::hasAnyQueryTokens(const TextSearchQuery & query)
         });
     }
 
-    PostingList range_posting;
+    PostingList range_posting(params.segment_size);
     range_posting.addRangeClosed(current_range->begin, current_range->end);
 
     for (const auto & token : query.tokens)
@@ -751,7 +762,7 @@ bool MergeTreeIndexGranuleText::hasAllQueryTokensOrEmpty(const TextSearchQuery &
         });
     }
 
-    PostingList intersection;
+    PostingList intersection(params.segment_size);
     intersection.addRangeClosed(current_range->begin, current_range->end);
 
     for (const auto & token : query.tokens)
@@ -797,11 +808,11 @@ bool MergeTreeIndexGranuleText::hasAnyQueryPatterns(const TextSearchQuery & quer
     if (!current_range.has_value())
         return !query_tokens.empty();
 
-    PostingList range_posting;
+    PostingList range_posting(params.segment_size);
     range_posting.addRangeClosed(current_range->begin, current_range->end);
 
     /// Union all postings from this query's pattern-matched tokens
-    PostingList union_posting;
+    PostingList union_posting(params.segment_size);
 
     for (const auto & token : query_tokens)
     {
@@ -850,12 +861,14 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     SortedTokensAndPostings && tokens_and_postings_,
     TokenToPostingsBuilderMap && tokens_map_,
     std::list<PostingList> && posting_lists_,
-    std::unique_ptr<Arena> && arena_)
+    std::unique_ptr<Arena> && arena_,
+    size_t total_rows_)
     : params(std::move(params_))
     , posting_list_codec(posting_list_codec_)
     , tokens_and_postings(std::move(tokens_and_postings_))
     , tokens_map(std::move(tokens_map_))
     , posting_lists(std::move(posting_lists_))
+    , total_rows(total_rows_)
     , arena(std::move(arena_))
     , logger(getLogger("TextIndexGranuleWriter"))
 {
@@ -1047,6 +1060,20 @@ TokenPostingsInfo TextIndexSerialization::serializePostings(
         info.ranges.emplace_back(postings.minimum(), postings.maximum());
         postings_serialization.serialize(postings, info, params.posting_list_block_size, postings_stream.plain_hashing);
     }
+    else if (info.header & RawPostings)
+    {
+        /// RawPostings without SingleBlock (multi-segment, cardinality <= MAX_CARDINALITY_FOR_RAW_POSTINGS).
+        /// Write as a single block of absolute UInt64 VarUInt values.
+        chassert(postings.isLarge());
+        info.offsets.emplace_back(postings_stream.plain_hashing.count());
+        info.ranges.emplace_back(postings.minimum(), postings.maximum());
+
+        UInt64 card = postings.getLarge().cardinality();
+        std::vector<UInt64> values(card);
+        postings.getLarge().toUint64Array(values.data());
+        for (size_t i = 0; i < card; ++i)
+            writeVarUInt(values[i], postings_stream.plain_hashing);
+    }
     else
     {
         chassert(postings.isLarge());
@@ -1110,10 +1137,33 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
     }
 }
 
-void TextIndexSerialization::serializeSparseIndex(const DictionarySparseIndex & sparse_index, WriteBuffer & ostr)
+void TextIndexSerialization::serializeSparseIndex(
+    const DictionarySparseIndex & sparse_index, WriteBuffer & ostr,
+    size_t segment_size, size_t total_rows)
 {
-    UInt64 version = static_cast<UInt64>(SparseIndexVersion::Initial);
-    writeVarUInt(version, ostr);
+    bool needs_segment_table = segment_size < SegmentedPostingList::DEFAULT_SEGMENT_SIZE && total_rows > segment_size;
+
+    if (needs_segment_table)
+    {
+        UInt64 version = static_cast<UInt64>(SparseIndexVersion::Segmented);
+        writeVarUInt(version, ostr);
+
+        size_t num_segments = (total_rows + segment_size - 1) / segment_size;
+        writeVarUInt(num_segments, ostr);
+        writeVarUInt(segment_size, ostr);
+        for (size_t i = 0; i < num_segments; ++i)
+        {
+            size_t seg_begin = i * segment_size;
+            size_t seg_rows = std::min(segment_size, total_rows - seg_begin);
+            writeVarUInt(seg_rows, ostr);
+        }
+    }
+    else
+    {
+        UInt64 version = static_cast<UInt64>(SparseIndexVersion::Initial);
+        writeVarUInt(version, ostr);
+    }
+
     chassert(sparse_index.tokens->size() == sparse_index.offsets_in_file->size());
 
     auto serialization_string = SerializationString::create();
@@ -1124,15 +1174,37 @@ void TextIndexSerialization::serializeSparseIndex(const DictionarySparseIndex & 
     serialization_number->serializeBinaryBulk(*sparse_index.offsets_in_file, ostr, 0, sparse_index.offsets_in_file->size());
 }
 
-DictionarySparseIndex TextIndexSerialization::deserializeSparseIndex(ReadBuffer & istr)
+size_t TextIndexSerialization::SegmentTableInfo::segmentRowBegin(size_t idx) const
+{
+    size_t begin = 0;
+    for (size_t i = 0; i < idx && i < segment_row_counts.size(); ++i)
+        begin += segment_row_counts[i];
+    return begin;
+}
+
+std::pair<DictionarySparseIndex, TextIndexSerialization::SegmentTableInfo>
+TextIndexSerialization::deserializeSparseIndexWithSegments(ReadBuffer & istr)
 {
     ProfileEvents::increment(ProfileEvents::TextIndexReadSparseIndexBlocks);
 
     UInt64 version;
     readVarUInt(version, istr);
 
-    if (version != static_cast<UInt64>(SparseIndexVersion::Initial))
+    SegmentTableInfo seg_info;
+
+    if (version == static_cast<UInt64>(SparseIndexVersion::Segmented))
+    {
+        size_t num_segments;
+        readVarUInt(num_segments, istr);
+        readVarUInt(seg_info.segment_size, istr);
+        seg_info.segment_row_counts.resize(num_segments);
+        for (size_t i = 0; i < num_segments; ++i)
+            readVarUInt(seg_info.segment_row_counts[i], istr);
+    }
+    else if (version != static_cast<UInt64>(SparseIndexVersion::Initial))
+    {
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Unsupported version of sparse index ({})", version);
+    }
 
     size_t num_sparse_index_tokens;
     readVarUInt(num_sparse_index_tokens, istr);
@@ -1142,7 +1214,7 @@ DictionarySparseIndex TextIndexSerialization::deserializeSparseIndex(ReadBuffer 
 
     auto serialization_number = SerializationNumber<UInt64>::create();
     serialization_number->deserializeBinaryBulk(*offsets, istr, 0, num_sparse_index_tokens, 0.0);
-    return DictionarySparseIndex(std::move(tokens), std::move(offsets));
+    return {DictionarySparseIndex(std::move(tokens), std::move(offsets)), std::move(seg_info)};
 }
 
 TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr, PostingsSerialization * postings_serialization)
@@ -1164,6 +1236,7 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
         }
         else
         {
+            /// Embedded postings are raw VarUInt values (absolute); segment_row_begin is unused.
             auto postings = postings_serialization->deserialize(istr, info.header, info.cardinality, PostingList::DEFAULT_SEGMENT_SIZE, 0);
             info.offsets.emplace_back(0);
             info.ranges.emplace_back(postings->minimum(), postings->maximum());
@@ -1373,7 +1446,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         params,
         postings_serialization);
 
-    TextIndexSerialization::serializeSparseIndex(sparse_index_block, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeSparseIndex(sparse_index_block, index_stream->compressed_hashing, params.segment_size, total_rows);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
@@ -1412,7 +1485,7 @@ PostingListBuilder::PostingListBuilder(PostingList * posting_list)
 {
 }
 
-void PostingListBuilder::add(UInt64 value, PostingListsHolder & postings_holder)
+void PostingListBuilder::add(UInt64 value, PostingListsHolder & postings_holder, size_t segment_size)
 {
     if (small_size < max_small_size)
     {
@@ -1429,7 +1502,7 @@ void PostingListBuilder::add(UInt64 value, PostingListsHolder & postings_holder)
         if (small_size == max_small_size)
         {
             auto small_copy = std::move(small);
-            large = &postings_holder.emplace_back();
+            large = &postings_holder.emplace_back(segment_size);
 
             for (size_t i = 0; i < max_small_size; ++i)
                 large->addBulk(small_copy[i]);
@@ -1456,7 +1529,7 @@ void MergeTreeIndexTextGranuleBuilder::addDocument(std::string_view document)
             tokens_map.emplace(key_holder, it, inserted);
 
             auto & posting_list_builder = it->getMapped();
-            posting_list_builder.add(current_row, posting_lists);
+            posting_list_builder.add(current_row, posting_lists, params.segment_size);
             ++num_processed_tokens;
             return false;
         });
@@ -1486,7 +1559,8 @@ std::unique_ptr<MergeTreeIndexGranuleTextWritable> MergeTreeIndexTextGranuleBuil
         std::move(sorted_values),
         std::move(tokens_map),
         std::move(posting_lists),
-        std::move(arena));
+        std::move(arena),
+        current_row);
 }
 
 void MergeTreeIndexTextGranuleBuilder::reset()
@@ -1646,6 +1720,7 @@ static const String ARGUMENT_DICTIONARY_BLOCK_SIZE = "dictionary_block_size";
 static const String ARGUMENT_DICTIONARY_BLOCK_FRONTCODING_COMPRESSION = "dictionary_block_frontcoding_compression";
 static const String ARGUMENT_POSTING_LIST_BLOCK_SIZE = "posting_list_block_size";
 static const String ARGUMENT_POSTING_LIST_CODEC = "posting_list_codec";
+static const String ARGUMENT_SEGMENT_SIZE = "segment_size";
 
 namespace
 {
@@ -1741,11 +1816,13 @@ MergeTreeIndexPtr textIndexCreator(const IndexDescription & index)
     UInt64 dictionary_block_size = extractFieldOption<UInt64>(options, ARGUMENT_DICTIONARY_BLOCK_SIZE).value_or(DEFAULT_DICTIONARY_BLOCK_SIZE);
     UInt64 dictionary_block_frontcoding_compression = extractFieldOption<UInt64>(options, ARGUMENT_DICTIONARY_BLOCK_FRONTCODING_COMPRESSION).value_or(DEFAULT_DICTIONARY_BLOCK_USE_FRONTCODING);
     UInt64 posting_list_block_size = extractFieldOption<UInt64>(options, ARGUMENT_POSTING_LIST_BLOCK_SIZE).value_or(DEFAULT_POSTING_LIST_BLOCK_SIZE);
+    UInt64 segment_size = extractFieldOption<UInt64>(options, ARGUMENT_SEGMENT_SIZE).value_or(DEFAULT_SEGMENT_SIZE);
 
     MergeTreeIndexTextParams index_params{
         dictionary_block_size,
         dictionary_block_frontcoding_compression,
         posting_list_block_size,
+        segment_size,
         std::move(preprocessor_ast)};
 
     String posting_list_codec_name = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC).value_or(DEFAULT_POSTING_LIST_CODEC);
@@ -1776,6 +1853,10 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/)
     UInt64 posting_list_block_size = extractFieldOption<UInt64>(options, ARGUMENT_POSTING_LIST_BLOCK_SIZE).value_or(DEFAULT_POSTING_LIST_BLOCK_SIZE);
     if (posting_list_block_size == 0)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Text index argument '{}' must be greater than 0, but got {}", ARGUMENT_POSTING_LIST_BLOCK_SIZE, posting_list_block_size);
+
+    UInt64 segment_size = extractFieldOption<UInt64>(options, ARGUMENT_SEGMENT_SIZE).value_or(DEFAULT_SEGMENT_SIZE);
+    if (segment_size == 0)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Text index argument '{}' must be greater than 0, but got {}", ARGUMENT_SEGMENT_SIZE, segment_size);
 
     String posting_list_codec_name = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC).value_or(DEFAULT_POSTING_LIST_CODEC);
     PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, index.name);

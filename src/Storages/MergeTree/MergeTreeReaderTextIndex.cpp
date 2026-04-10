@@ -611,7 +611,7 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
         if (inserted)
         {
             auto * postings_stream = large_postings_streams.at(token).get();
-            it->second = MergeTreeIndexGranuleText::readPostingsBlock(*postings_stream, *deserialization_state, token_info, block_idx, postings_serialization, granule_text.getIndexIdForCaches());
+            it->second = MergeTreeIndexGranuleText::readPostingsBlock(*postings_stream, *deserialization_state, token_info, block_idx, postings_serialization, granule_text.getIndexIdForCaches(), granule_text.getParams().segment_size);
         }
 
         token_postings.push_back(it->second);
@@ -654,10 +654,11 @@ void applyPostingsAny(
     const std::vector<String> & search_tokens,
     size_t column_offset,
     size_t row_offset,
-    size_t num_rows)
+    size_t num_rows,
+    size_t segment_size)
 {
-    PostingList union_posting;
-    PostingList range_posting;
+    PostingList union_posting(segment_size);
+    PostingList range_posting(segment_size);
     range_posting.addRange(row_offset, row_offset + num_rows);
 
     for (const auto & token : search_tokens)
@@ -693,7 +694,8 @@ void applyPostingsAll(
     const std::vector<String> & search_tokens,
     size_t column_offset,
     size_t row_offset,
-    size_t num_rows)
+    size_t num_rows,
+    size_t segment_size)
 {
     if (postings_map.size() > std::numeric_limits<UInt16>::max())
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Too many tokens ({}) for All search mode", postings_map.size());
@@ -710,7 +712,7 @@ void applyPostingsAll(
         token_postings.push_back(it->second);
     }
 
-    PostingList intersection_posting;
+    PostingList intersection_posting(segment_size);
     intersection_posting.addRange(row_offset, row_offset + num_rows);
 
     for (const PostingListPtr & posting : token_postings)
@@ -742,6 +744,8 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     auto search_query = condition_text.getSearchQueryForVirtualColumn(column_name);
+    const auto & text_index = typeid_cast<const MergeTreeIndexText &>(*index.index);
+    size_t segment_size = text_index.getParams().segment_size;
 
     size_t old_size = column_data.size();
     column_data.resize_fill(old_size + num_rows, 0);
@@ -755,7 +759,7 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
                 matched_tokens.push_back(String(token));
 
         if (!matched_tokens.empty())
-            applyPostingsAny(column, postings, indices_buffer, matched_tokens, old_size, row_offset, num_rows);
+            applyPostingsAny(column, postings, indices_buffer, matched_tokens, old_size, row_offset, num_rows, segment_size);
 
         return;
     }
@@ -769,11 +773,11 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & colum
     }
     else if (search_query->search_mode == TextSearchMode::Any)
     {
-        applyPostingsAny(column, postings, indices_buffer, search_query->tokens, old_size, row_offset, num_rows);
+        applyPostingsAny(column, postings, indices_buffer, search_query->tokens, old_size, row_offset, num_rows, segment_size);
     }
     else if (search_query->search_mode == TextSearchMode::All)
     {
-        applyPostingsAll(column, postings, indices_buffer, search_query->tokens, old_size, row_offset, num_rows);
+        applyPostingsAll(column, postings, indices_buffer, search_query->tokens, old_size, row_offset, num_rows, segment_size);
     }
     else
     {
