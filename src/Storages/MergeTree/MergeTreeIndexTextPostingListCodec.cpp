@@ -78,7 +78,7 @@ void PostingListCodecBitpackingImpl::insert(std::span<uint32_t> row_ids)
         flushCurrentSegment();
 }
 
-void PostingListCodecBitpackingImpl::decode(ReadBuffer & in, PostingList & postings)
+void PostingListCodecBitpackingImpl::decode(ReadBuffer & in, roaring::Roaring & postings)
 {
     Header header;
     header.read(in);
@@ -207,14 +207,14 @@ void PostingListCodecBitpackingImpl::decodeBlock(
     prev_row_id = current_segment.empty() ? prev_row_id : current_segment.back();
 }
 
-void PostingListCodecBitpacking::decode(ReadBuffer & in, PostingList & postings) const
+void PostingListCodecBitpacking::decode(ReadBuffer & in, roaring::Roaring & postings) const
 {
     PostingListCodecBitpackingImpl impl;
     impl.decode(in, postings);
 }
 
 void PostingListCodecBitpacking::encode(
-        const PostingList & postings, size_t max_rowids_in_segment, TokenPostingsInfo & info, WriteBuffer & out) const
+        const roaring::Roaring & postings, size_t max_rowids_in_segment, TokenPostingsInfo & info, WriteBuffer & out) const
 {
     PostingListCodecBitpackingImpl impl(max_rowids_in_segment);
     std::vector<uint32_t> rowids;

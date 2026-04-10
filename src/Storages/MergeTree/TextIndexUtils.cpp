@@ -302,10 +302,13 @@ std::vector<PostingListPtr> MergeTextIndexesTask::readPostingLists(size_t source
     std::vector<PostingListPtr> postings;
     postings.reserve(token_info.offsets.size());
 
-    for (const auto offset_in_file : token_info.offsets)
+    for (size_t i = 0; i < token_info.offsets.size(); ++i)
     {
-        stream->seekToMark({offset_in_file, 0});
-        postings.emplace_back(postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality));
+        stream->seekToMark({token_info.offsets[i], 0});
+        size_t seg_begin = 0;
+        if (i < token_info.ranges.size())
+            seg_begin = (token_info.ranges[i].begin / PostingList::DEFAULT_SEGMENT_SIZE) * PostingList::DEFAULT_SEGMENT_SIZE;
+        postings.emplace_back(postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality, PostingList::DEFAULT_SEGMENT_SIZE, seg_begin));
     }
 
     return postings;
@@ -316,14 +319,17 @@ PostingListPtr MergeTextIndexesTask::adjustPartOffsets(size_t source_num, Postin
     if (!merged_part_offsets)
         return posting_list;
 
-    std::vector<UInt32> offsets(posting_list->cardinality());
-    posting_list->toUint32Array(offsets.data());
+    std::vector<UInt64> values(posting_list->cardinality());
+    posting_list->toUint64Array(values.data());
     size_t part_index = segments[source_num].part_index;
 
-    for (auto & offset : offsets)
-        offset = static_cast<UInt32>((*merged_part_offsets)[part_index, offset]);
-
-    return std::make_shared<PostingList>(offsets.size(), offsets.data());
+    auto result = std::make_shared<PostingList>();
+    for (auto src_abs : values)
+    {
+        UInt64 dest_abs = (*merged_part_offsets)[part_index, src_abs];
+        result->add(dest_abs);
+    }
+    return result;
 }
 
 void MergeTextIndexesTask::flushPostingList()
@@ -372,8 +378,9 @@ void MergeTextIndexesTask::flushDictionaryBlock()
 
         if (output_infos[i].header & PostingsSerialization::Flags::EmbeddedPostings)
         {
-            const auto & roaring_bitmap = output_infos[i].embedded_postings->roaring;
-            postings_serialization.serialize(roaring_bitmap, output_infos[i].header, ostr);
+            /// Embedded postings are serialized as raw VarUInt values — extract from segment 0.
+            chassert(output_infos[i].embedded_postings->isSingleSegment());
+            postings_serialization.serialize(output_infos[i].embedded_postings->segment(0).roaring, output_infos[i].header, ostr);
         }
     }
 

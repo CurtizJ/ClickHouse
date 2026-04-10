@@ -12,7 +12,6 @@ namespace DB
 struct TokenPostingsInfo;
 class WriteBuffer;
 class ReadBuffer;
-using PostingList = roaring::Roaring;
 
 namespace ErrorCodes
 {
@@ -129,7 +128,7 @@ public:
     ///
     /// Decompression restores delta values and then performs an inclusive scan
     /// to reconstruct absolute row ids.
-    void decode(ReadBuffer & in, PostingList & postings);
+    void decode(ReadBuffer & in, roaring::Roaring & postings);
 
 private:
     void reset()
@@ -218,8 +217,8 @@ public:
 
     PostingListCodecBitpacking() : IPostingListCodec(Type::Bitpacking) {}
 
-    void encode(const PostingList & postings, size_t max_rowids_in_segment, TokenPostingsInfo & info, WriteBuffer & out) const override;
-    void decode(ReadBuffer & in, PostingList & postings) const override;
+    void encode(const roaring::Roaring & postings, size_t max_rowids_in_segment, TokenPostingsInfo & info, WriteBuffer & out) const override;
+    void decode(ReadBuffer & in, roaring::Roaring & postings) const override;
 };
 
 /// A posting list codec that doesn't compress (no-op).
@@ -230,8 +229,8 @@ public:
 
     PostingListCodecNone() : IPostingListCodec(Type::None) {}
 
-    void encode(const PostingList &, size_t, TokenPostingsInfo &, WriteBuffer &) const override {}
-    void decode(ReadBuffer &, PostingList &) const override {}
+    void encode(const roaring::Roaring &, size_t, TokenPostingsInfo &, WriteBuffer &) const override {}
+    void decode(ReadBuffer &, roaring::Roaring &) const override {}
 };
 
 }

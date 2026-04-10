@@ -650,7 +650,7 @@ void MergeTreeReaderTextIndex::cleanupPostingsBlocks(const RowsRange & range)
 void applyPostingsAny(
     IColumn & column,
     PostingsMap & postings_map,
-    PaddedPODArray<UInt32> & indices,
+    PaddedPODArray<UInt64> & indices,
     const std::vector<String> & search_tokens,
     size_t column_offset,
     size_t row_offset,
@@ -669,17 +669,17 @@ void applyPostingsAny(
         union_posting |= (*it->second & range_posting);
     }
 
-    size_t cardinality = union_posting.cardinality();
+    UInt64 cardinality = union_posting.cardinality();
     if (cardinality == 0)
         return;
 
     indices.resize(cardinality);
-    union_posting.toUint32Array(indices.data());
+    union_posting.toUint64Array(indices.data());
 
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    for (size_t i = 0; i < cardinality; ++i)
+    for (UInt64 i = 0; i < cardinality; ++i)
     {
-        size_t relative_row_number = indices[i] - row_offset;
+        size_t relative_row_number = static_cast<size_t>(indices[i]) - row_offset;
         chassert(relative_row_number < num_rows);
         column_data[column_offset + relative_row_number] = 1;
     }
@@ -689,7 +689,7 @@ void applyPostingsAny(
 void applyPostingsAll(
     IColumn & column,
     PostingsMap & postings_map,
-    PaddedPODArray<UInt32> & indices,
+    PaddedPODArray<UInt64> & indices,
     const std::vector<String> & search_tokens,
     size_t column_offset,
     size_t row_offset,
@@ -721,17 +721,17 @@ void applyPostingsAll(
             return;
     }
 
-    const size_t cardinality = intersection_posting.cardinality();
+    const UInt64 cardinality = intersection_posting.cardinality();
     if (cardinality == 0)
         return;
 
     indices.resize(cardinality);
-    intersection_posting.toUint32Array(indices.data());
+    intersection_posting.toUint64Array(indices.data());
 
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    for (size_t i = 0; i < cardinality; ++i)
+    for (UInt64 i = 0; i < cardinality; ++i)
     {
-        size_t relative_row_number = indices[i] - row_offset;
+        size_t relative_row_number = static_cast<size_t>(indices[i]) - row_offset;
         chassert(relative_row_number < num_rows);
         column_data[column_offset + relative_row_number] = 1;
     }

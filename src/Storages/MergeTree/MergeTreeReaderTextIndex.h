@@ -110,7 +110,7 @@ private:
     size_t current_row = 0;
     size_t current_mark = 0;
 
-    PaddedPODArray<UInt32> indices_buffer;
+    PaddedPODArray<UInt64> indices_buffer;
     roaring::Roaring analyzed_granules;
     roaring::Roaring may_be_true_granules;
 

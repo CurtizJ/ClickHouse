@@ -16,7 +16,7 @@
 
 #include <vector>
 
-#include <roaring/roaring.hh>
+#include <Storages/MergeTree/SegmentedPostingList.h>
 
 namespace DB
 {
@@ -81,7 +81,7 @@ struct MergeTreeIndexTextParams
     ASTPtr preprocessor;
 };
 
-using PostingList = roaring::Roaring;
+using PostingList = SegmentedPostingList;
 using PostingListPtr = std::shared_ptr<PostingList>;
 
 /// A struct for building a posting list with optimization for infrequent tokens.
@@ -92,41 +92,34 @@ struct PostingListBuilder
 public:
     using PostingListsHolder = std::list<PostingList>;
 
-    /// sizeof(PostingListWithContext) == 24 bytes.
-    /// Use small container of the same size to reuse this memory.
-    static constexpr size_t max_small_size = 6;
-    using SmallContainer = std::array<UInt32, max_small_size>;
+    /// 3 x UInt64 = 24 bytes (same footprint as old 6 x UInt32).
+    static constexpr size_t max_small_size = 3;
+    using SmallContainer = std::array<UInt64, max_small_size>;
 
     PostingListBuilder() : small_size(0) {}
     explicit PostingListBuilder(PostingList * posting_list);
 
-    /// Adds a value to small array or to the large Roaring Bitmap.
-    /// If small array is converted to Roaring Bitmap after adding a value,
+    /// Adds a value to small array or to the large SegmentedPostingList.
+    /// If small array is converted after adding a value,
     /// posting list is created in the postings_holder and reference to it is saved.
-    void add(UInt32 value, PostingListsHolder & postings_holder);
+    void add(UInt64 value, PostingListsHolder & postings_holder);
 
-    size_t size() const { return isSmall() ? small_size : large.postings->cardinality(); }
+    size_t size() const { return isSmall() ? small_size : large->cardinality(); }
     bool isEmpty() const { return size() == 0; }
     bool isSmall() const { return small_size < max_small_size; }
     bool isLarge() const { return !isSmall(); }
-    UInt32 minimum() const { return isSmall() ? small[0] : large.postings->minimum(); }
-    UInt32 maximum() const { return isSmall() ? small[small_size - 1] : large.postings->maximum(); }
+    UInt64 minimum() const { return isSmall() ? small[0] : large->minimum(); }
+    UInt64 maximum() const { return isSmall() ? small[small_size - 1] : large->maximum(); }
 
     SmallContainer & getSmall() { return small; }
     const SmallContainer & getSmall() const { return small; }
-    PostingList & getLarge() const { return *large.postings; }
+    PostingList & getLarge() const { return *large; }
 
 private:
-    struct PostingListWithContext
-    {
-        PostingList * postings;
-        roaring::BulkContext context;
-    };
-
     union
     {
         SmallContainer small;
-        PostingListWithContext large;
+        PostingList * large;
     };
 
     UInt8 small_size;
@@ -156,16 +149,16 @@ struct PostingsSerialization
     };
 
     void serialize(PostingListBuilder & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
-    void serialize(const PostingList & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
+    void serialize(const roaring::Roaring & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
     void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
-    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
+    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, size_t segment_size, size_t segment_row_begin);
     PostingListCodecPtr getPostingListCodec() const { return posting_list_codec; }
 
 private:
     PostingListCodecPtr posting_list_codec;
 
     /// Reusable buffers to avoid repeated heap allocations during deserialization.
-    std::vector<UInt32> raw_postings_buffer;
+    std::vector<UInt64> raw_postings_buffer;
     std::vector<char> deserialization_buffer;
 };
 
