@@ -35,6 +35,8 @@ constexpr auto KEY_NAME = "name";
 constexpr auto KEY_TYPES_SERIALIZATION_VERSIONS = "types_serialization_versions";
 constexpr auto KEY_STRING_SERIALIZATION_VERSION = "string";
 constexpr auto KEY_NULLABLE_SERIALIZATION_VERSION = "nullable";
+constexpr auto KEY_MAP_SERIALIZATION_VERSION = "map";
+constexpr auto KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES = "propagate_types_serialization_versions_to_nested_types";
 
 }
 
@@ -286,7 +288,15 @@ void SerializationInfoByName::writeJSONImpl(WriteBuffer & out, ElementWriter && 
         if (settings.nullable_serialization_version != MergeTreeNullableSerializationVersion::BASIC)
             type_versions_obj.set(KEY_NULLABLE_SERIALIZATION_VERSION, static_cast<size_t>(settings.nullable_serialization_version));
 
+        if (settings.map_serialization_version != MergeTreeMapSerializationVersion::BASIC)
+            type_versions_obj.set(KEY_MAP_SERIALIZATION_VERSION, static_cast<size_t>(settings.map_serialization_version));
+
         object.set(KEY_TYPES_SERIALIZATION_VERSIONS, type_versions_obj);
+
+        /// Write flag propagate_types_serialization_versions_to_nested_types only if it's set,
+        /// so old versions can read this info if the flag is disabled.
+        if (settings.propagate_types_serialization_versions_to_nested_types)
+            object.set(KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES, settings.propagate_types_serialization_versions_to_nested_types);
     }
 
     std::ostringstream oss;     // STYLE_CHECK_ALLOW_STD_STRING_STREAM
@@ -346,6 +356,7 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
 
     Poco::JSON::Array::Ptr columns_array;
     Poco::JSON::Object::Ptr type_versions_obj;
+    bool propagate_types_serialization_versions_to_nested_types = false;
 
     for (const auto & [key, value] : *object)
     {
@@ -361,6 +372,10 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
         {
             type_versions_obj = value.extract<Poco::JSON::Object::Ptr>();
         }
+        else if (key == KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES)
+        {
+            propagate_types_serialization_versions_to_nested_types = value.extract<bool>();
+        }
         else
         {
             throw Exception(ErrorCodes::CORRUPTED_DATA, "Unexpected field '{}' in MergeTreeSerializationInfo JSON", key);
@@ -369,6 +384,7 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
 
     MergeTreeStringSerializationVersion string_serialization_version = MergeTreeStringSerializationVersion::SINGLE_STREAM;
     MergeTreeNullableSerializationVersion nullable_serialization_version = MergeTreeNullableSerializationVersion::BASIC;
+    MergeTreeMapSerializationVersion map_serialization_version = MergeTreeMapSerializationVersion::BASIC;
 
     if (version >= MergeTreeSerializationInfoVersion::WITH_TYPES)
     {
@@ -399,6 +415,13 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
 
                 nullable_serialization_version = *maybe_enum;
             }
+            else if (type_name == KEY_MAP_SERIALIZATION_VERSION)
+            {
+                auto maybe_enum = magic_enum::enum_cast<MergeTreeMapSerializationVersion>(version_value);
+                if (!maybe_enum.has_value())
+                    throw Exception(ErrorCodes::CORRUPTED_DATA, "Invalid version {} for type '{}'", version_value, type_name);
+                map_serialization_version = *maybe_enum;
+            }
             else
             {
                 throw Exception(ErrorCodes::CORRUPTED_DATA, "Unknown field '{}' in types_serialization_versions", type_name);
@@ -411,7 +434,9 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
         false /* Cannot choose kind when constructing from JSON */,
         version,
         string_serialization_version,
-        nullable_serialization_version);
+        nullable_serialization_version,
+        map_serialization_version,
+        propagate_types_serialization_versions_to_nested_types);
 
     std::optional<Estimates> stats;
     SerializationInfoByName infos(settings);

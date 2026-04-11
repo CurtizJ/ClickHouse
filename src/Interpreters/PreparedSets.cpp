@@ -31,6 +31,7 @@ namespace Setting
 {
     extern const SettingsUInt64 max_bytes_in_set;
     extern const SettingsUInt64 max_bytes_to_transfer;
+    extern const SettingsUInt64 interactive_delay;
     extern const SettingsUInt64 max_rows_in_set;
     extern const SettingsUInt64 max_rows_to_transfer;
     extern const SettingsOverflowMode set_overflow_mode;
@@ -179,6 +180,20 @@ FutureSetFromSubquery::FutureSetFromSubquery(
 
 FutureSetFromSubquery::~FutureSetFromSubquery() = default;
 
+void FutureSetFromSubquery::replaceSetAndKey(SetAndKeyPtr set)
+{
+    if (set->key != set_and_key->key)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Trying to exchange sets with different keys: {} vs {}", set->key, set_and_key->key);
+    set_and_key = std::move(set);
+}
+
+SetAndKeyPtr FutureSetFromSubquery::detachSetAndKey()
+{
+    SetAndKeyPtr ret;
+    std::swap(ret, set_and_key);
+    return ret;
+}
+
 SetPtr FutureSetFromSubquery::get() const
 {
     if (set_and_key->set != nullptr && set_and_key->set->isCreated())
@@ -297,6 +312,11 @@ void FutureSetFromSubquery::buildSetInplace(const ContextPtr & context)
     pipeline.complete(std::make_shared<EmptySink>(std::make_shared<const Block>(Block())));
 
     CompletedPipelineExecutor executor(pipeline);
+    if (context->hasQueryContext())
+    {
+        if (auto cancel_callback = context->getQueryContext()->getInteractiveCancelCallback())
+            executor.setCancelCallback(std::move(cancel_callback), std::max(UInt64(100), context->getSettingsRef()[Setting::interactive_delay] / 1000));
+    }
     executor.execute();
 }
 
@@ -337,6 +357,11 @@ SetPtr FutureSetFromSubquery::buildOrderedSetInplace(const ContextPtr & context)
     pipeline.complete(std::make_shared<EmptySink>(std::make_shared<const Block>(Block())));
 
     CompletedPipelineExecutor executor(pipeline);
+    if (context->hasQueryContext())
+    {
+        if (auto cancel_callback = context->getQueryContext()->getInteractiveCancelCallback())
+            executor.setCancelCallback(std::move(cancel_callback), std::max(UInt64(100), context->getSettingsRef()[Setting::interactive_delay] / 1000));
+    }
     executor.execute();
 
     /// SET may not be created successfully at this step because of the sub-query timeout, but if we have
