@@ -177,10 +177,20 @@ def main():
                 f"mkdir -p {build_dir} && git submodule sync && git submodule init"
             )
 
-            res = res and Shell.check(
-                "contrib/update-submodules.sh --max-procs 10",
-                retries=3,
-            )
+            if os.path.isdir(".git/modules/contrib") and os.listdir(
+                ".git/modules/contrib"
+            ):
+                # Submodule cache was restored by runner.py — just populate working trees
+                print("Submodule cache detected, populating working trees from cache")
+                res = res and Shell.check(
+                    "git submodule update --depth 1 --single-branch",
+                    retries=3,
+                )
+            else:
+                res = res and Shell.check(
+                    "contrib/update-submodules.sh --max-procs 10",
+                    retries=3,
+                )
             return res
 
         results.append(
@@ -198,8 +208,8 @@ def main():
             print(
                 "WARNING: ClickHouse version has not been found in workflow kv storage - read from repo"
             )
-            info.add_workflow_report_message(
-                "WARNING: ClickHouse version has not been found in workflow kv storage"
+            info.add_workflow_warning(
+                "ClickHouse version has not been found in workflow kv storage"
             )
     assert version_dict
 
