@@ -623,8 +623,7 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
     using enum PostingsSerialization::Flags;
 
     const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*state.condition);
-    const size_t max_cardinality_for_analysis
-        = condition_text.getContext()->getSettingsRef()[Setting::text_index_max_cardinality_for_analysis];
+    const size_t max_cardinality_for_analysis = condition_text.getContext()->getSettingsRef()[Setting::text_index_max_cardinality_for_analysis];
 
     const auto register_rare_token = [&](const std::string & token, const TokenPostingsInfoPtr & token_info)
     {
