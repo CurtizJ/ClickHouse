@@ -62,3 +62,38 @@ SELECT trimLeft(explain) AS explain FROM (
 ) WHERE explain LIKE '%Granules:%';
 
 DROP TABLE t_text_idx_card;
+
+-- Same scenario but with a token whose postings span several actual posting blocks
+-- (multiple Roaring containers): values are spread across more than one 16-bit
+-- container, so `splitPostings` emits more than one block. This exercises the bulk
+-- `Roaring::fastunion` path in the rare-tokens reader.
+
+DROP TABLE IF EXISTS t_text_idx_card_multi;
+
+CREATE TABLE t_text_idx_card_multi
+(
+    id UInt32,
+    message String,
+    INDEX idx(message) TYPE text(tokenizer = splitByNonAlpha, posting_list_block_size = 4, posting_list_codec = 'none') GRANULARITY 1
+)
+ENGINE = MergeTree
+ORDER BY id
+SETTINGS index_granularity = 16384;
+
+-- Token 'foo' lives at rows 0, 10000, 20000, ..., 190000 (20 occurrences).
+-- Values span Roaring containers 0..2, so the posting list is written as multiple blocks.
+INSERT INTO t_text_idx_card_multi
+SELECT number, if(number % 10000 = 0 AND number < 200000, 'foo', 'bar')
+FROM numbers(200000);
+
+SELECT 'Multi-block: foo cardinality and block count > 1';
+SELECT token, cardinality, num_posting_blocks > 1
+FROM mergeTreeTextIndex(currentDatabase(), 't_text_idx_card_multi', 'idx')
+WHERE token = 'foo';
+
+SELECT 'Multi-block: result correctness across thresholds';
+SELECT count() FROM t_text_idx_card_multi WHERE hasToken(message, 'foo') SETTINGS text_index_max_cardinality_for_analysis = 0;
+SELECT count() FROM t_text_idx_card_multi WHERE hasToken(message, 'foo') SETTINGS text_index_max_cardinality_for_analysis = 100;
+SELECT count() FROM t_text_idx_card_multi WHERE hasToken(message, 'foo') SETTINGS use_skip_indexes = 0;
+
+DROP TABLE t_text_idx_card_multi;

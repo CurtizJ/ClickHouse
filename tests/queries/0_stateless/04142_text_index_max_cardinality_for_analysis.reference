@@ -15,3 +15,9 @@ Granules: 13/26
 Granule pruning - threshold well above cardinality (postings loaded)
 Granules: 26/26
 Granules: 13/26
+Multi-block: foo cardinality and block count > 1
+foo	20	1
+Multi-block: result correctness across thresholds
+20
+20
+20

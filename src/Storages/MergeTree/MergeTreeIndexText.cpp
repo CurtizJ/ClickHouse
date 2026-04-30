@@ -644,22 +644,29 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
         const size_t num_blocks = token_info->offsets.size();
         chassert(num_blocks >= 1);
 
-        /// Read the first block directly to avoid an extra OR for the common single-block case.
-        auto combined = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
-
-        if (num_blocks > 1)
+        if (num_blocks == 1)
         {
-            /// Multi-block token below the threshold: read all blocks and union them.
-            auto unioned = std::make_shared<PostingList>(*combined);
-            for (size_t block_idx = 1; block_idx < num_blocks; ++block_idx)
-            {
-                auto block = readPostingsBlock(stream, state, *token_info, block_idx, postings_serialization, index_id_for_caches);
-                *unioned |= *block;
-            }
-            combined = std::move(unioned);
+            /// Common case: store the single block directly without any union.
+            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+            rare_tokens_postings.emplace(token, std::move(block));
+            return;
         }
 
-        rare_tokens_postings.emplace(token, std::move(combined));
+        /// Multi-block token below the threshold: read all blocks and union them in bulk.
+        /// `Roaring::fastunion` performs an n-way merge over all containers in a single pass,
+        /// which is more cache-friendly and avoids the quadratic cost of pairwise OR.
+        std::vector<PostingListPtr> blocks;
+        blocks.reserve(num_blocks);
+        for (size_t block_idx = 0; block_idx < num_blocks; ++block_idx)
+            blocks.emplace_back(readPostingsBlock(stream, state, *token_info, block_idx, postings_serialization, index_id_for_caches));
+
+        std::vector<const PostingList *> raw_blocks;
+        raw_blocks.reserve(num_blocks);
+        for (const auto & block : blocks)
+            raw_blocks.emplace_back(block.get());
+
+        auto unioned = std::make_shared<PostingList>(PostingList::fastunion(num_blocks, raw_blocks.data()));
+        rare_tokens_postings.emplace(token, std::move(unioned));
     };
 
     for (const auto & [token, token_info] : remaining_tokens)
