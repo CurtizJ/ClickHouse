@@ -1,0 +1,17 @@
+Sanity: foo cardinality and block count
+foo	13	1
+Result correctness across thresholds
+13
+13
+13
+13
+13
+Granule pruning - threshold below cardinality (postings not loaded)
+Granules: 26/26
+Granules: 25/26
+Granule pruning - threshold at cardinality (postings loaded)
+Granules: 26/26
+Granules: 13/26
+Granule pruning - threshold well above cardinality (postings loaded)
+Granules: 26/26
+Granules: 13/26

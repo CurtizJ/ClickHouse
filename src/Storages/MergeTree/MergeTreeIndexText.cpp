@@ -65,6 +65,7 @@ namespace ErrorCodes
 namespace Setting
 {
     extern const SettingsUInt64 text_index_like_max_postings_to_read;
+    extern const SettingsUInt64 text_index_max_cardinality_for_analysis;
 }
 
 static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
@@ -621,6 +622,10 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
 {
     using enum PostingsSerialization::Flags;
 
+    const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*state.condition);
+    const size_t max_cardinality_for_analysis
+        = condition_text.getContext()->getSettingsRef()[Setting::text_index_max_cardinality_for_analysis];
+
     const auto register_rare_token = [&](const std::string & token, const TokenPostingsInfoPtr & token_info)
     {
         if (token_info->header & EmbeddedPostings)
@@ -628,13 +633,33 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
             chassert(token_info->embedded_postings);
             rare_tokens_postings.emplace(token, token_info->embedded_postings);
             ProfileEvents::increment(ProfileEvents::TextIndexUsedEmbeddedPostings);
+            return;
         }
-        else if (token_info->header & SingleBlock)
+
+        /// Skip tokens whose cardinality exceeds the analysis threshold:
+        /// they are conservatively assumed to be present in the granule.
+        if (token_info->cardinality > max_cardinality_for_analysis)
+            return;
+
+        const size_t num_blocks = token_info->offsets.size();
+        chassert(num_blocks >= 1);
+
+        /// Read the first block directly to avoid an extra OR for the common single-block case.
+        auto combined = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+
+        if (num_blocks > 1)
         {
-            chassert(token_info->offsets.size() == 1);
-            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
-            rare_tokens_postings.emplace(token, std::move(block));
+            /// Multi-block token below the threshold: read all blocks and union them.
+            auto unioned = std::make_shared<PostingList>(*combined);
+            for (size_t block_idx = 1; block_idx < num_blocks; ++block_idx)
+            {
+                auto block = readPostingsBlock(stream, state, *token_info, block_idx, postings_serialization, index_id_for_caches);
+                *unioned |= *block;
+            }
+            combined = std::move(unioned);
         }
+
+        rare_tokens_postings.emplace(token, std::move(combined));
     };
 
     for (const auto & [token, token_info] : remaining_tokens)
@@ -688,9 +713,9 @@ bool MergeTreeIndexGranuleText::hasAnyQueryTokens(const TextSearchQuery & query)
         if (!has_any_range)
             continue;
 
-        /// We read postings only for tokens that has one block.
-        /// Otherwise, assume that the token is not useful
-        /// for filtering and is present in all granules.
+        /// We read postings only for tokens whose cardinality does not exceed
+        /// `text_index_max_cardinality_for_analysis`. Otherwise, assume that the
+        /// token is not useful for filtering and is present in all granules.
         auto postings = getPostingsForRareToken(token);
         if (!postings)
             return true;
@@ -738,9 +763,9 @@ bool MergeTreeIndexGranuleText::hasAllQueryTokensOrEmpty(const TextSearchQuery &
         if (!has_any_range)
             return false;
 
-        /// We read postings only for tokens that has one block.
-        /// Otherwise, assume that the token is not useful
-        /// for filtering and is present in all granules.
+        /// We read postings only for tokens whose cardinality does not exceed
+        /// `text_index_max_cardinality_for_analysis`. Otherwise, assume that the
+        /// token is not useful for filtering and is present in all granules.
         if (auto postings = getPostingsForRareToken(token))
         {
             intersection &= *postings;
@@ -785,15 +810,16 @@ bool MergeTreeIndexGranuleText::hasAnyQueryPatterns(const TextSearchQuery & quer
         if (!has_any_range)
             continue;
 
-        /// We read postings only for tokens that have one block.
-        /// Otherwise, assume that the token is useful for filtering.
+        /// We read postings only for tokens whose cardinality does not exceed
+        /// `text_index_max_cardinality_for_analysis`. Otherwise, assume that the
+        /// token is useful for filtering.
         if (auto postings = getPostingsForRareToken(token))
         {
             union_posting |= (*postings & range_posting);
         }
         else
         {
-            /// Token has multiple blocks, conservatively assume it's present
+            /// Token cardinality is above the threshold, conservatively assume it's present.
             return true;
         }
     }

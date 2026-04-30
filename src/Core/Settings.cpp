@@ -7726,6 +7726,15 @@ Maximum number of large postings to read when text index LIKE evaluation by the 
 
 Requires `use_text_index_like_evaluation_by_dictionary_scan` to be enabled.
 )", 0) \
+    DECLARE(UInt64, text_index_max_cardinality_for_analysis, 1048576, R"(
+Maximum cardinality of a token's posting list for it to be loaded during the first stage of text index granule analysis.
+Tokens at or below this threshold have their full posting list read up-front (across all dictionary-referenced blocks),
+enabling more precise granule pruning. Tokens above this threshold are conservatively assumed to be present in the granule.
+
+The default value matches the default `posting_list_block_size` of a text index, so by default only tokens whose postings
+fit in a single block are eagerly loaded - the same as before this setting was introduced. Increasing the value enables
+eager loading of multi-block tokens, which improves granule pruning at the cost of additional I/O during analysis.
+)", 0) \
     DECLARE(Bool, use_text_index_tokens_cache, false, R"(
 Whether to use a cache of deserialized text index token infos.
 Using the text index tokens cache can significantly reduce latency and increase throughput when working with a large number of text index queries.
