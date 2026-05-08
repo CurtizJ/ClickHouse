@@ -59,6 +59,17 @@ public:
     bool memoryBoundMergingWillBeUsed() const;
     void skipMerging() { skip_merging = true; }
 
+    /// Set by `optimizeAggregationInOrderLimitPushdown`. Stores `LIMIT + OFFSET`
+    /// (in distinct groups) detected above the AggregatingStep. When set, the
+    /// in-order branch of `transformPipeline` keeps the post-aggregation stream
+    /// single and sorted so a downstream `MergingSortedTransform` can early-terminate
+    /// the source via backpressure. The optional flag also controls whether
+    /// `getSortDescription()` declares `group_by_sort_description` to the
+    /// `applyOrder` pass.
+    void applyLimit(UInt64 limit, bool has_filter_in_subtree_);
+    std::optional<UInt64> getOutputLimitForInOrder() const noexcept { return output_limit_for_in_order; }
+    bool hasFilterInSubtree() const noexcept { return has_filter_in_subtree; }
+
     const SortDescription & getSortDescription() const override;
 
     bool canUseProjection() const;
@@ -135,6 +146,11 @@ private:
     const bool should_produce_results_in_order_of_bucket_number;
     bool memory_bound_merging_of_aggregation_results_enabled;
     bool explicit_sorting_required_for_aggregation_in_order;
+
+    /// Set by `optimizeAggregationInOrderLimitPushdown` when LIMIT can be pushed
+    /// down through GROUP BY into the in-order aggregation pipeline.
+    std::optional<UInt64> output_limit_for_in_order;
+    bool has_filter_in_subtree = false;
 
     Processors aggregating_in_order;
     Processors aggregating_sorted;

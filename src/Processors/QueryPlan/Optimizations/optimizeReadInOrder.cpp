@@ -1192,6 +1192,30 @@ InputOrder buildInputOrderInfo(AggregatingStep & aggregating, QueryPlan::Node & 
     const auto & keys = aggregating.getParams().keys;
     size_t limit = 0;
 
+    /// Lever B of issue support-escalation/7636 LIMIT pushdown: when an upstream
+    /// pass (`optimizeAggregationInOrderLimitPushdown`) has stamped a group-count
+    /// limit on the AggregatingStep, propagate it as a parallelization hint into
+    /// `InputOrderInfo`. The value is *not* a row cap (see correctness analysis in
+    /// `ReadFromMergeTree::spreadMarkRangesAmongStreamsWithOrder`); it tunes whether
+    /// the read step gives one stream the prefix part(s) (small value) or
+    /// distributes mark ranges across streams (large value). Backpressure from
+    /// `MergingSortedTransform` on the post-aggregation chain (Lever A1) is what
+    /// actually stops the source.
+    if (auto group_limit = aggregating.getOutputLimitForInOrder())
+    {
+        /// No WHERE/PREWHERE: rows are dense, the LIMIT in groups is also a tight
+        /// bound on the number of rows we need to produce a new key. Smallest
+        /// valid signal favors single-stream allocation.
+        ///
+        /// With WHERE/PREWHERE: most rows may be filtered post-read, so the read
+        /// step needs more raw rows to find that many distinct keys after
+        /// filtering. Scale by `max_block_size` (the natural per-task chunk size).
+        if (aggregating.hasFilterInSubtree())
+            limit = *group_limit * aggregating.getMaxBlockSize();
+        else
+            limit = *group_limit;
+    }
+
     std::optional<ActionsDAG> dag;
     FixedColumns fixed_columns;
     buildSortingDAG(node, dag, fixed_columns, limit);
@@ -1213,10 +1237,17 @@ InputOrder buildInputOrderInfo(AggregatingStep & aggregating, QueryPlan::Node & 
 
         if (order_info.input_order)
         {
+            /// `buildInputOrderFromUnorderedKeys` hardcodes `limit=0` in the
+            /// `InputOrderInfo` it constructs. Override with our LIMIT pushdown
+            /// hint so `ReadFromMergeTree::spreadMarkRangesAmongStreamsWithOrder`
+            /// trims the initial mark assignment via its `take_full_part`
+            /// heuristic and the read pool emits one mark range per task.
+            const size_t effective_limit = limit > 0 ? limit : order_info.input_order->limit;
+
             bool can_read = reading->requestReadingInOrder(
                 order_info.input_order->used_prefix_of_sorting_key_size,
                 order_info.input_order->direction,
-                order_info.input_order->limit);
+                effective_limit);
             if (!can_read)
                 return {};
         }

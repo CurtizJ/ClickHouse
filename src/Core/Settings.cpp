@@ -3957,6 +3957,21 @@ Possible values:
     DECLARE(Bool, read_in_order_use_buffering, true, R"(
 Use buffering before merging while reading in order of primary key. It increases the parallelism of query execution
 )", 0) \
+    DECLARE(Bool, optimize_aggregation_in_order_limit_pushdown, true, R"(
+Push `LIMIT` through `GROUP BY` into the in-order aggregation pipeline so that `MergeTree` stops reading once enough distinct groups have been seen.
+
+Applies when:
+- `optimize_aggregation_in_order` and `optimize_read_in_order` are enabled.
+- `GROUP BY` keys are a prefix of the storage sort key.
+- `ORDER BY` (if present) is a prefix of the `GROUP BY` keys, with uniform direction (ASC or DESC).
+- The query has no `WITH TOTALS`, `HAVING`, `GROUPING SETS`, `CUBE`, `ROLLUP`, `LIMIT WITH TIES`, or aggregate functions in `ORDER BY`.
+- Aggregation is final (not the partial side of distributed aggregation) and parallel replicas are not in use.
+
+Possible values:
+
+- 0 — Optimization is disabled.
+- 1 — Optimization is enabled.
+)", 0) \
     DECLARE(UInt64, aggregation_in_order_max_block_bytes, 50000000, R"(
 Maximal size of block in bytes accumulated during aggregation in order of primary key. Lower block size allows to parallelize more final merge stage of aggregation.
 )", 0) \

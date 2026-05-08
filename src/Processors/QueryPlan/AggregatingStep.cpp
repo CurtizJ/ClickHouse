@@ -171,9 +171,23 @@ void AggregatingStep::applyOrder(SortDescription sort_description_for_merging_, 
     explicit_sorting_required_for_aggregation_in_order = false;
 }
 
+void AggregatingStep::applyLimit(UInt64 limit, bool has_filter_in_subtree_)
+{
+    output_limit_for_in_order = limit;
+    has_filter_in_subtree = has_filter_in_subtree_;
+}
+
 const SortDescription & AggregatingStep::getSortDescription() const
 {
+    /// In-order aggregation followed by a downstream LIMIT keeps the post-aggregation
+    /// stream globally sorted by the GROUP BY keys (see transformPipeline). Declaring
+    /// it here lets `applyOrder` (Optimizations/applyOrder.cpp) propagate
+    /// SortScope::Global, which converts the SortingStep above to FinishSorting and
+    /// allows backpressure-driven source termination.
     if (memoryBoundMergingWillBeUsed())
+        return group_by_sort_description;
+
+    if (output_limit_for_in_order.has_value() && !group_by_sort_description.empty())
         return group_by_sort_description;
 
     return IQueryPlanStep::getSortDescription();
@@ -422,6 +436,17 @@ void AggregatingStep::transformPipeline(QueryPipelineBuilder & pipeline, const B
                 pipeline, SortingStep::Settings(params.max_block_size), sort_description_for_merging, 0 /* limit */);
         }
 
+        /// `AggregatingInOrderTransform` only emits a chunk when the accumulated
+        /// distinct-group count reaches `max_block_size`. For LIMIT pushdown to
+        /// produce backpressure quickly enough, we must cap that threshold to
+        /// roughly LIMIT + 1 distinct groups so the transform flushes early.
+        /// Without this, on small/medium tables the transform never reaches the
+        /// default block size (65536) and only flushes once its source is fully
+        /// drained — defeating the pushdown.
+        const size_t in_order_max_block_size = output_limit_for_in_order.has_value()
+            ? std::min<size_t>(max_block_size, *output_limit_for_in_order + 1)
+            : max_block_size;
+
         if (pipeline.getNumStreams() > 1)
         {
             /** The pipeline is the following:
@@ -441,7 +466,7 @@ void AggregatingStep::transformPipeline(QueryPipelineBuilder & pipeline, const B
                 return std::make_shared<AggregatingInOrderTransform>(
                     header, transform_params,
                     sort_description_for_merging, group_by_sort_description,
-                    max_block_size, aggregation_in_order_max_block_bytes / new_merge_threads,
+                    in_order_max_block_size, aggregation_in_order_max_block_bytes / new_merge_threads,
                     many_data, counter++);
             });
 
@@ -461,20 +486,33 @@ void AggregatingStep::transformPipeline(QueryPipelineBuilder & pipeline, const B
                 pipeline.getNumStreams(),
                 transform_params,
                 group_by_sort_description,
-                max_block_size,
+                in_order_max_block_size,
                 aggregation_in_order_max_block_bytes);
 
             pipeline.addTransform(std::move(transform));
 
-            /// Do merge of aggregated data in parallel.
-            pipeline.resize(new_merge_threads);
+            /// When LIMIT pushdown is active we must keep the single sorted stream emitted by
+            /// FinishAggregatingInOrderTransform: re-sharding via `pipeline.resize` would break
+            /// the global key order, the SortingStep above would fall back to a full sort, and
+            /// LIMIT backpressure would never reach the source. With the optimization in effect,
+            /// the in-order hash table never converts to two-level (groups flush as they close),
+            /// so a single MergingAggregatedBucketTransform on the bounded post-aggregation
+            /// stream finalizes states correctly and is microseconds-fast.
+            const bool keep_single_sorted_stream = output_limit_for_in_order.has_value();
 
-            const auto & required_sort_description = memoryBoundMergingWillBeUsed() ? group_by_sort_description : SortDescription{};
+            if (!keep_single_sorted_stream)
+            {
+                /// Do merge of aggregated data in parallel.
+                pipeline.resize(new_merge_threads);
+            }
+
+            const auto & required_sort_description
+                = (memoryBoundMergingWillBeUsed() || keep_single_sorted_stream) ? group_by_sort_description : SortDescription{};
             pipeline.addSimpleTransform(
                 [&](const SharedHeader &)
                 { return std::make_shared<MergingAggregatedBucketTransform>(transform_params, required_sort_description); });
 
-            if (memoryBoundMergingWillBeUsed())
+            if (memoryBoundMergingWillBeUsed() && !keep_single_sorted_stream)
             {
                 pipeline.addTransform(
                     std::make_shared<SortingAggregatedForMemoryBoundMergingTransform>(pipeline.getHeader(), pipeline.getNumStreams()));
@@ -489,7 +527,7 @@ void AggregatingStep::transformPipeline(QueryPipelineBuilder & pipeline, const B
                 return std::make_shared<AggregatingInOrderTransform>(
                     header, transform_params,
                     sort_description_for_merging, group_by_sort_description,
-                    max_block_size, aggregation_in_order_max_block_bytes);
+                    in_order_max_block_size, aggregation_in_order_max_block_bytes);
             });
 
             pipeline.addSimpleTransform([&](const SharedHeader & header)

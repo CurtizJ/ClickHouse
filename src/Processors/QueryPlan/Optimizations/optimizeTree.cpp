@@ -317,6 +317,13 @@ void optimizeTreeSecondPass(
                     if (auto applied_projection = optimizeUseAggregateProjections(*frame.node, nodes, optimization_settings))
                         applied_projection_names.insert(*applied_projection);
 
+                /// Stamp `output_limit_for_in_order` on candidate AggregatingSteps before
+                /// `optimizeAggregationInOrder` builds the InputOrderInfo: the latter reads
+                /// the field via `getOutputLimitForInOrder()` to decide the row-count budget
+                /// passed into `requestReadingInOrder`.
+                if (optimization_settings.aggregation_in_order_limit_pushdown)
+                    optimizeAggregationInOrderLimitPushdown(*frame.node, nodes, optimization_settings);
+
                 if (optimization_settings.aggregation_in_order)
                     optimizeAggregationInOrder(*frame.node, nodes, optimization_settings);
             }
