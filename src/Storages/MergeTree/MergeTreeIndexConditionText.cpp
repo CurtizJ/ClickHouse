@@ -255,7 +255,14 @@ TextIndexDirectReadMode MergeTreeIndexConditionText::getDirectReadMode(const Str
         || function_name == "startsWith"
         || function_name == "endsWith"
         || function_name == "mapContainsKeyLike"
-        || function_name == "mapContainsValueLike")
+        || function_name == "mapContainsValueLike"
+        /// match/multiSearchAny/multiMatchAny produce an OR of token queries (FUNCTION_HAS_ANY_ELEMENTS).
+        /// Token presence is necessary but not sufficient for these, so direct read can only be a hint:
+        /// the index pre-filters rows and the original predicate is still evaluated.
+        || function_name == "match"
+        || function_name == "multiSearchAny"
+        || function_name == "multiSearchAnyUTF8"
+        || function_name == "multiMatchAny")
     {
         return getHintOrNoneMode();
     }
@@ -263,19 +270,19 @@ TextIndexDirectReadMode MergeTreeIndexConditionText::getDirectReadMode(const Str
     return TextIndexDirectReadMode::None;
 }
 
-TextSearchQueryPtr MergeTreeIndexConditionText::createTextSearchQuery(const ActionsDAG::Node & node) const
+std::vector<TextSearchQueryPtr> MergeTreeIndexConditionText::createTextSearchQueries(const ActionsDAG::Node & node) const
 {
     RPNElement rpn_element;
     RPNBuilderTreeContext rpn_tree_context(getContext());
     RPNBuilderTreeNode rpn_node(&node, rpn_tree_context);
 
     if (!traverseAtomNode(rpn_node, rpn_element))
-        return nullptr;
+        return {};
 
-    if (rpn_element.text_search_queries.size() != 1)
-        return nullptr;
-
-    return rpn_element.text_search_queries.front();
+    /// A single atom yields either one query (e.g. equals, hasAllTokens, like) or several queries that are
+    /// OR-ed together (FUNCTION_HAS_ANY_ELEMENTS, produced by match/multiSearchAny/multiMatchAny/in).
+    /// Operators (AND/OR/NOT) never appear here because only a single function node is traversed.
+    return std::move(rpn_element.text_search_queries);
 }
 
 std::optional<String> MergeTreeIndexConditionText::replaceToVirtualColumn(const TextSearchQuery & query, const String & index_name)

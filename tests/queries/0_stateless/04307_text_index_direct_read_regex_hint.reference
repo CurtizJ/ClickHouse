@@ -1,0 +1,14 @@
+-- results are identical with and without direct read from the text index
+multiSearchAny	320	320
+multiSearchAnyUTF8	320	320
+match	320	320
+multiMatchAny	320	320
+-- the hint engages for each function (one tagged direct-read query each)
+dread_multiSearchAny	320
+dread_multiSearchAnyUTF8	320
+dread_match	320
+dread_multiMatchAny	320
+dread_match	1	0
+dread_multiMatchAny	1	0
+dread_multiSearchAny	1	0
+dread_multiSearchAnyUTF8	1	0

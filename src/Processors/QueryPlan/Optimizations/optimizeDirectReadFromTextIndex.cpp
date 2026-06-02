@@ -371,7 +371,9 @@ private:
     struct NodeReplacement
     {
         const ActionsDAG::Node * node = nullptr;
-        std::unordered_map<String, VirtualColumnDescription> added_virtual_columns;
+        /// A single atom may add several virtual columns for the same index (one per OR-branch of a
+        /// match/multiSearchAny/multiMatchAny predicate), so this cannot be keyed by index name.
+        std::vector<std::pair<String, VirtualColumnDescription>> added_virtual_columns;
     };
 
     ActionsDAG & actions_dag;
@@ -418,23 +420,47 @@ private:
             if (index_header.columns() != 1 || used_index_columns.contains(index_header.begin()->name))
                 continue;
 
-            auto search_query = text_index_condition.createTextSearchQuery(canonical_node);
-            if (!search_query)
+            /// A single atom may produce several queries that are OR-ed together (e.g. the alternations of a
+            /// match() pattern, or the needles of multiSearchAny/multiMatchAny). They share the same direct read mode.
+            auto search_queries = text_index_condition.createTextSearchQueries(canonical_node);
+            if (search_queries.empty())
                 continue;
 
-            /// For None mode, the condition is still needed for preprocessing (tokenizer/preprocessor injection).
-            if (search_query->direct_read_mode == TextIndexDirectReadMode::None)
+            const auto direct_read_mode = search_queries.front()->direct_read_mode;
+
+            /// For None mode, the condition is still needed for preprocessing (tokenizer/preprocessor injection),
+            /// which is only applied to single-query atoms (hasToken/hasAllTokens/hasAnyTokens/hasPhrase).
+            if (direct_read_mode == TextIndexDirectReadMode::None)
             {
-                selected_conditions.emplace_back(search_query, index_name, String{}, &info);
-                used_index_columns.insert(index_header.begin()->name);
+                if (search_queries.size() == 1)
+                {
+                    selected_conditions.emplace_back(search_queries.front(), index_name, String{}, &info);
+                    used_index_columns.insert(index_header.begin()->name);
+                }
                 continue;
             }
 
-            auto virtual_column_name = text_index_condition.replaceToVirtualColumn(*search_query, index_name);
-            if (!virtual_column_name)
+            /// Build one virtual column per OR-branch. If any branch cannot be turned into a virtual column
+            /// (e.g. it has no tokens and would always be true), the whole OR is non-restrictive, so direct read
+            /// must not be applied for this atom: keeping only the other branches would be too strict and would
+            /// drop matching rows.
+            std::vector<std::pair<TextSearchQueryPtr, String>> branch_columns;
+            branch_columns.reserve(search_queries.size());
+
+            for (const auto & search_query : search_queries)
+            {
+                auto virtual_column_name = text_index_condition.replaceToVirtualColumn(*search_query, index_name);
+                if (!virtual_column_name)
+                    break;
+                branch_columns.emplace_back(search_query, std::move(*virtual_column_name));
+            }
+
+            if (branch_columns.size() != search_queries.size())
                 continue;
 
-            selected_conditions.emplace_back(search_query, index_name, *virtual_column_name, &info);
+            for (auto & [search_query, virtual_column_name] : branch_columns)
+                selected_conditions.emplace_back(search_query, index_name, std::move(virtual_column_name), &info);
+
             used_index_columns.insert(index_header.begin()->name);
         }
 
@@ -630,7 +656,7 @@ private:
                 virtual_column.default_desc.expression = std::move(default_expression);
 
                 it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-                replacement.added_virtual_columns.emplace(condition.index_name, std::move(virtual_column));
+                replacement.added_virtual_columns.emplace_back(condition.index_name, std::move(virtual_column));
             }
 
             return it->second;
@@ -642,18 +668,40 @@ private:
         {
             replacement.node = add_condition_to_input(selected_conditions.front());
         }
-        else /// Otherwise, combine all conditions with the AND function.
+        else
         {
-            ActionsDAG::NodeRawConstPtrs children;
-            auto function_builder = FunctionFactory::instance().get("and", context);
+            /// Conditions coming from the same index belong to the same atom and are OR-ed together
+            /// (e.g. the alternations of a match() pattern, or the needles of multiSearchAny/multiMatchAny).
+            /// Conditions from different indexes are AND-ed (e.g. the mapKeys and mapValues indexes for one
+            /// map-element predicate). For a hint, the original predicate is AND-ed on top to keep results exact.
+            auto and_builder = FunctionFactory::instance().get("and", context);
+            auto or_builder = FunctionFactory::instance().get("or", context);
 
+            std::vector<String> group_order;
+            std::unordered_map<String, ActionsDAG::NodeRawConstPtrs> group_to_columns;
             for (const auto & condition : selected_conditions)
-                children.push_back(add_condition_to_input(condition));
+            {
+                auto [it, inserted] = group_to_columns.try_emplace(condition.index_name);
+                if (inserted)
+                    group_order.push_back(condition.index_name);
+                it->second.push_back(add_condition_to_input(condition));
+            }
+
+            ActionsDAG::NodeRawConstPtrs children;
+            for (const auto & index_name : group_order)
+            {
+                auto & branch_columns = group_to_columns[index_name];
+                children.push_back(branch_columns.size() == 1
+                    ? branch_columns.front()
+                    : &actions_dag.addFunction(or_builder, branch_columns, ""));
+            }
 
             if (!has_exact_search)
                 children.push_back(&function_node);
 
-            replacement.node = &actions_dag.addFunction(function_builder, children, "");
+            replacement.node = children.size() == 1
+                ? children.front()
+                : &actions_dag.addFunction(and_builder, children, "");
         }
 
         /// If the type of original function does not match the type of replacement,
