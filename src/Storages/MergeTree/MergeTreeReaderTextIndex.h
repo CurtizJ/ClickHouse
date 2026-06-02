@@ -121,6 +121,11 @@ private:
     /// Virtual columns that are always true.
     std::vector<bool> is_always_true;
     std::unique_ptr<MergeTreeIndexDeserializationState> deserialization_state;
+    /// Identifier of this text index in the current data part, used as a key prefix for the
+    /// postings/tokens/header caches. Computed from the part and index (independent of the granule),
+    /// so it is valid even when the granule was preloaded from distributed index analysis (where the
+    /// granule carries no own identifier).
+    String index_id_for_caches;
     std::optional<PostingsSerialization> postings_serialization;
 
     /// Requested in the constructor; enabled per granule in `setIndexGranule` after checking the

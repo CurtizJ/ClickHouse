@@ -321,6 +321,11 @@ public:
     void deserializeBinary(ReadBuffer & istr, MergeTreeIndexVersion version) override;
     void deserializeBinaryWithMultipleStreams(MergeTreeIndexInputStreams & streams, MergeTreeIndexDeserializationState & state) override;
 
+    /// Reconstructs the granule (its `TextIndexAnalyzer`) from a buffer produced by `serializeBinary`.
+    /// Used by distributed index analysis to carry the analyzed state to the reader without reading
+    /// the dictionary from disk again. `condition` rebuilds the per-query analyzer state.
+    void deserializeFromExtraData(ReadBuffer & istr, const MergeTreeIndexConditionText & condition);
+
     bool empty() const override { return is_empty; }
     size_t memoryUsageBytes() const override;
 

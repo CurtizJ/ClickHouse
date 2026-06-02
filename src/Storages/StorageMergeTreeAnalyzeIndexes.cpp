@@ -3,9 +3,17 @@
 #include <Analyzer/Resolve/QueryAnalyzer.h>
 #include <Analyzer/TableNode.h>
 #include <Analyzer/createUniqueAliasesIfNecessary.h>
+#include <Columns/ColumnArray.h>
+#include <Columns/ColumnMap.h>
+#include <Columns/ColumnString.h>
+#include <Columns/ColumnTuple.h>
+#include <Common/assert_cast.h>
 #include <Core/Field.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeString.h>
+#include <IO/WriteBufferFromString.h>
+#include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/MergeTree/RangesInDataPart.h>
 #include <Planner/CollectSets.h>
 #include <Planner/CollectTableExpressionData.h>
 #include <Planner/Planner.h>
@@ -32,6 +40,38 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
+}
+
+namespace
+{
+
+/// Fills one row of the `extra_data` Map(String, String) column with the serialized state of each
+/// pre-computed index granule, keyed by index name. Granules whose serialization is empty (e.g.
+/// indexes that don't support distributed analysis, like pattern text queries) are skipped, so the
+/// coordinator reads those indexes from disk instead.
+void insertExtraData(IColumn & column, const IndexGranulesMap & granules)
+{
+    auto & col_map = assert_cast<ColumnMap &>(column);
+    auto & col_tuple = col_map.getNestedData();
+    auto & col_keys = assert_cast<ColumnString &>(col_tuple.getColumn(0));
+    auto & col_values = assert_cast<ColumnString &>(col_tuple.getColumn(1));
+
+    for (const auto & [name, granule] : granules)
+    {
+        WriteBufferFromOwnString out;
+        granule->serializeBinary(out);
+        auto serialized = out.str();
+
+        if (serialized.empty())
+            continue;
+
+        col_keys.insertData(name.data(), name.size());
+        col_values.insertData(serialized.data(), serialized.size());
+    }
+
+    col_map.getNestedColumn().getOffsets().push_back(col_tuple.size());
+}
+
 }
 
 ///
@@ -97,6 +137,10 @@ protected:
                 res_columns[res_index++]->insert(std::move(field));
             }
 
+            /// extra_data
+            if (columns_mask[src_index++])
+                insertExtraData(*res_columns[res_index++], ranges_in_part.read_hints.index_granules);
+
             processed_parts.insert(ranges_in_part.data_part->name);
         }
 
@@ -110,6 +154,8 @@ protected:
             size_t res_index = 0;
             if (columns_mask[src_index++])
                 res_columns[res_index++]->insert(part->name);
+            if (columns_mask[src_index++])
+                res_columns[res_index++]->insertDefault();
             if (columns_mask[src_index++])
                 res_columns[res_index++]->insertDefault();
         }

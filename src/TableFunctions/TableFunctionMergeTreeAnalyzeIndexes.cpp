@@ -1,4 +1,5 @@
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypeMap.h>
 #include <Core/ColumnsWithTypeAndName.h>
 #include <Core/Types.h>
 #include <DataTypes/DataTypeString.h>
@@ -236,6 +237,11 @@ ColumnsDescription TableFunctionMergeTreeAnalyzeIndexes::getActualTableStructure
             std::make_shared<DataTypeUInt64>(), // begin
             std::make_shared<DataTypeUInt64>(), // end
         }))},
+        /// Serialized per-index granule state (keyed by index name), used by distributed index
+        /// analysis to carry the analyzed state back to the coordinator. Empty for non-text indexes.
+        {"extra_data", std::make_shared<DataTypeMap>(
+            std::make_shared<DataTypeString>(),
+            std::make_shared<DataTypeString>())},
     }));
 }
 

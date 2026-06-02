@@ -6,6 +6,9 @@
 namespace DB
 {
 
+class WriteBuffer;
+class ReadBuffer;
+
 /// Drives text-index analysis during a granule's dictionary scan: folds per-query
 /// token postings and row ranges, then bypasses queries that have failed or are no
 /// longer worth evaluating (low-selectivity hints, pattern bypass).
@@ -67,6 +70,23 @@ public:
     /// estimates for unread multi-block tokens) exceeds `selectivity_threshold * total_rows`.
     void analyzeCardinalitiesAndBypassHints(double selectivity_threshold, size_t total_rows);
     size_t memoryUsageBytes() const;
+
+    /// True if the analyzer tracks any pattern (LIKE/match) queries.
+    bool hasPatternQueries() const { return !queries_by_pattern.empty(); }
+
+    /// Serializes the analyzer state for distributed index analysis: the observed token infos
+    /// (with their embedded postings) and the missing tokens. Rare (single-block) and long
+    /// (multi-block) posting lists are intentionally NOT serialized — the reader reads them from
+    /// disk. This serialization supports only token queries; pattern queries must be filtered out
+    /// by the caller (see `hasPatternQueries`).
+    void serializeStateBinary(WriteBuffer & out, PostingsSerialization & postings_serialization) const;
+
+    /// Reconstructs an analyzer from the state produced by `serializeStateBinary`. The `condition`
+    /// rebuilds the per-query state into which the deserialized token infos are folded.
+    static TextIndexAnalyzer deserializeFromStateBinary(
+        ReadBuffer & in,
+        const MergeTreeIndexConditionText & condition,
+        PostingsSerialization & postings_serialization);
 
 private:
     using QueryHashes = absl::flat_hash_set<UInt128>;

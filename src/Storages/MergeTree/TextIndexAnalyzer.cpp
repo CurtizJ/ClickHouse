@@ -1,6 +1,8 @@
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Common/ProfileEvents.h>
 #include <Common/typeid_cast.h>
+#include <IO/ReadHelpers.h>
+#include <IO/WriteHelpers.h>
 #include <cmath>
 
 namespace ProfileEvents
@@ -313,6 +315,75 @@ void TextIndexAnalyzer::analyzeCardinalitiesAndBypassHints(double selectivity_th
                 queries_by_token[query_token].erase(hash);
         }
     }
+}
+
+void TextIndexAnalyzer::serializeStateBinary(WriteBuffer & out, PostingsSerialization & postings_serialization) const
+{
+    using enum PostingsSerialization::Flags;
+
+    writePODBinary(always_false, out);
+    if (always_false)
+        return;
+
+    writeVarUInt(all_token_infos.size(), out);
+    for (const auto & [token, info] : all_token_infos)
+    {
+        writeStringBinary(token, out);
+        TextIndexSerialization::serializeTokenInfo(out, *info);
+
+        /// `serializeTokenInfo` writes only the header, cardinality and (for non-embedded tokens)
+        /// the block offsets and ranges; it does not write the embedded posting list itself. So we
+        /// write it right after, matching the layout that `deserializeTokenInfo` reads back.
+        if (info->header & EmbeddedPostings)
+        {
+            chassert(info->embedded_postings);
+            postings_serialization.serialize(info->embedded_postings->roaring, info->header, out);
+        }
+    }
+
+    writeVarUInt(missing_tokens.size(), out);
+    for (const auto & token : missing_tokens)
+        writeStringBinary(token, out);
+}
+
+TextIndexAnalyzer TextIndexAnalyzer::deserializeFromStateBinary(
+    ReadBuffer & in,
+    const MergeTreeIndexConditionText & condition,
+    PostingsSerialization & postings_serialization)
+{
+    TextIndexAnalyzer analyzer(condition);
+    readPODBinary(analyzer.always_false, in);
+
+    if (analyzer.always_false)
+        return analyzer;
+
+    size_t num_token_infos = 0;
+    readVarUInt(num_token_infos, in);
+
+    for (size_t i = 0; i < num_token_infos; ++i)
+    {
+        String token;
+        readStringBinary(token, in);
+
+        /// `deserializeTokenInfo` reads the embedded posting list inline (right after the header
+        /// and cardinality) when the `EmbeddedPostings` flag is set.
+        auto info = std::make_shared<TokenPostingsInfo>(
+            TextIndexSerialization::deserializeTokenInfo(in, &postings_serialization));
+
+        analyzer.addTokenInfo(token, std::move(info));
+    }
+
+    size_t num_missing_tokens = 0;
+    readVarUInt(num_missing_tokens, in);
+
+    for (size_t i = 0; i < num_missing_tokens; ++i)
+    {
+        String token;
+        readStringBinary(token, in);
+        analyzer.addMissingToken(token);
+    }
+
+    return analyzer;
 }
 
 template <typename Operation>

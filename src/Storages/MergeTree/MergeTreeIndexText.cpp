@@ -290,14 +290,44 @@ MergeTreeIndexGranuleText::MergeTreeIndexGranuleText(MergeTreeIndexTextParams pa
 {
 }
 
-void MergeTreeIndexGranuleText::serializeBinary(WriteBuffer &) const
+void MergeTreeIndexGranuleText::serializeBinary(WriteBuffer & ostr) const
 {
-    throw Exception(ErrorCodes::LOGICAL_ERROR, "Serialization of MergeTreeIndexGranuleText is not implemented");
+    /// Used by distributed index analysis to carry the analyzed state to the reader without
+    /// reading the dictionary from disk again on the coordinator. Pattern queries are not
+    /// supported by the analyzer-state serialization, so nothing is written when they are present
+    /// (the coordinator then reads the granule from disk, the same as without this optimization).
+    if (!analyzer || analyzer->hasPatternQueries())
+        return;
+
+    writeVarUInt(static_cast<UInt64>(serialization_version), ostr);
+    writeVarUInt(static_cast<UInt64>(postings_codec_type), ostr);
+
+    auto postings_codec = PostingListCodecFactory::createPostingListCodec(postings_codec_type);
+    PostingsSerialization postings_serialization(std::move(postings_codec), serialization_version);
+    analyzer->serializeStateBinary(ostr, postings_serialization);
 }
 
 void MergeTreeIndexGranuleText::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
 {
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Index with type 'text' must be deserialized with 3 streams: index, dictionary, postings");
+}
+
+void MergeTreeIndexGranuleText::deserializeFromExtraData(ReadBuffer & istr, const MergeTreeIndexConditionText & condition)
+{
+    UInt64 version = 0;
+    readVarUInt(version, istr);
+    serialization_version = static_cast<MergeTreeIndexVersion>(version);
+
+    UInt64 codec_type = 0;
+    readVarUInt(codec_type, istr);
+    postings_codec_type = static_cast<IPostingListCodec::Type>(codec_type);
+
+    auto postings_codec = PostingListCodecFactory::createPostingListCodec(postings_codec_type);
+    PostingsSerialization postings_serialization(std::move(postings_codec), serialization_version);
+
+    analyzer = std::make_unique<TextIndexAnalyzer>(
+        TextIndexAnalyzer::deserializeFromStateBinary(istr, condition, postings_serialization));
+    is_empty = false;
 }
 
 namespace

@@ -3,11 +3,14 @@
 #include <unordered_map>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnBLOB.h>
+#include <Columns/ColumnMap.h>
 #include <Columns/ColumnTuple.h>
 #include <Columns/FilterDescription.h>
 #include <Columns/IColumn_fwd.h>
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeTuple.h>
+#include <IO/ReadBufferFromString.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/Cluster.h>
 #include <Interpreters/ClusterProxy/distributedIndexAnalysis.h>
@@ -39,12 +42,27 @@
 #include <Processors/Sources/RemoteSource.h>
 #include <QueryPipeline/RemoteQueryExecutor.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
+#include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/VectorSearchUtils.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeString.h>
 #include <fmt/ranges.h>
 #include <consistent_hashing.h>
+
+/// Allows logging `IndexAnalysisPartsRanges` (a map of part name to result): format a per-part
+/// result as its mark ranges, the same way the value was logged before granules were carried.
+template <>
+struct fmt::formatter<DB::IndexAnalysisPartResult>
+{
+    static constexpr auto parse(format_parse_context & ctx) { return ctx.begin(); }
+
+    auto format(const DB::IndexAnalysisPartResult & result, format_context & ctx) const
+    {
+        return fmt::format_to(ctx.out(), "{}", result.ranges);
+    }
+};
 
 
 namespace DB::ErrorCodes
@@ -149,6 +167,10 @@ std::string buildAnalyzeIndexQuery(const StorageID & storage_id, const std::opti
 
 SharedHeader indexAnalysisSampleBlock()
 {
+    auto extra_data_type = std::make_shared<DataTypeMap>(
+        std::make_shared<DataTypeString>(),
+        std::make_shared<DataTypeString>());
+
     return std::make_shared<const Block>(Block
     {
         { ColumnString::create(), std::make_shared<DataTypeString>(), "part_name" },
@@ -161,10 +183,62 @@ SharedHeader indexAnalysisSampleBlock()
               std::make_shared<DataTypeUInt64>(), // end
           })),
           "ranges" },
+        { extra_data_type->createColumn(), extra_data_type, "extra_data" },
     });
 }
 
-void parseIndexAnalysisBlock(Block block, IndexAnalysisPartsRanges & result)
+/// Deserializes the `extra_data` Map(String, String) column for a single part (row), turning the
+/// per-index serialized granule state into `MergeTreeIndexGranulePtr`s using the conditions from
+/// `useful_indices`. Only text indexes carry granules through this column today.
+IndexGranulesMap deserializeIndexGranules(
+    const IColumn & map_column,
+    size_t row,
+    const std::vector<MergeTreeIndexWithCondition> & useful_indices)
+{
+    const auto & column_map = assert_cast<const ColumnMap &>(map_column);
+    const auto & map_offsets = column_map.getNestedColumn().getOffsets();
+    const auto & map_data = column_map.getNestedData();
+    const auto & keys = assert_cast<const ColumnString &>(map_data.getColumn(0));
+    const auto & values = assert_cast<const ColumnString &>(map_data.getColumn(1));
+
+    size_t map_begin = map_offsets[row - 1];
+    size_t map_end = map_offsets[row];
+
+    /// Build a lookup from index name to the map entry position.
+    std::unordered_map<std::string_view, size_t> name_to_pos;
+    for (size_t j = map_begin; j < map_end; ++j)
+        name_to_pos.emplace(keys.getDataAt(j), j);
+
+    IndexGranulesMap granules;
+    for (const auto & idx : useful_indices)
+    {
+        /// Only text indexes carry pre-computed granules through the `extra_data` column.
+        const auto * text_index = typeid_cast<const MergeTreeIndexText *>(idx.index.get());
+        if (!text_index)
+            continue;
+
+        const auto & index_name = idx.index->index.name;
+        auto it = name_to_pos.find(std::string_view(index_name));
+        if (it == name_to_pos.end())
+            continue;
+
+        auto value = values.getDataAt(it->second);
+        /// An empty value means the replica chose not to serialize the granule (e.g. pattern
+        /// queries) — leave it out so the reader reads the index from disk on the coordinator.
+        if (value.empty())
+            continue;
+
+        const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*idx.condition);
+        auto granule = std::make_shared<MergeTreeIndexGranuleText>(text_index->getParams());
+        ReadBufferFromString in(value);
+        granule->deserializeFromExtraData(in, condition_text);
+        granules[index_name] = std::move(granule);
+    }
+
+    return granules;
+}
+
+void parseIndexAnalysisBlock(Block block, IndexAnalysisPartsRanges & result, const std::vector<MergeTreeIndexWithCondition> & useful_indices)
 {
     block = convertBLOBColumns(block);
 
@@ -174,18 +248,23 @@ void parseIndexAnalysisBlock(Block block, IndexAnalysisPartsRanges & result)
     const auto & col_ranges_tuple = assert_cast<const ColumnTuple &>(col_ranges_array.getData());
     const auto & col_range_start = assert_cast<const ColumnUInt64 &>(col_ranges_tuple.getColumn(0)).getData();
     const auto & col_range_end = assert_cast<const ColumnUInt64 &>(col_ranges_tuple.getColumn(1)).getData();
+    const auto * col_extra_data = block.findByName("extra_data");
 
     for (size_t i = 0; i < col_part_name.size(); ++i)
     {
-        auto & ranges_dst = result[std::string(col_part_name.getDataAt(i))];
+        auto & part_result = result[std::string(col_part_name.getDataAt(i))];
         for (size_t range_i = col_ranges_array_offsets[i - 1]; range_i < col_ranges_array_offsets[i]; ++range_i)
-            ranges_dst.push_back(MarkRange{col_range_start[range_i], col_range_end[range_i]});
+            part_result.ranges.push_back(MarkRange{col_range_start[range_i], col_range_end[range_i]});
+
+        if (col_extra_data)
+            part_result.index_granules = deserializeIndexGranules(*col_extra_data->column, i, useful_indices);
     }
 }
 
 IndexAnalysisPartsRanges getIndexAnalysisFromReplicaSync(const LoggerPtr & logger, const StorageID & storage_id, const std::optional<std::string> & filter,
                                                      const OptionalVectorSearchParameters & vector_search_parameters, ContextPtr context, const Tables & external_tables,
-                                                     const std::vector<std::string_view> & parts, Connection & connection)
+                                                     const std::vector<std::string_view> & parts, Connection & connection,
+                                                     const std::vector<MergeTreeIndexWithCondition> & useful_indices)
 {
     auto query = buildAnalyzeIndexQuery(storage_id, filter, vector_search_parameters, parts);
     auto sample_block = indexAnalysisSampleBlock();
@@ -199,7 +278,7 @@ IndexAnalysisPartsRanges getIndexAnalysisFromReplicaSync(const LoggerPtr & logge
     IndexAnalysisPartsRanges res;
     Block block;
     while (executor.pull(block))
-        parseIndexAnalysisBlock(std::move(block), res);
+        parseIndexAnalysisBlock(std::move(block), res, useful_indices);
 
     return res;
 }
@@ -229,11 +308,13 @@ public:
         const RangesInDataParts & parts_with_ranges_,
         const OptionalVectorSearchParameters & vector_search_parameters_,
         LocalIndexAnalysisCallback local_index_analysis_callback_,
+        const std::vector<MergeTreeIndexWithCondition> & useful_indices_,
         ContextPtr context_)
         : storage_id(storage_id_)
         , parts_with_ranges(parts_with_ranges_)
         , vector_search_parameters(vector_search_parameters_)
         , local_index_analysis_callback(std::move(local_index_analysis_callback_))
+        , useful_indices(useful_indices_)
         , context(std::move(context_))
         , logger(getLogger("DistributedIndexAnalysis"))
         , settings(context->getSettingsRef())
@@ -660,7 +741,7 @@ private:
                         auto block = result.getBlock();
                         if (block.empty())
                             break;
-                        parseIndexAnalysisBlock(std::move(block), res[i].second);
+                        parseIndexAnalysisBlock(std::move(block), res[i].second, useful_indices);
                         continue;
                     }
 
@@ -748,7 +829,7 @@ private:
                 {
                     LOG_TRACE(logger, "Sending {} parts ({} marks, {} rows) to {}: {}",
                         remote_parts[i].size(), remote_marks[i], remote_rows[i], replica_addresses[i], remote_parts[i]);
-                    auto parts_ranges = getIndexAnalysisFromReplicaSync(logger, storage_id, filter_query, vector_search_parameters, execution_context, external_tables, remote_parts[i], *connection);
+                    auto parts_ranges = getIndexAnalysisFromReplicaSync(logger, storage_id, filter_query, vector_search_parameters, execution_context, external_tables, remote_parts[i], *connection, useful_indices);
                     LOG_TRACE(logger, "Received {} parts from {}: {}", parts_ranges.size(), replica_addresses[i], parts_ranges);
                     res[i].second = std::move(parts_ranges);
                 }
@@ -809,6 +890,7 @@ private:
     const RangesInDataParts & parts_with_ranges;
     const OptionalVectorSearchParameters & vector_search_parameters;
     LocalIndexAnalysisCallback local_index_analysis_callback;
+    const std::vector<MergeTreeIndexWithCondition> & useful_indices;
     ContextPtr context;
 
     LoggerPtr logger;
@@ -858,6 +940,7 @@ DistributedIndexAnalysisPartsRanges distributedIndexAnalysisOnReplicas(
     const RangesInDataParts & parts_with_ranges,
     const OptionalVectorSearchParameters & vector_search_parameters,
     LocalIndexAnalysisCallback local_index_analysis_callback,
+    const std::vector<MergeTreeIndexWithCondition> & useful_indices,
     ContextPtr context)
 {
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::DistributedIndexAnalysisMicroseconds);
@@ -875,6 +958,7 @@ DistributedIndexAnalysisPartsRanges distributedIndexAnalysisOnReplicas(
         parts_with_ranges,
         vector_search_parameters,
         std::move(local_index_analysis_callback),
+        useful_indices,
         std::move(context_copy));
 
     return analyzer.run();

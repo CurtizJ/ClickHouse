@@ -2401,7 +2401,11 @@ static IndexAnalysisPartsRanges filterPartsNamesByPrimaryKeyAndSkipIndexes(Merge
     for (const auto & part_ranges : parts_ranges_res)
     {
         const auto & part_name = part_ranges.data_part->name;
-        res[part_name].insert(res[part_name].end(), part_ranges.ranges.begin(), part_ranges.ranges.end());
+        auto & part_result = res[part_name];
+        part_result.ranges.insert(part_result.ranges.end(), part_ranges.ranges.begin(), part_ranges.ranges.end());
+        /// Keep the locally computed index granules so the reader can reuse them directly
+        /// (the local replica does not serialize them — they are passed in-memory).
+        part_result.index_granules = part_ranges.read_hints.index_granules;
     }
 
     /// Add empty parts back, to take it into account in "Parts send"
@@ -2409,7 +2413,7 @@ static IndexAnalysisPartsRanges filterPartsNamesByPrimaryKeyAndSkipIndexes(Merge
     {
         if (processed_parts.contains(part_name))
             continue;
-        res.emplace(part_name, MarkRanges{});
+        res.emplace(part_name, IndexAnalysisPartResult{});
     }
 
     return res;
@@ -2645,6 +2649,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
                 res_parts,
                 vector_search_parameters,
                 local_index_analysis_callback,
+                indexes->skip_indexes.useful_indices,
                 context_);
 
             IndexAnalysisPartsRanges analyzed_parts_ranges;
@@ -2658,15 +2663,15 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
                 for (auto & [replica_address, parts_on_replica] : distributed_index_analysis)
                 {
                     size_t replica_granules_received = 0;
-                    for (const auto & [_, marks] : parts_on_replica)
-                        replica_granules_received += marks.getNumberOfMarks();
+                    for (const auto & [_, part_result] : parts_on_replica)
+                        replica_granules_received += part_result.ranges.getNumberOfMarks();
 
                     size_t replica_granules_send = 0;
                     for (const auto & [part, _] : parts_on_replica)
                         replica_granules_send += parts_ranges_map.at(std::string(part))->getMarksCount();
 
                     size_t num_parts_send = parts_on_replica.size();
-                    std::erase_if(parts_on_replica, [&](const auto & ranges) { return ranges.second.empty(); });
+                    std::erase_if(parts_on_replica, [&](const auto & part_result) { return part_result.second.ranges.empty(); });
 
                     distributed_index_stats.emplace_back(DistributedIndexStat{
                         .address = replica_address,
@@ -2696,14 +2701,17 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             LOG_DEBUG(log, "Received parts ranges for {} parts via distributed index analysis", analyzed_parts_ranges.size());
 
             RangesInDataParts result_parts_ranges;
-            for (const auto & [part_name, ranges] : analyzed_parts_ranges)
+            for (const auto & [part_name, part_result] : analyzed_parts_ranges)
             {
                 auto part_range_info = *parts_ranges_map.at(part_name);
                 /// Note: part_range_info.ranges may have been split by Query Condition Cache,
                 /// so we cannot assert ranges.size() == 1 here.
                 chassert(part_range_info.exact_ranges.empty());
 
-                part_range_info.ranges = ranges;
+                part_range_info.ranges = part_result.ranges;
+                /// Attach pre-computed index granules (e.g. text index) carried back from the
+                /// replica so the reader reuses them instead of reading the index from disk again.
+                part_range_info.read_hints.index_granules = part_result.index_granules;
                 result_parts_ranges.push_back(part_range_info);
             }
 

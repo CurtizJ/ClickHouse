@@ -80,6 +80,12 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
 
     deserialization_state = std::make_unique<MergeTreeIndexDeserializationState>(std::move(state));
 
+    /// Compute the cache id from the part and index directly, the same way
+    /// `MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams` does. This must not rely on
+    /// the granule, because a granule preloaded from distributed index analysis carries no own id.
+    const auto & part_storage = data_part->getDataPartStorage();
+    index_id_for_caches = fmt::format("{}:{}:{}", part_storage.getDiskName(), part_storage.getFullPath(), index.index->getFileName());
+
     /// Validate lazy mode request once; actual support is determined from the on-disk sparse-index header.
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     const auto & ctx_settings = condition_text.getContext()->getSettingsRef();
@@ -368,8 +374,10 @@ size_t MergeTreeReaderTextIndex::readRows(
 
     if (!is_initialized && max_rows_to_read > 0)
     {
-        /// Granule may be not set in the distributed index analysis.
-        /// TODO: implement distributed index analysis for text index.
+        /// The granule is preloaded (from local index analysis or deserialized from distributed
+        /// index analysis); otherwise read it from disk. A granule deserialized from distributed
+        /// analysis carries only embedded postings, so rare and long posting lists are read from
+        /// disk on demand below (see `initializePostingStreams` / `buildPostingsForQuery`).
         if (!granule)
             readGranule();
 
@@ -589,7 +597,7 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
                 token_info,
                 block_idx,
                 postings_serialization.value(),
-                granule->getIndexIdForCaches());
+                index_id_for_caches);
         }
 
         result.push_back(it->second);
