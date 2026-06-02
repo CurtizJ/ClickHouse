@@ -304,7 +304,10 @@ void MergeTreeReaderTextIndex::initializePostingStreams()
 
     for (const auto & [token, token_info] : token_infos)
     {
-        if (analyzer.isTokenNeeded(token) && !analyzer.hasReadPostings(token))
+        if (!analyzer.isTokenNeeded(token) || analyzer.hasReadPostings(token))
+            continue;
+
+        if (token_info->offsets.size() > 1)
             large_postings_streams.emplace(token, makeTextIndexStream(substream));
     }
 }
@@ -543,7 +546,8 @@ PostingList MergeTreeReaderTextIndex::buildPostingsForQuery(
 
     for (const auto & [token, token_info] : query_builder.tokens)
     {
-        if (!large_postings_streams.contains(token))
+        /// Skip tokens whose postings are already folded into `query_builder.postings`.
+        if (analyzer.hasReadPostings(token))
             continue;
 
         auto read_blocks = readPostingsBlocksForToken(token, *token_info, range);
@@ -586,11 +590,27 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
     std::vector<PostingListPtr> result;
     for (const auto & block_idx : blocks_to_read)
     {
-        auto * postings_stream = large_postings_streams.at(token).get();
         auto [it, inserted] = postings_blocks[token].try_emplace(block_idx);
 
         if (inserted)
         {
+            /// Multi-block tokens have a dedicated stream.
+            /// Single-block (small) tokens are read through the shared small postings stream (created on demand).
+            auto stream_it = large_postings_streams.find(token);
+            MergeTreeReaderStream * postings_stream = nullptr;
+
+            if (stream_it != large_postings_streams.end())
+            {
+                postings_stream = stream_it->second.get();
+            }
+            else
+            {
+                if (!small_postings_stream)
+                    small_postings_stream = makeTextIndexStream(index.index->getSubstreams()[2]);
+
+                postings_stream = small_postings_stream.get();
+            }
+
             it->second = MergeTreeIndexGranuleText::readPostingsBlock(
                 *postings_stream,
                 *deserialization_state,
