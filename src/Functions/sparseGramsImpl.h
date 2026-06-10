@@ -125,8 +125,12 @@ private:
     VectorWithMemoryTracking<PositionAndHash> convex_hull;
     NGramSymbolIterator symbol_iterator;
 
-    /// Get the next batch of answers. Returns false if there can be no more answers.
-    bool consume()
+    /// Processes one right position of the gram window: emits all grams anchored at it
+    /// via `emit(left_index, right_index, symbols_between)` and advances the iterator.
+    /// `emit` returns true to stop the traversal early.
+    /// Returns false if the input is exhausted or the traversal was stopped.
+    template <typename Emit>
+    bool consumeStep(Emit && emit)
     {
         if (symbol_iterator.isEnd())
             return false;
@@ -147,11 +151,8 @@ private:
                 convex_hull.clear();
                 break;
             }
-            result.push_back({
-                .left_index = possible_left_position,
-                .right_index = next_right_position,
-                .symbols_between = length
-            });
+            if (emit(possible_left_position, next_right_position, length))
+                return false;
             convex_hull.pop_back();
         }
 
@@ -161,11 +162,8 @@ private:
             size_t possible_left_symbol_index = convex_hull.back().symbol_index;
             size_t length = right_symbol_index - possible_left_symbol_index + min_ngram_length - 1;
             if (length <= max_ngram_length)
-                result.push_back({
-                    .left_index = possible_left_position,
-                    .right_index = next_right_position,
-                    .symbols_between = length
-                });
+                if (emit(possible_left_position, next_right_position, length))
+                    return false;
         }
 
         /// there should not be identical hashes in the convex hull. If there are, then we leave only the last one
@@ -180,6 +178,21 @@ private:
         });
         symbol_iterator.increment();
         return true;
+    }
+
+    /// Get the next batch of answers. Returns false if there can be no more answers.
+    bool consume()
+    {
+        return consumeStep([this](size_t left_index, size_t right_index, size_t length)
+        {
+            result.push_back(
+            {
+                .left_index = left_index,
+                .right_index = right_index,
+                .symbols_between = length
+            });
+            return false;
+        });
     }
 
     std::optional<SubString> getNextIndices()
@@ -273,6 +286,38 @@ public:
         for (size_t i = 0; i < min_ngram_length - 2; ++i)
             if (!symbol_iterator.increment())
                 return;
+    }
+
+    /// Push-style counterpart of set/get: visits all sparse grams of [pos_, end_) in the same order
+    /// as consecutive calls to get would return them and calls `callback(token_begin, token_end)` for each one.
+    /// Stops early if the callback returns true.
+    /// Does not materialize the `result` batch, so it is preferred for hot paths (see forEachToken in ITokenizer.h).
+    template <typename Callback>
+    void forEachGram(Pos pos_, Pos end_, Callback && callback)
+    {
+        set(pos_, end_);
+
+        if (min_cutoff_length)
+        {
+            auto emit = [&](size_t left_index, size_t right_index, size_t length)
+            {
+                if (*min_cutoff_length > length)
+                    return false;
+
+                return callback(pos + left_index, pos + right_index);
+            };
+
+            while (consumeStep(emit));
+        }
+        else
+        {
+            auto emit = [&](size_t left_index, size_t right_index, size_t /*length*/)
+            {
+                return callback(pos + left_index, pos + right_index);
+            };
+
+            while (consumeStep(emit));
+        }
     }
 
     /// Get the next token, if any, or return false.

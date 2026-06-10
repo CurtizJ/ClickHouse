@@ -354,6 +354,22 @@ struct SparseGramsTokenizer final : public ITokenizerHelper<SparseGramsTokenizer
     bool supportsStringLike() const override { return true; }
     void substringToBloomFilter(const char * data, size_t length, BloomFilter & bloom_filter, bool is_prefix, bool is_suffix) const override;
     void substringToTokens(const char * data, size_t length, VectorWithMemoryTracking<String> & tokens, bool is_prefix, bool is_suffix) const override;
+
+    /// High-performance callback-based tokenizer (the counterpart of SplitByNonAlphaTokenizer::forEachTokenImpl).
+    /// Pushes each sparse gram directly into the callback, bypassing the batched pull interface of nextInString.
+    template <Fn<bool(const char *, size_t)> Callback>
+    void forEachTokenImpl(const char * data, size_t length, Callback && callback) const
+    {
+        /// Invalidate the pull-side state: forEachGram reuses the same iterator internals.
+        previous_data = nullptr;
+        previous_len = 0;
+
+        sparse_grams_iterator.forEachGram(data, data + length, [&](Pos token_begin, Pos token_end)
+        {
+            return callback(token_begin, token_end - token_begin);
+        });
+    }
+
 private:
     size_t min_gram_length;
     size_t max_gram_length;
@@ -493,7 +509,7 @@ void forEachToken(const ITokenizer & tokenizer, const char * __restrict data, si
         case ITokenizer::Type::SparseGrams:
         {
             const auto & sparse_grams_tokenizer = assert_cast<const SparseGramsTokenizer &>(tokenizer);
-            detail::forEachTokenImpl(sparse_grams_tokenizer, data, length, callback);
+            sparse_grams_tokenizer.forEachTokenImpl(data, length, callback);
             return;
         }
         case ITokenizer::Type::AsciiCJK:
