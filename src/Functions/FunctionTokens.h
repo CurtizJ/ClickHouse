@@ -87,6 +87,13 @@ public:
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override
     {
+        /// Generators exposing the push-style forEachGram (currently SparseGramsImpl) are driven
+        /// through it instead of the generic set/get pull protocol: it visits the same tokens
+        /// in the same order, but in a single pass without materializing intermediate batches.
+        static constexpr bool has_push_interface = requires (Generator g, Pos p) {
+            g.forEachGram(p, p, [](Pos, Pos) { return false; });
+        };
+
         Generator generator{};
         generator.init(arguments, max_substrings_includes_remaining_string);
 
@@ -112,9 +119,6 @@ public:
             res_strings_offsets.reserve(input_rows_count * 5);    /// Constant 5 - at random.
             res_strings_chars.reserve(src_chars.size());
 
-            Pos token_begin = nullptr;
-            Pos token_end = nullptr;
-
             ColumnString::Offset current_src_offset = 0;
             ColumnArray::Offset current_dst_offset = 0;
             ColumnString::Offset current_dst_strings_offset = 0;
@@ -124,9 +128,8 @@ public:
                 current_src_offset = src_offsets[i];
                 Pos end = reinterpret_cast<Pos>(&src_chars[current_src_offset]);
 
-                generator.set(pos, end);
                 size_t j = 0;
-                while (generator.get(token_begin, token_end))
+                auto append_token = [&](Pos token_begin, Pos token_end)
                 {
                     chassert(token_begin >= pos && token_end >= token_begin);
                     chassert(token_end <= end);
@@ -138,6 +141,23 @@ public:
                     current_dst_strings_offset += token_size;
                     res_strings_offsets.push_back(current_dst_strings_offset);
                     ++j;
+                };
+
+                if constexpr (has_push_interface)
+                {
+                    generator.forEachGram(pos, end, [&](Pos token_begin, Pos token_end)
+                    {
+                        append_token(token_begin, token_end);
+                        return false;
+                    });
+                }
+                else
+                {
+                    generator.set(pos, end);
+                    Pos token_begin = nullptr;
+                    Pos token_end = nullptr;
+                    while (generator.get(token_begin, token_end))
+                        append_token(token_begin, token_end);
                 }
 
                 current_dst_offset += j;
@@ -151,12 +171,28 @@ public:
             String src = col_str_const->getValue<String>();
             Array dst;
 
-            generator.set(src.data(), src.data() + src.size());
-            Pos token_begin = nullptr;
-            Pos token_end = nullptr;
-
-            while (generator.get(token_begin, token_end))
+            auto append_token = [&](Pos token_begin, Pos token_end)
+            {
                 dst.push_back(String(token_begin, token_end - token_begin));
+            };
+
+            if constexpr (has_push_interface)
+            {
+                generator.forEachGram(src.data(), src.data() + src.size(), [&](Pos token_begin, Pos token_end)
+                {
+                    append_token(token_begin, token_end);
+                    return false;
+                });
+            }
+            else
+            {
+                generator.set(src.data(), src.data() + src.size());
+                Pos token_begin = nullptr;
+                Pos token_end = nullptr;
+
+                while (generator.get(token_begin, token_end))
+                    append_token(token_begin, token_end);
+            }
 
             return result_type->createColumnConst(col_str_const->size(), dst);
         }
