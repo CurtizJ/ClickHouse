@@ -9,6 +9,8 @@
   *     --runs=N       Number of passes over each file; the best (minimal) time is reported. Default: 3.
   *     --limit-mb=M   Read at most M megabytes from the start of each file (0 = whole file). Default: 64.
   *     --tokenizer=S  Benchmark only tokenizers whose label contains substring S (useful under `perf record`).
+  *     --verify-mb=M  Instead of timing, read M megabytes and compare the push path (forEachToken)
+  *                    against the pull path (nextInString) token-by-token, including order.
   *     file ...       Input files. If omitted, defaults to $HOME/fineweb.csv and $HOME/logs.csv.
   *
   * The input is loaded into a single buffer that is right-padded with zero bytes, because
@@ -143,7 +145,9 @@ BenchmarkResult benchmarkTokenizer(const ITokenizer & tokenizer, const std::vect
             {
                 ++token_count;
                 token_bytes += token_length;
-                checksum += static_cast<UInt8>(token_length ? token_data[0] : 0);
+                /// Order-sensitive chain (FNV-style), so reordered token streams produce different values.
+                checksum = (checksum * 0x100000001b3ULL) ^ token_length
+                    ^ (static_cast<UInt64>(token_length ? static_cast<UInt8>(token_data[0]) : 0) << 32);
                 return false; /// Never stop early: visit every token.
             });
         }
@@ -157,6 +161,58 @@ BenchmarkResult benchmarkTokenizer(const ITokenizer & tokenizer, const std::vect
     return result;
 }
 
+/// Tokenizes every document through both the push path (forEachToken) and the pull path
+/// (the virtual nextInString) and compares the token streams exactly, including order.
+/// Returns the number of mismatching documents (0 = the two interfaces agree).
+size_t verifyPushAgainstPull(const ITokenizer & tokenizer, const std::vector<Document> & documents)
+{
+    size_t mismatched_documents = 0;
+    std::vector<std::pair<size_t, size_t>> push_tokens;
+    std::vector<std::pair<size_t, size_t>> pull_tokens;
+
+    for (size_t doc_index = 0; doc_index < documents.size(); ++doc_index)
+    {
+        const auto & document = documents[doc_index];
+        push_tokens.clear();
+        pull_tokens.clear();
+
+        forEachToken(tokenizer, document.data, document.length, [&](const char * token_data, size_t token_length) -> bool
+        {
+            push_tokens.emplace_back(token_data - document.data, token_length);
+            return false;
+        });
+
+        size_t cur = 0;
+        size_t token_start = 0;
+        size_t token_length = 0;
+        while (cur < document.length && tokenizer.nextInString(document.data, document.length, cur, token_start, token_length))
+            pull_tokens.emplace_back(token_start, token_length);
+
+        if (push_tokens != pull_tokens)
+        {
+            ++mismatched_documents;
+            if (mismatched_documents <= 3)
+            {
+                std::fprintf(stderr, "MISMATCH in document %zu (%zu bytes): push %zu tokens, pull %zu tokens\n",
+                    doc_index, document.length, push_tokens.size(), pull_tokens.size());
+                for (size_t i = 0; i < std::max(push_tokens.size(), pull_tokens.size()) && i < 16; ++i)
+                {
+                    auto fmt = [&](const std::vector<std::pair<size_t, size_t>> & tokens) -> std::string
+                    {
+                        if (i >= tokens.size())
+                            return "<none>";
+                        return "[" + std::to_string(tokens[i].first) + "," + std::to_string(tokens[i].second) + ") '"
+                            + std::string(document.data + tokens[i].first, tokens[i].second) + "'";
+                    };
+                    if (i >= push_tokens.size() || i >= pull_tokens.size() || push_tokens[i] != pull_tokens[i])
+                        std::fprintf(stderr, "  token %zu: push %s vs pull %s\n", i, fmt(push_tokens).c_str(), fmt(pull_tokens).c_str());
+                }
+            }
+        }
+    }
+    return mismatched_documents;
+}
+
 }
 
 int main(int argc, char ** argv)
@@ -165,6 +221,7 @@ int main(int argc, char ** argv)
     {
         size_t runs = 3;
         size_t limit_mb = 64;
+        size_t verify_mb = 0;
         std::string tokenizer_filter;
         std::vector<std::string> files;
 
@@ -175,11 +232,16 @@ int main(int argc, char ** argv)
                 runs = std::strtoull(arg.data() + std::strlen("--runs="), nullptr, 10);
             else if (arg.starts_with("--limit-mb="))
                 limit_mb = std::strtoull(arg.data() + std::strlen("--limit-mb="), nullptr, 10);
+            else if (arg.starts_with("--verify-mb="))
+                verify_mb = std::strtoull(arg.data() + std::strlen("--verify-mb="), nullptr, 10);
             else if (arg.starts_with("--tokenizer="))
                 tokenizer_filter = arg.substr(std::strlen("--tokenizer="));
             else
                 files.emplace_back(arg);
         }
+
+        if (verify_mb != 0)
+            limit_mb = verify_mb;
 
         if (runs == 0)
             runs = 1;
@@ -229,6 +291,17 @@ int main(int argc, char ** argv)
                 static_cast<double>(total_text_bytes) / 1e6,
                 static_cast<double>(total_text_bytes) / static_cast<double>(size_t(1) << 20),
                 documents.size());
+
+            if (verify_mb != 0)
+            {
+                for (const auto & [label, tokenizer] : tokenizers)
+                {
+                    const size_t mismatched = verifyPushAgainstPull(*tokenizer, documents);
+                    std::printf("  %-18s push vs pull: %s (%zu mismatched documents)\n",
+                        label.c_str(), mismatched == 0 ? "OK" : "MISMATCH", mismatched);
+                }
+                continue;
+            }
 
             std::printf("  %-18s %10s %12s %12s %16s %10s %18s\n",
                 "tokenizer", "time, s", "input MB/s", "Mtokens/s", "tokens", "avg len", "checksum");
