@@ -54,7 +54,6 @@ private:
 
     struct PositionAndHash
     {
-        size_t position;
         size_t left_ngram_position;
         size_t symbol_index;
         size_t hash;
@@ -171,7 +170,6 @@ private:
             convex_hull.pop_back();
 
         convex_hull.push_back(PositionAndHash{
-            .position = right_position,
             .left_ngram_position = ngram_left_position,
             .symbol_index = right_symbol_index,
             .hash = right_border_ngram_hash
