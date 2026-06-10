@@ -142,7 +142,7 @@ private:
     /// pushes all grams anchored at it into `result` and advances the iterator.
     /// Returns false if there can be no more answers.
     /// This is the reference implementation of the traversal; the hot push path
-    /// uses the equivalent fused loop in forEachGramImpl.
+    /// uses the equivalent fused loop in forEachTokenImpl.
     bool consume()
     {
         if (symbol_iterator.isEnd())
@@ -216,7 +216,7 @@ private:
         return hasher(data, window_length);
     }
 
-    /// The hot path of forEachGram: one flat loop with all state in registers.
+    /// The hot path of forEachToken: one flat loop with all state in registers.
     /// Produces exactly the same token stream as draining consume via set/get;
     /// the equivalence is checked by `tokenizers-benchmark --verify-mb`.
     ///
@@ -228,7 +228,7 @@ private:
     ///   (num_increments >= n always holds after the warmup), so the counter check disappears;
     /// - the next position of the right border is computed once per step and reused for the advance.
     template <bool has_cutoff, typename Callback>
-    void forEachGramImpl(Callback && callback)
+    void forEachTokenImpl(Callback && callback)
     {
         const char * data = pos;
         const size_t length = end - pos;
@@ -411,9 +411,10 @@ public:
     /// Push-style counterpart of set/get: visits all sparse grams of [pos_, end_) in the same order
     /// as consecutive calls to get would return them and calls `callback(token_begin, token_end)` for each one.
     /// Stops early if the callback returns true.
-    /// Does not materialize the `result` batch, so it is preferred for hot paths (see forEachToken in ITokenizer.h).
+    /// Does not materialize the `result` batch, so it is preferred for hot paths
+    /// (see the free function forEachToken in ITokenizer.h and FunctionTokens.h).
     template <typename Callback>
-    void forEachGram(Pos pos_, Pos end_, Callback && callback)
+    void forEachToken(Pos pos_, Pos end_, Callback && callback)
     {
         /// Reset the pull-side state for consistency (the batched result is not used by the push path).
         result.clear();
@@ -423,9 +424,9 @@ public:
         end = end_;
 
         if (min_cutoff_length)
-            forEachGramImpl</*has_cutoff=*/ true>(callback);
+            forEachTokenImpl</*has_cutoff=*/ true>(callback);
         else
-            forEachGramImpl</*has_cutoff=*/ false>(callback);
+            forEachTokenImpl</*has_cutoff=*/ false>(callback);
     }
 
     /// Get the next token, if any, or return false.

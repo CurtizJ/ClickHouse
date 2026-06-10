@@ -87,11 +87,11 @@ public:
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override
     {
-        /// Generators exposing the push-style forEachGram (currently SparseGramsImpl) are driven
+        /// Generators exposing the push-style forEachToken (currently SparseGramsImpl) are driven
         /// through it instead of the generic set/get pull protocol: it visits the same tokens
         /// in the same order, but in a single pass without materializing intermediate batches.
         static constexpr bool has_push_interface = requires (Generator g, Pos p) {
-            g.forEachGram(p, p, [](Pos, Pos) { return false; });
+            g.forEachToken(p, p, [](Pos, Pos) { return false; });
         };
 
         Generator generator{};
@@ -145,7 +145,7 @@ public:
 
                 if constexpr (has_push_interface)
                 {
-                    generator.forEachGram(pos, end, [&](Pos token_begin, Pos token_end)
+                    generator.forEachToken(pos, end, [&](Pos token_begin, Pos token_end)
                     {
                         append_token(token_begin, token_end);
                         return false;
@@ -178,7 +178,7 @@ public:
 
             if constexpr (has_push_interface)
             {
-                generator.forEachGram(src.data(), src.data() + src.size(), [&](Pos token_begin, Pos token_end)
+                generator.forEachToken(src.data(), src.data() + src.size(), [&](Pos token_begin, Pos token_end)
                 {
                     append_token(token_begin, token_end);
                     return false;

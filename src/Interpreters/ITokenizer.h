@@ -360,11 +360,11 @@ struct SparseGramsTokenizer final : public ITokenizerHelper<SparseGramsTokenizer
     template <Fn<bool(const char *, size_t)> Callback>
     void forEachTokenImpl(const char * data, size_t length, Callback && callback) const
     {
-        /// Invalidate the pull-side state: forEachGram reuses the same iterator internals.
+        /// Invalidate the pull-side state: forEachToken reuses the same iterator internals.
         previous_data = nullptr;
         previous_len = 0;
 
-        sparse_grams_iterator.forEachGram(data, data + length, [&](Pos token_begin, Pos token_end)
+        sparse_grams_iterator.forEachToken(data, data + length, [&](Pos token_begin, Pos token_end)
         {
             return callback(token_begin, token_end - token_begin);
         });
