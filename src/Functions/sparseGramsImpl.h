@@ -138,12 +138,12 @@ private:
     VectorWithMemoryTracking<PositionAndHash> convex_hull;
     NGramSymbolIterator symbol_iterator;
 
-    /// Processes one right position of the gram window: emits all grams anchored at it
-    /// via `emit(left_index, right_index, symbols_between)` and advances the iterator.
-    /// `emit` returns true to stop the traversal early.
-    /// Returns false if the input is exhausted or the traversal was stopped.
-    template <typename Emit>
-    bool consumeStep(Emit && emit)
+    /// Get the next batch of answers: processes one right position of the gram window,
+    /// pushes all grams anchored at it into `result` and advances the iterator.
+    /// Returns false if there can be no more answers.
+    /// This is the reference implementation of the traversal; the hot push path
+    /// uses the equivalent fused loop in forEachGramImpl.
+    bool consume()
     {
         if (symbol_iterator.isEnd())
             return false;
@@ -164,9 +164,11 @@ private:
                 convex_hull.clear();
                 break;
             }
-            size_t length = right_symbol_index + max_ngram_length - expiry_symbol;
-            if (emit(possible_left_position, next_right_position, length))
-                return false;
+            result.push_back({
+                .left_index = possible_left_position,
+                .right_index = next_right_position,
+                .symbols_between = right_symbol_index + max_ngram_length - expiry_symbol
+            });
             convex_hull.pop_back();
         }
 
@@ -175,11 +177,11 @@ private:
             size_t possible_left_position = convex_hull.back().left_ngram_position;
             size_t expiry_symbol = convex_hull.back().expiry_symbol;
             if (right_symbol_index <= expiry_symbol)
-            {
-                size_t length = right_symbol_index + max_ngram_length - expiry_symbol;
-                if (emit(possible_left_position, next_right_position, length))
-                    return false;
-            }
+                result.push_back({
+                    .left_index = possible_left_position,
+                    .right_index = next_right_position,
+                    .symbols_between = right_symbol_index + max_ngram_length - expiry_symbol
+                });
         }
 
         /// there should not be identical hashes in the convex hull. If there are, then we leave only the last one
@@ -215,10 +217,10 @@ private:
     }
 
     /// The hot path of forEachGram: one flat loop with all state in registers.
-    /// Produces exactly the same token stream as draining consumeStep via set/get;
+    /// Produces exactly the same token stream as draining consume via set/get;
     /// the equivalence is checked by `tokenizers-benchmark --verify-mb`.
     ///
-    /// The differences from consumeStep are only mechanical:
+    /// The differences from consume are only mechanical:
     /// - the convex hull is accessed through local pointers with a sentinel at the bottom
     ///   (never popped: its hash exceeds any CRC32 value; never emitted: its expiry symbol is 0),
     ///   so the loops need no emptiness checks and never write the vector size back to memory;
@@ -311,21 +313,6 @@ private:
             left_position = nextPosition(data, length, left_position);
             ++right_symbol;
         }
-    }
-
-    /// Get the next batch of answers. Returns false if there can be no more answers.
-    bool consume()
-    {
-        return consumeStep([this](size_t left_index, size_t right_index, size_t length)
-        {
-            result.push_back(
-            {
-                .left_index = left_index,
-                .right_index = right_index,
-                .symbols_between = length
-            });
-            return false;
-        });
     }
 
     std::optional<SubString> getNextIndices()
