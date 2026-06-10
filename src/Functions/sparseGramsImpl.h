@@ -7,6 +7,9 @@
 #include <Core/ColumnNumbers.h>
 #include <Functions/FunctionHelpers.h>
 #include <base/types.h>
+#include <base/unaligned.h>
+#include <bit>
+#include <limits>
 #include <optional>
 
 namespace DB
@@ -32,6 +35,15 @@ template <bool is_utf8>
 class SparseGramsImpl
 {
 private:
+    /// Position of the next symbol: +1 byte, or the whole UTF-8 sequence in the UTF-8 flavor.
+    static size_t nextPosition(Pos data, size_t length, size_t position)
+    {
+        if constexpr (is_utf8)
+            return std::min(length, position + UTF8::seqLength(data[position]));
+        else
+            return position + 1;
+    }
+
     struct SubString
     {
         size_t left_index;
@@ -55,7 +67,12 @@ private:
     struct PositionAndHash
     {
         size_t left_ngram_position;
-        size_t symbol_index;
+        /// The last right symbol index for which this entry still produces a gram within
+        /// max_ngram_length: symbol_index + (max_ngram_length - min_ngram_length + 1).
+        /// Precomputed at push time, so the hot loops compare it directly with the current
+        /// right symbol index; the gram length is derived back as
+        /// right_symbol_index + max_ngram_length - expiry_symbol.
+        size_t expiry_symbol;
         size_t hash;
     };
 
@@ -99,10 +116,7 @@ private:
 
         size_t getNextPosition(size_t iterator) const
         {
-            if constexpr (is_utf8)
-                return std::min(size_t(end - data), iterator + UTF8::seqLength(data[iterator]));
-            else
-                return iterator + 1;
+            return nextPosition(data, end - data, iterator);
         }
 
     private:
@@ -142,14 +156,15 @@ private:
         while (!convex_hull.empty() && convex_hull.back().hash < right_border_ngram_hash)
         {
             size_t possible_left_position = convex_hull.back().left_ngram_position;
-            size_t possible_left_symbol_index = convex_hull.back().symbol_index;
-            size_t length = right_symbol_index - possible_left_symbol_index + min_ngram_length - 1;
-            if (length > max_ngram_length)
+            size_t expiry_symbol = convex_hull.back().expiry_symbol;
+            if (right_symbol_index > expiry_symbol)
             {
-                /// If the current length is greater than the current right position, it will be greater at future right positions, so we can just delete them all.
+                /// The gram is longer than max_ngram_length and it will only become longer at future
+                /// right positions; the entries below are older, so they are all expired too.
                 convex_hull.clear();
                 break;
             }
+            size_t length = right_symbol_index + max_ngram_length - expiry_symbol;
             if (emit(possible_left_position, next_right_position, length))
                 return false;
             convex_hull.pop_back();
@@ -158,11 +173,13 @@ private:
         if (!convex_hull.empty())
         {
             size_t possible_left_position = convex_hull.back().left_ngram_position;
-            size_t possible_left_symbol_index = convex_hull.back().symbol_index;
-            size_t length = right_symbol_index - possible_left_symbol_index + min_ngram_length - 1;
-            if (length <= max_ngram_length)
+            size_t expiry_symbol = convex_hull.back().expiry_symbol;
+            if (right_symbol_index <= expiry_symbol)
+            {
+                size_t length = right_symbol_index + max_ngram_length - expiry_symbol;
                 if (emit(possible_left_position, next_right_position, length))
                     return false;
+            }
         }
 
         /// there should not be identical hashes in the convex hull. If there are, then we leave only the last one
@@ -171,11 +188,129 @@ private:
 
         convex_hull.push_back(PositionAndHash{
             .left_ngram_position = ngram_left_position,
-            .symbol_index = right_symbol_index,
+            .expiry_symbol = right_symbol_index + max_ngram_length - min_ngram_length + 1,
             .hash = right_border_ngram_hash
         });
         symbol_iterator.increment();
         return true;
+    }
+
+    /// Hash of the gram window. Produces exactly the same value as CRC32CHasher for any input;
+    /// the dominant case (a 2-byte window: single-byte symbols with the default min_ngram_length = 3)
+    /// is inlined to avoid the length dispatch inside updateWeakHash32.
+    size_t windowHash(const char * data, size_t window_length) const
+    {
+        if constexpr (std::endian::native == std::endian::little)
+        {
+            if (window_length == 2)
+            {
+                /// Replicates the `size < 8` branch of updateWeakHash32:
+                /// the low bytes of the word are the data, byte 7 is the length.
+                UInt64 value = unalignedLoad<UInt16>(data);
+                value |= UInt64(2) << 56;
+                return static_cast<UInt32>(intHashCRC32(value, 0));
+            }
+        }
+        return hasher(data, window_length);
+    }
+
+    /// The hot path of forEachGram: one flat loop with all state in registers.
+    /// Produces exactly the same token stream as draining consumeStep via set/get;
+    /// the equivalence is checked by `tokenizers-benchmark --verify-mb`.
+    ///
+    /// The differences from consumeStep are only mechanical:
+    /// - the convex hull is accessed through local pointers with a sentinel at the bottom
+    ///   (never popped: its hash exceeds any CRC32 value; never emitted: its expiry symbol is 0),
+    ///   so the loops need no emptiness checks and never write the vector size back to memory;
+    /// - the symbol iterator is inlined; in the main loop the left border advances on every step
+    ///   (num_increments >= n always holds after the warmup), so the counter check disappears;
+    /// - the next position of the right border is computed once per step and reused for the advance.
+    template <bool has_cutoff, typename Callback>
+    void forEachGramImpl(Callback && callback)
+    {
+        const char * data = pos;
+        const size_t length = end - pos;
+
+        /// Warmup, as in set: advance the right border to the (min - 1)-th symbol.
+        size_t right_position = 0;
+        for (size_t i = 0; i + 2 < min_ngram_length; ++i)
+        {
+            if (right_position >= length)
+                return;
+            right_position = nextPosition(data, length, right_position);
+        }
+
+        if (convex_hull.size() < 64)
+            convex_hull.resize(64);
+
+        PositionAndHash * hull_begin = convex_hull.data();
+        PositionAndHash * hull_top = hull_begin;
+        PositionAndHash * hull_storage_end = hull_begin + convex_hull.size();
+        *hull_top = PositionAndHash{.left_ngram_position = 0, .expiry_symbol = 0, .hash = std::numeric_limits<size_t>::max()};
+
+        const size_t expiry_delta = max_ngram_length - min_ngram_length + 1;
+        /// length >= min_cutoff_length, rewritten via the expiry symbol:
+        /// right_symbol + cutoff_slack >= expiry_symbol.
+        const size_t cutoff_slack = has_cutoff ? max_ngram_length - *min_cutoff_length : 0;
+
+        size_t left_position = 0;
+        size_t right_symbol = min_ngram_length - 2;
+
+        while (right_position < length)
+        {
+            const size_t next_right_position = nextPosition(data, length, right_position);
+            const size_t hash = windowHash(data + left_position, next_right_position - left_position);
+
+            while (hull_top->hash < hash)
+            {
+                if (right_symbol > hull_top->expiry_symbol)
+                {
+                    /// The gram is longer than max_ngram_length and it will only become longer at future
+                    /// right positions; the entries below are older, so they are all expired too.
+                    hull_top = hull_begin;
+                    break;
+                }
+                if (!has_cutoff || right_symbol + cutoff_slack >= hull_top->expiry_symbol)
+                {
+                    if (callback(data + hull_top->left_ngram_position, data + next_right_position))
+                        return;
+                }
+                --hull_top;
+            }
+
+            /// The top entry with hash >= ours also anchors a gram ending here (and stays in the hull).
+            if (right_symbol <= hull_top->expiry_symbol)
+            {
+                if (!has_cutoff || right_symbol + cutoff_slack >= hull_top->expiry_symbol)
+                {
+                    if (callback(data + hull_top->left_ngram_position, data + next_right_position))
+                        return;
+                }
+            }
+
+            /// There should not be identical hashes in the hull; keep only the newest one.
+            while (hull_top->hash == hash)
+                --hull_top;
+
+            if (hull_top + 1 == hull_storage_end)
+            {
+                /// Rare: the expected size of the hull is the cubic root of the string length.
+                const size_t top_offset = hull_top - hull_begin;
+                convex_hull.resize(convex_hull.size() * 2);
+                hull_begin = convex_hull.data();
+                hull_top = hull_begin + top_offset;
+                hull_storage_end = hull_begin + convex_hull.size();
+            }
+
+            ++hull_top;
+            hull_top->left_ngram_position = left_position;
+            hull_top->expiry_symbol = right_symbol + expiry_delta;
+            hull_top->hash = hash;
+
+            right_position = next_right_position;
+            left_position = nextPosition(data, length, left_position);
+            ++right_symbol;
+        }
     }
 
     /// Get the next batch of answers. Returns false if there can be no more answers.
@@ -293,29 +428,17 @@ public:
     template <typename Callback>
     void forEachGram(Pos pos_, Pos end_, Callback && callback)
     {
-        set(pos_, end_);
+        /// Reset the pull-side state for consistency (the batched result is not used by the push path).
+        result.clear();
+        iter_result = 0;
+
+        pos = pos_;
+        end = end_;
 
         if (min_cutoff_length)
-        {
-            auto emit = [&](size_t left_index, size_t right_index, size_t length)
-            {
-                if (*min_cutoff_length > length)
-                    return false;
-
-                return callback(pos + left_index, pos + right_index);
-            };
-
-            while (consumeStep(emit));
-        }
+            forEachGramImpl</*has_cutoff=*/ true>(callback);
         else
-        {
-            auto emit = [&](size_t left_index, size_t right_index, size_t /*length*/)
-            {
-                return callback(pos + left_index, pos + right_index);
-            };
-
-            while (consumeStep(emit));
-        }
+            forEachGramImpl</*has_cutoff=*/ false>(callback);
     }
 
     /// Get the next token, if any, or return false.
