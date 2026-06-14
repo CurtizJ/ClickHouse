@@ -51,9 +51,15 @@ public:
     virtual void serialializeKindStackBinary(WriteBuffer & out) const;
     virtual void deserializeFromKindsBinary(ReadBuffer & in);
 
-    virtual void toJSON(Poco::JSON::Object & object) const;
-    virtual void toJSONWithStats(Poco::JSON::Object & object, const Estimate & stats) const;
+    /// Streaming writers for `serialization.json`. `writeJSON` emits only the serialization kind
+    /// (and column name); `writeJSONWithStats` additionally emits `num_rows`/`num_defaults` taken
+    /// from statistics (used by versions before `WITHOUT_DATA` that store the default count on disk).
+    virtual void writeJSON(WriteBuffer & out, const String * name) const;
+    virtual void writeJSONWithStats(WriteBuffer & out, const String * name, const Estimate & stats) const;
 
+    /// Poco-based reader/writer of the kind. `toJSON` is used for introspection/tests; `fromJSON`
+    /// reads the kind only, while `fromJSONWithStats` also reads `num_rows`/`num_defaults` into `stats`.
+    virtual void toJSON(Poco::JSON::Object & object) const;
     virtual void fromJSON(const Poco::JSON::Object & object);
     virtual void fromJSONWithStats(const Poco::JSON::Object & object, Estimate & stats);
 
@@ -63,6 +69,9 @@ public:
     ISerialization::KindStack getKindStack() const { return kind_stack; }
 
 protected:
+    /// When `stats` is not null, also writes `num_rows`/`num_defaults` after the kind/name fields.
+    virtual void writeJSONFields(WriteBuffer & out, const String * name, const Estimate * stats) const;
+
     const SerializationInfoSettings settings;
     ISerialization::KindStack kind_stack;
 };
@@ -107,7 +116,7 @@ private:
     ///   specifying different versions for `String` or other types.
     ///
     /// Design notes:
-    /// - We intentionally keep such options out of `SerializationInfo::Data`,
+    /// - We intentionally keep such options out of per-column `SerializationInfo` entries,
     ///   because the mere existence of a `SerializationInfo` entry triggers
     ///   sparse encoding logic. This would produce misleading content in
     ///   `serializations.json` for types that do not support sparse encoding.
@@ -134,5 +143,12 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
 SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatistics & statistics, const SerializationInfoSettings & settings);
 
 ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings);
+
+/// Write `serialization.json` choosing the on-disk layout from the configured version: kind-only for
+/// `WITHOUT_DATA` and newer, or with per-column row/default counts for older versions so that servers
+/// which derive the serialization kind from those counts (e.g. during a rolling upgrade) stay able to
+/// read the part. The counts are synthesized from the already-chosen serialization kinds (sparse =>
+/// all `num_rows` are defaults, otherwise none), which keeps the stored kind stable across versions.
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, size_t num_rows);
 
 }

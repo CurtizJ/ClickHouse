@@ -67,18 +67,14 @@ ASTPtr ASTAlterCommand::clone() const
         res->rename_to = res->children.emplace_back(rename_to->clone()).get();
     if (execute_args)
         res->execute_args = res->children.emplace_back(execute_args->clone()).get();
+    if (add_enum_values)
+        res->add_enum_values = res->children.emplace_back(add_enum_values->clone());
+    if (refresh)
+        res->refresh = res->children.emplace_back(refresh->clone()).get();
 
     return res;
 }
 
-/// When the alter command is about statistics, the Parentheses is necessary to avoid ambiguity.
-bool needToFormatWithParentheses(ASTAlterCommand::Type type)
-{
-    return type == ASTAlterCommand::ADD_STATISTICS
-        || type == ASTAlterCommand::DROP_STATISTICS
-        || type == ASTAlterCommand::MATERIALIZE_STATISTICS
-        || type == ASTAlterCommand::MODIFY_STATISTICS;
-}
 
 void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
 {
@@ -129,6 +125,14 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
         {
             ostr << " RESET SETTING ";
             settings_resets->format(ostr, settings, state, frame);
+        }
+        else if (add_enum_values)
+        {
+            ostr << " ADD ENUM VALUES (";
+            ostr << " ";
+            add_enum_values->format(ostr, settings, state, frame);
+            ostr << " )";
+            ostr << " ";
         }
         else
         {
@@ -263,7 +267,7 @@ void ASTAlterCommand::formatImpl(WriteBuffer & ostr, const FormatSettings & sett
         ostr << quoteString(snapshot_name);
         if (snapshot_desc != nullptr)
         {
-            ostr << "FROM ";
+            ostr << " FROM ";
             snapshot_desc->format(ostr, settings, state, frame);
         }
     }
@@ -595,10 +599,12 @@ void ASTAlterCommand::forEachPointerToChild(std::function<void(IAST **, boost::i
     f(&ttl, nullptr);
     f(&settings_changes, nullptr);
     f(&settings_resets, nullptr);
+    f(nullptr, &add_enum_values);
     f(&select, nullptr);
     f(&sql_security, nullptr);
     f(&rename_to, nullptr);
     f(&execute_args, nullptr);
+    f(&refresh, nullptr);
 }
 
 
@@ -688,13 +694,14 @@ ASTPtr ASTAlterQuery::clone() const
     if (command_list)
         res->set(res->command_list, command_list->clone());
 
+    cloneOutputOptions(*res);
+    cloneTableOptions(*res);
+
     return res;
 }
 
 void ASTAlterQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
 {
-    frame.need_parens = false;
-
     std::string indent_str = settings.one_line ? "" : std::string(4u * frame.indent, ' ');
     ostr << indent_str;
 
@@ -731,7 +738,6 @@ void ASTAlterQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & s
     formatOnCluster(ostr, settings);
 
     FormatStateStacked frame_nested = frame;
-    frame_nested.need_parens = false;
     if (settings.one_line)
     {
         frame_nested.expression_list_prepend_whitespace = true;

@@ -10,7 +10,6 @@
 
 #include <Poco/JSON/JSON.h>
 #include <Poco/JSON/Object.h>
-#include <Poco/JSON/Stringifier.h>
 #include <Poco/JSON/Parser.h>
 
 
@@ -20,6 +19,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int CORRUPTED_DATA;
+    extern const int LOGICAL_ERROR;
 }
 
 namespace
@@ -37,6 +37,30 @@ constexpr auto KEY_STRING_SERIALIZATION_VERSION = "string";
 constexpr auto KEY_NULLABLE_SERIALIZATION_VERSION = "nullable";
 constexpr auto KEY_MAP_SERIALIZATION_VERSION = "map";
 constexpr auto KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES = "propagate_types_serialization_versions_to_nested_types";
+
+void writeJSONKey(std::string_view key, WriteBuffer & out)
+{
+    writeJSONString(key, out, {});
+    writeChar(':', out);
+}
+
+void writeJSONKeyValue(std::string_view key, std::string_view value, WriteBuffer & out)
+{
+    writeJSONKey(key, out);
+    writeJSONString(value, out, {});
+}
+
+void writeJSONKeyValue(std::string_view key, size_t value, WriteBuffer & out)
+{
+    writeJSONKey(key, out);
+    writeIntText(value, out);
+}
+
+void writeJSONKeyValue(std::string_view key, bool value, WriteBuffer & out)
+{
+    writeJSONKey(key, out);
+    writeString(value ? "true" : "false", out);
+}
 
 }
 
@@ -138,7 +162,7 @@ void SerializationInfo::serialializeKindStackBinary(WriteBuffer & out) const
 
 void SerializationInfo::deserializeFromKindsBinary(ReadBuffer & in)
 {
-    UInt8 type;
+    UInt8 type = 0;
     readBinary(type, in);
     auto maybe_type = magic_enum::enum_cast<KindStackBinarySerializationType>(type);
     if (!maybe_type)
@@ -163,11 +187,11 @@ void SerializationInfo::deserializeFromKindsBinary(ReadBuffer & in)
             break;
         case KindStackBinarySerializationType::COMBINATION:
         {
-            size_t num_kinds;
+            size_t num_kinds = 0;
             readVarUInt(num_kinds, in);
             for (size_t i = 0; i != num_kinds; ++i)
             {
-                UInt8 kind;
+                UInt8 kind = 0;
                 readBinary(kind, in);
                 auto maybe_kind = magic_enum::enum_cast<ISerialization::Kind>(kind);
                 if (!maybe_kind)
@@ -180,16 +204,43 @@ void SerializationInfo::deserializeFromKindsBinary(ReadBuffer & in)
     }
 }
 
+void SerializationInfo::writeJSONFields(WriteBuffer & out, const String * name, const Estimate * stats) const
+{
+    writeJSONKeyValue(KEY_KIND, ISerialization::kindStackToString(kind_stack), out);
+
+    if (name)
+    {
+        writeChar(',', out);
+        writeJSONKeyValue(KEY_NAME, *name, out);
+    }
+
+    if (stats)
+    {
+        writeChar(',', out);
+        writeJSONKeyValue(KEY_NUM_DEFAULTS, stats->estimated_defaults.value_or(0), out);
+
+        writeChar(',', out);
+        writeJSONKeyValue(KEY_NUM_ROWS, stats->rows_count, out);
+    }
+}
+
+void SerializationInfo::writeJSON(WriteBuffer & out, const String * name) const
+{
+    writeChar('{', out);
+    writeJSONFields(out, name, nullptr);
+    writeChar('}', out);
+}
+
+void SerializationInfo::writeJSONWithStats(WriteBuffer & out, const String * name, const Estimate & stats) const
+{
+    writeChar('{', out);
+    writeJSONFields(out, name, &stats);
+    writeChar('}', out);
+}
+
 void SerializationInfo::toJSON(Poco::JSON::Object & object) const
 {
     object.set(KEY_KIND, ISerialization::kindStackToString(kind_stack));
-}
-
-void SerializationInfo::toJSONWithStats(Poco::JSON::Object & object, const Estimate & stats) const
-{
-    object.set(KEY_KIND, ISerialization::kindStackToString(kind_stack));
-    object.set(KEY_NUM_DEFAULTS, stats.estimated_defaults.value_or(0));
-    object.set(KEY_NUM_ROWS, stats.rows_count);
 }
 
 void SerializationInfo::fromJSON(const Poco::JSON::Object & object)
@@ -207,7 +258,7 @@ void SerializationInfo::fromJSONWithStats(const Poco::JSON::Object & object, Est
             "Missed field '{}' or '{}' or '{}' in SerializationInfo of columns",
             KEY_KIND, KEY_NUM_DEFAULTS, KEY_NUM_ROWS);
 
-    stats.types.insert(StatisticsType::Defaults);
+    stats.types.insert(StatisticsType::Basic);
     stats.rows_count = object.getValue<size_t>(KEY_NUM_ROWS);
     stats.estimated_defaults = object.getValue<size_t>(KEY_NUM_DEFAULTS);
     kind_stack = ISerialization::stringToKindStack(object.getValue<String>(KEY_KIND));
@@ -266,65 +317,77 @@ template <typename ElementWriter>
 void SerializationInfoByName::writeJSONImpl(WriteBuffer & out, ElementWriter && write_element) const
 {
     auto version = getVersion();
-    Poco::JSON::Object object;
-    Poco::JSON::Array column_infos;
 
+    writeChar('{', out);
+    writeJSONKey(KEY_COLUMNS, out);
+    writeChar('[', out);
+
+    bool first = true;
     for (const auto & [name, info] : *this)
     {
-        Poco::JSON::Object info_json;
-        info_json.set(KEY_NAME, name);
-        write_element(name, *info, info_json);
-        column_infos.add(std::move(info_json)); /// NOLINT
-    }
+        if (!first)
+            writeChar(',', out);
+        first = false;
 
-    object.set(KEY_VERSION, static_cast<uint8_t>(version));
-    object.set(KEY_COLUMNS, std::move(column_infos)); /// NOLINT
+        write_element(name, *info, out);
+    }
+    writeChar(']', out);
+
+    if (version >= MergeTreeSerializationInfoVersion::WITH_TYPES && settings.propagate_types_serialization_versions_to_nested_types)
+    {
+        writeChar(',', out);
+        writeJSONKeyValue(KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES, settings.propagate_types_serialization_versions_to_nested_types, out);
+    }
 
     if (version >= MergeTreeSerializationInfoVersion::WITH_TYPES)
     {
-        Poco::JSON::Object type_versions_obj;
-        type_versions_obj.set(KEY_STRING_SERIALIZATION_VERSION, static_cast<size_t>(settings.string_serialization_version));
+        writeChar(',', out);
+        writeJSONKey(KEY_TYPES_SERIALIZATION_VERSIONS, out);
+        writeChar('{', out);
 
-        if (settings.nullable_serialization_version != MergeTreeNullableSerializationVersion::BASIC)
-            type_versions_obj.set(KEY_NULLABLE_SERIALIZATION_VERSION, static_cast<size_t>(settings.nullable_serialization_version));
+        bool first_type_version = true;
+        auto write_type_version = [&](std::string_view key, size_t value)
+        {
+            if (!first_type_version)
+                writeChar(',', out);
+            first_type_version = false;
+
+            writeJSONKeyValue(key, value, out);
+        };
 
         if (settings.map_serialization_version != MergeTreeMapSerializationVersion::BASIC)
-            type_versions_obj.set(KEY_MAP_SERIALIZATION_VERSION, static_cast<size_t>(settings.map_serialization_version));
+            write_type_version(KEY_MAP_SERIALIZATION_VERSION, static_cast<size_t>(settings.map_serialization_version));
+        if (settings.nullable_serialization_version != MergeTreeNullableSerializationVersion::BASIC)
+            write_type_version(KEY_NULLABLE_SERIALIZATION_VERSION, static_cast<size_t>(settings.nullable_serialization_version));
+        write_type_version(KEY_STRING_SERIALIZATION_VERSION, static_cast<size_t>(settings.string_serialization_version));
 
-        object.set(KEY_TYPES_SERIALIZATION_VERSIONS, type_versions_obj);
-
-        /// Write flag propagate_types_serialization_versions_to_nested_types only if it's set,
-        /// so old versions can read this info if the flag is disabled.
-        if (settings.propagate_types_serialization_versions_to_nested_types)
-            object.set(KEY_PROPAGATE_DATA_TYPES_SERIALIZATION_VERSIONS_TO_NESTED_TYPES, settings.propagate_types_serialization_versions_to_nested_types);
+        writeChar('}', out);
     }
 
-    std::ostringstream oss;     // STYLE_CHECK_ALLOW_STD_STRING_STREAM
-    oss.exceptions(std::ios::failbit);
-    Poco::JSON::Stringifier::stringify(object, oss);
-
-    writeString(oss.str(), out);
+    writeChar(',', out);
+    writeJSONKeyValue(KEY_VERSION, static_cast<size_t>(version), out);
+    writeChar('}', out);
 }
 
 void SerializationInfoByName::writeJSON(WriteBuffer & out) const
 {
     writeJSONImpl(out,
-        [&](const String &, const SerializationInfo & info, Poco::JSON::Object & info_json)
+        [&](const String & name, const SerializationInfo & info, WriteBuffer & buf)
         {
-            info.toJSON(info_json);
+            info.writeJSON(buf, &name);
         });
 }
 
 void SerializationInfoByName::writeJSONWithStats(WriteBuffer & out, const Estimates & stats) const
 {
     writeJSONImpl(out,
-        [&](const String & name, const SerializationInfo & info, Poco::JSON::Object & info_json)
+        [&](const String & name, const SerializationInfo & info, WriteBuffer & buf)
         {
             auto it = stats.find(name);
             if (it == stats.end())
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Missed statistics for column {}", name);
 
-            info.toJSONWithStats(info_json, it->second);
+            info.writeJSONWithStats(buf, &name, it->second);
         });
 }
 
@@ -441,7 +504,9 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
     std::optional<Estimates> stats;
     SerializationInfoByName infos(settings);
 
-    if (version >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+    /// Only versions before WITHOUT_DATA store per-column row/default counts in the JSON; those are
+    /// read into `stats` below. For WITHOUT_DATA and newer there are no counts, so `stats` stays empty.
+    if (version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
     {
         stats = Estimates();
     }
@@ -495,9 +560,9 @@ SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatis
         auto data_type = column_stats->getDataType();
         const auto & stats = column_stats->getStats();
 
-        if (data_type->supportsSparseSerialization() && stats.contains(StatisticsType::Defaults))
+        if (data_type->supportsSparseSerialization() && num_rows != 0 && stats.contains(StatisticsType::Basic))
         {
-            size_t num_defaults = stats.at(StatisticsType::Defaults)->estimateDefaults();
+            size_t num_defaults = stats.at(StatisticsType::Basic)->estimateDefaults();
             Float64 ratio = static_cast<Float64>(num_defaults) / static_cast<Float64>(num_rows);
 
             if (ratio > settings.ratio_of_defaults_for_sparse)
@@ -527,15 +592,41 @@ ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & bloc
             continue;
 
         ColumnStatisticsDescription desc;
-        SingleStatisticsDescription stat_desc(StatisticsType::Defaults, nullptr, true);
+        SingleStatisticsDescription stat_desc(StatisticsType::Basic, nullptr, true);
 
         desc.data_type = column.type;
-        desc.types_to_desc.emplace(StatisticsType::Defaults, std::move(stat_desc));
+        desc.types_to_desc.emplace(StatisticsType::Basic, std::move(stat_desc));
 
         statistics.emplace(column.name, MergeTreeStatisticsFactory::instance().get(desc));
     }
 
     return statistics;
+}
+
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, size_t num_rows)
+{
+    if (infos.getVersion() >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+    {
+        infos.writeJSON(out);
+        return;
+    }
+
+    /// Older versions store per-column row/default counts. We no longer keep these counts in the
+    /// serialization info, so synthesize them from the already-chosen serialization kinds: a sparse
+    /// column reports all rows as defaults (ratio 1.0) and a default one reports none (ratio 0.0).
+    /// Either way the count thresholds back to the same kind, so a reader that derives the kind from
+    /// the counts agrees with the explicitly stored kind.
+    Estimates stats;
+    for (const auto & [name, info] : infos)
+    {
+        Estimate estimate;
+        estimate.rows_count = num_rows;
+        estimate.estimated_defaults
+            = ISerialization::hasKind(info->getKindStack(), ISerialization::Kind::SPARSE) ? num_rows : 0;
+        stats.emplace(name, std::move(estimate));
+    }
+
+    infos.writeJSONWithStats(out, stats);
 }
 
 }
