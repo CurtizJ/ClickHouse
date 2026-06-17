@@ -964,6 +964,9 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
 
     IMergedBlockOutputStream::GatheredData gathered_data;
     gathered_data.statistics = std::move(statistics);
+    /// Carry the implicit statistics that chose the serialization (above) to part finalization, where
+    /// versions before WITHOUT_DATA persist the real per-column default counts in `serialization.json`.
+    gathered_data.statistics_for_serializations = std::move(statistics_for_serializations);
 
     auto out = std::make_unique<MergedBlockOutputStream>(
         new_data_part,
@@ -1184,7 +1187,13 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
     Block permuted_columns_cache;
     out->writeWithPermutation(block, perm_ptr, &permuted_columns_cache);
     out->finalizeIndexGranularity();
-    auto finalizer = out->finalizePartAsync(new_data_part, IMergedBlockOutputStream::GatheredData{}, false);
+
+    /// Carry the implicit statistics that chose the serialization (above) to part finalization, where
+    /// versions before WITHOUT_DATA persist the real per-column default counts in `serialization.json`.
+    IMergedBlockOutputStream::GatheredData gathered_data;
+    gathered_data.statistics_for_serializations = std::move(statistics_for_serializations);
+
+    auto finalizer = out->finalizePartAsync(new_data_part, gathered_data, false);
     temp_part->part = new_data_part;
     temp_part->streams.emplace_back(MergeTreeTemporaryPart::Stream{.stream = std::move(out), .finalizer = std::move(finalizer)});
 

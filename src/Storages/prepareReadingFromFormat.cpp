@@ -342,9 +342,11 @@ void ReadFromFormatInfo::serialize(IQueryPlanStep::Serialization & ctx) const
     writeStringBinary(columns_description.toString(false), ctx.out);
     requested_columns.writeTextWithNamesInStorage(ctx.out);
     requested_virtual_columns.writeTextWithNamesInStorage(ctx.out);
-    /// Serialization hints carry no row data; the row/default counts written for older versions are
-    /// synthesized from the serialization kinds (num_rows = 0), the kind itself stays authoritative.
-    writeSerializationInfosJSON(ctx.out, serialization_hints, /*num_rows=*/ 0);
+    /// Serialization hints carry no row data, so there is no implicit statistics to take counts from;
+    /// for older versions the row/default counts are encoded from the serialization kinds (num_rows = 0)
+    /// while the kind itself stays authoritative.
+    auto serialization_estimates = getEstimatesForSerializationInfos(serialization_hints, /*statistics_for_serializations=*/ {}, /*num_rows=*/ 0);
+    writeSerializationInfosJSON(ctx.out, serialization_hints, serialization_estimates);
 
     ctx.out << "\n";
 

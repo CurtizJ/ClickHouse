@@ -369,9 +369,12 @@ MergedBlockOutputStream::WrittenFiles MergedBlockOutputStream::finalizePartOnDis
     const auto & serialization_infos = new_part->getSerializationInfos();
     if (serialization_infos.needsPersistence())
     {
+        auto serialization_estimates = getEstimatesForSerializationInfos(
+            serialization_infos, gathered_data.statistics_for_serializations, rows_count);
+
         write_hashed_file(IMergeTreeDataPart::SERIALIZATION_FILE_NAME, [&](auto & buffer)
         {
-            writeSerializationInfosJSON(buffer, serialization_infos, rows_count);
+            writeSerializationInfosJSON(buffer, serialization_infos, serialization_estimates);
         });
     }
 

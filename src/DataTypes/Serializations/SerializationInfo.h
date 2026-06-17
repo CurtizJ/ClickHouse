@@ -144,11 +144,22 @@ SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatis
 
 ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings);
 
-/// Write `serialization.json` choosing the on-disk layout from the configured version: kind-only for
-/// `WITHOUT_DATA` and newer, or with per-column row/default counts for older versions so that servers
-/// which derive the serialization kind from those counts (e.g. during a rolling upgrade) stay able to
-/// read the part. The counts are synthesized from the already-chosen serialization kinds (sparse =>
-/// all `num_rows` are defaults, otherwise none), which keeps the stored kind stable across versions.
-void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, size_t num_rows);
+/// Choose the per-column row/default counts to persist in `serialization.json` for the configured
+/// version. For `WITHOUT_DATA` and newer only the serialization kind is stored, so the returned
+/// estimates are empty. Older versions additionally store the default count so that a server which
+/// derives the serialization kind from those counts (e.g. during a rolling upgrade) stays able to read
+/// the part. The real counts are preferred: `statistics_for_serializations` carries the implicit
+/// statistics that INSERT and projection writes already built over the written block. For paths that
+/// decide the kind without counting defaults (merges and mutations carry it forward from the source
+/// parts; serialization hints carry no row data) `statistics_for_serializations` is empty and the
+/// chosen kind is encoded as a default ratio instead (sparse => all `num_rows` are defaults, otherwise
+/// none), so a reader derives the same kind that is stored explicitly.
+Estimates getEstimatesForSerializationInfos(
+    const SerializationInfoByName & infos, const ColumnsStatistics & statistics_for_serializations, size_t num_rows);
+
+/// Write `serialization.json`. For `WITHOUT_DATA` and newer only the serialization kind is written and
+/// `stats` is ignored; older versions additionally write the per-column row/default counts from `stats`
+/// (see `getEstimatesForSerializationInfos`).
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const Estimates & stats);
 
 }

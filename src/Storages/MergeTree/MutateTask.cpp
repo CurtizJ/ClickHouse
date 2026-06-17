@@ -1311,9 +1311,12 @@ static void finalizeMutatedPart(
     const auto & serialization_infos = new_data_part->getSerializationInfos();
     if (serialization_infos.needsPersistence())
     {
+        auto serialization_estimates = getEstimatesForSerializationInfos(
+            serialization_infos, all_gathered_data.statistics_for_serializations, new_data_part->rows_count);
+
         auto out_serialization = new_data_part->getDataPartStorage().writeFile(IMergeTreeDataPart::SERIALIZATION_FILE_NAME, 4096, context->getWriteSettings());
         HashingWriteBuffer out_hashing(*out_serialization);
-        writeSerializationInfosJSON(out_hashing, serialization_infos, new_data_part->rows_count);
+        writeSerializationInfosJSON(out_hashing, serialization_infos, serialization_estimates);
         out_hashing.finalize();
         new_data_part->checksums.files[IMergeTreeDataPart::SERIALIZATION_FILE_NAME].file_size = out_hashing.count();
         new_data_part->checksums.files[IMergeTreeDataPart::SERIALIZATION_FILE_NAME].file_hash = out_hashing.getHash();

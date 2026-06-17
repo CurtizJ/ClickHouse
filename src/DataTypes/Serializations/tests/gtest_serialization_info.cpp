@@ -1,6 +1,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <Columns/IColumn.h>
+#include <Core/Block.h>
+#include <Core/Field.h>
 #include <Core/NamesAndTypes.h>
 #include <DataTypes/Serializations/ISerialization.h>
 #include <DataTypes/Serializations/SerializationInfo.h>
@@ -308,7 +311,8 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsForLegacyVersionCanBeReadBack)
     SerializationInfoByName infos(columns, settings);
 
     WriteBufferFromOwnString out;
-    writeSerializationInfosJSON(out, infos, /*num_rows=*/ 100);
+    auto stats = getEstimatesForSerializationInfos(infos, /*statistics_for_serializations=*/ {}, /*num_rows=*/ 100);
+    writeSerializationInfosJSON(out, infos, stats);
     auto json = out.str();
 
     EXPECT_THAT(json, testing::HasSubstr("num_rows"));
@@ -318,6 +322,48 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsForLegacyVersionCanBeReadBack)
     EXPECT_EQ(result.infos.getVersion(), MergeTreeSerializationInfoVersion::WITH_TYPES);
     EXPECT_NE(result.infos.tryGet("s"), nullptr);
     ASSERT_TRUE(result.stats.has_value());
+}
+
+/// For versions before WITHOUT_DATA the persisted `num_defaults` must be the real count computed from
+/// the written data (the implicit statistics), not a value derived from the chosen serialization kind.
+/// A dense column has fewer defaults than the sparse threshold, so a kind-based encoding would write 0;
+/// `getEstimatesForSerializationInfos` must instead carry the real (positive) count from the statistics.
+TEST(SerializationInfoByNameJSON, WriteWithStatsUsesRealDefaultCount)
+{
+    SerializationInfoSettings settings;
+    settings.ratio_of_defaults_for_sparse = 0.9375;
+    settings.choose_kind = true;
+    settings.version = MergeTreeSerializationInfoVersion::WITH_TYPES;
+
+    auto string_type = std::make_shared<DataTypeString>();
+    auto column = string_type->createColumn();
+    constexpr size_t num_rows = 100;
+    constexpr size_t num_defaults = 30; /// 30% defaults is below the sparse threshold => dense kind
+    for (size_t i = 0; i < num_rows; ++i)
+        column->insert(i < num_defaults ? Field("") : Field("value"));
+
+    Block block{ColumnWithTypeAndName{std::move(column), string_type, "s"}};
+
+    auto statistics_for_serializations = getImplicitStatisticsForSparseSerialization(block, settings);
+    statistics_for_serializations.build(block);
+    auto infos = loadSerializationInfosFromStatistics(statistics_for_serializations, settings);
+
+    /// The column is dense: a kind-based synthesis would write num_defaults = 0 for it.
+    ASSERT_NE(infos.tryGet("s"), nullptr);
+    EXPECT_FALSE(ISerialization::hasKind(infos.getKindStack("s"), ISerialization::Kind::SPARSE));
+
+    auto estimates = getEstimatesForSerializationInfos(infos, statistics_for_serializations, num_rows);
+
+    WriteBufferFromOwnString out;
+    writeSerializationInfosJSON(out, infos, estimates);
+
+    auto result = loadSerializationInfosFromString(out.str());
+    ASSERT_TRUE(result.stats.has_value());
+    auto it = result.stats->find("s");
+    ASSERT_NE(it, result.stats->end());
+    EXPECT_EQ(it->second.rows_count, num_rows);
+    /// The real default count is persisted, not the kind-synthesized 0.
+    EXPECT_GT(it->second.estimated_defaults.value_or(0), 0u);
 }
 
 }
