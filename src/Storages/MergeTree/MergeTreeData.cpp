@@ -10719,12 +10719,19 @@ static void updateSerializationHintsForPart(const DataPartPtr & part, const Colu
             continue;
 
         chassert(new_hint->structureEquals(*info));
-        // if (remove)
-        //     new_hint->remove(*info);
-        // else
-        //     new_hint->add(*info);
 
-        UNUSED(remove);
+        /// The per-row default counts that the hint used to aggregate are no longer stored in the
+        /// serialization info. Carry over the serialization kind instead: hint a column as sparse once
+        /// an active part serializes it sparse. Sparse is always a safe representation and the final
+        /// on-disk serialization is re-decided from statistics at write time, so an over-eager hint
+        /// only affects how external data is parsed (on INSERT ... SELECT FROM a file-like source),
+        /// never correctness. Removing a part cannot un-aggregate a kind, so it is a no-op here;
+        /// `resetSerializationHints` rebuilds the hints from the current set of active parts.
+        if (!remove && new_hint->structureEquals(*info)
+            && ISerialization::hasKind(info->getKindStack(), ISerialization::Kind::SPARSE))
+        {
+            new_hint->setKindStack(info->getKindStack());
+        }
     }
 }
 
