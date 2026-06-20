@@ -880,10 +880,6 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
 
     SerializationInfoByName infos({});
 
-    /// Serialization kinds (sparse vs dense) are derived from column statistics. When the statistics
-    /// required for that are already available (`WITHOUT_DATA` version with materialized statistics),
-    /// use them directly. Otherwise fall back to computing implicit statistics from the block, which
-    /// is also the behavior of versions before `WITHOUT_DATA` that store the default count in `serialization.json`.
     if (serialization_settings.version >= MergeTreeSerializationInfoVersion::WITHOUT_DATA && !statistics_for_serializations.empty())
     {
         infos = loadSerializationInfosFromStatistics(statistics_for_serializations, serialization_settings);
@@ -964,8 +960,6 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
 
     IMergedBlockOutputStream::GatheredData gathered_data;
     gathered_data.statistics = std::move(statistics);
-    /// Carry the implicit statistics that chose the serialization (above) to part finalization, where
-    /// versions before WITHOUT_DATA persist the real per-column default counts in `serialization.json`.
     gathered_data.statistics_for_serializations = std::move(statistics_for_serializations);
 
     auto out = std::make_unique<MergedBlockOutputStream>(

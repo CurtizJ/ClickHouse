@@ -504,8 +504,7 @@ SerializationInfosLoadResult loadSerializationInfosFromString(const std::string 
     std::optional<Estimates> stats;
     SerializationInfoByName infos(settings);
 
-    /// Only versions before WITHOUT_DATA store per-column row/default counts in the JSON; those are
-    /// read into `stats` below. For WITHOUT_DATA and newer there are no counts, so `stats` stays empty.
+    /// Only versions before WITHOUT_DATA store per-column row/default counts in the JSON.
     if (version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
     {
         stats = Estimates();
@@ -603,52 +602,17 @@ ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & bloc
     return statistics;
 }
 
-namespace
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const ColumnsStatistics & stats)
 {
-
-/// Encode the already-chosen serialization kind of each column as a default ratio: a sparse column
-/// reports all `num_rows` as defaults (ratio 1.0) and any other kind reports none (ratio 0.0). Used for
-/// the part-writing paths that decide the kind without counting defaults (merges and mutations carry the
-/// kind forward from the source parts; serialization hints carry no row data), so a reader that derives
-/// the kind from the counts agrees with the explicitly stored kind.
-Estimates getSerializationEstimatesFromKinds(const SerializationInfoByName & infos, size_t num_rows)
-{
-    Estimates stats;
-    for (const auto & [name, info] : infos)
+    if (infos.getVersion() >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
     {
-        Estimate estimate;
-        estimate.types.insert(StatisticsType::Basic);
-        estimate.rows_count = num_rows;
-        estimate.estimated_defaults
-            = ISerialization::hasKind(info->getKindStack(), ISerialization::Kind::SPARSE) ? num_rows : 0;
-        stats.emplace(name, std::move(estimate));
-    }
-    return stats;
-}
-
-}
-
-Estimates getEstimatesForSerializationInfos(
-    const SerializationInfoByName & infos, const ColumnsStatistics & statistics_for_serializations, size_t num_rows)
-{
-    /// Newer versions store only the serialization kind, so no counts are needed.
-    if (infos.getVersion() >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
-        return {};
-
-    /// INSERT and projection writes counted the defaults of the written block — persist the real counts.
-    if (!statistics_for_serializations.empty())
-        return statistics_for_serializations.getEstimates();
-
-    /// Merges, mutations and serialization hints carry the kind forward without counting defaults.
-    return getSerializationEstimatesFromKinds(infos, num_rows);
-}
-
-void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const Estimates & stats)
-{
-    if (infos.getVersion() >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
         infos.writeJSON(out);
+    }
     else
-        infos.writeJSONWithStats(out, stats);
+    {
+        auto estimates = stats.getEstimates();
+        infos.writeJSONWithStats(out, estimates);
+    }
 }
 
 }

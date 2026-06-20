@@ -311,8 +311,7 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsForLegacyVersionCanBeReadBack)
     SerializationInfoByName infos(columns, settings);
 
     WriteBufferFromOwnString out;
-    auto stats = getEstimatesForSerializationInfos(infos, /*statistics_for_serializations=*/ {}, /*num_rows=*/ 100);
-    writeSerializationInfosJSON(out, infos, stats);
+    writeSerializationInfosJSON(out, infos, ColumnsStatistics());
     auto json = out.str();
 
     EXPECT_THAT(json, testing::HasSubstr("num_rows"));
@@ -327,7 +326,6 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsForLegacyVersionCanBeReadBack)
 /// For versions before WITHOUT_DATA the persisted `num_defaults` must be the real count computed from
 /// the written data (the implicit statistics), not a value derived from the chosen serialization kind.
 /// A dense column has fewer defaults than the sparse threshold, so a kind-based encoding would write 0;
-/// `getEstimatesForSerializationInfos` must instead carry the real (positive) count from the statistics.
 TEST(SerializationInfoByNameJSON, WriteWithStatsUsesRealDefaultCount)
 {
     SerializationInfoSettings settings;
@@ -352,10 +350,8 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsUsesRealDefaultCount)
     ASSERT_NE(infos.tryGet("s"), nullptr);
     EXPECT_FALSE(ISerialization::hasKind(infos.getKindStack("s"), ISerialization::Kind::SPARSE));
 
-    auto estimates = getEstimatesForSerializationInfos(infos, statistics_for_serializations, num_rows);
-
     WriteBufferFromOwnString out;
-    writeSerializationInfosJSON(out, infos, estimates);
+    writeSerializationInfosJSON(out, infos, statistics_for_serializations);
 
     auto result = loadSerializationInfosFromString(out.str());
     ASSERT_TRUE(result.stats.has_value());

@@ -825,6 +825,7 @@ bool MergeTask::ExecuteAndFinalizeHorizontalPart::prepare() const
         {
             if (force_default_columns.contains(name))
                 continue;
+
             if (auto it = custom_infos_from_parts.find(name); it != custom_infos_from_parts.end())
                 info = it->second;
         }
