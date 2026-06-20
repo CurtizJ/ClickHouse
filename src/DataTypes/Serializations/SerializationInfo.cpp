@@ -607,7 +607,7 @@ ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & bloc
     return getImplicitStatisticsForSparseSerialization(block.getNamesAndTypesList(), settings);
 }
 
-NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics)
+NameSet addSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics)
 {
     NameSet added;
     for (const auto & [name, implicit_column] : implicit_statistics)
@@ -631,25 +631,31 @@ NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const
     return added;
 }
 
-NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings)
+NameSet addSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings)
 {
-    return addImplicitSerializationStatistics(statistics, getImplicitStatisticsForSparseSerialization(columns, settings));
+    return addSerializationStatistics(statistics, getImplicitStatisticsForSparseSerialization(columns, settings));
 }
 
-ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & implicit_serialization_statistics)
+ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & serialization_statistics)
 {
+    if (serialization_statistics.empty())
+        return statistics;
+
     ColumnsStatistics result;
     for (const auto & [name, column_stats] : statistics)
     {
-        if (implicit_serialization_statistics.contains(name))
+        if (serialization_statistics.contains(name))
         {
-            /// Drop the `Basic` statistics added implicitly for serialization; explicit statistics are kept.
+            /// Drop the `Basic` statistics added implicitly for serialization.
             column_stats->removeStatistics(StatisticsType::Basic);
+
             if (column_stats->getStats().empty())
                 continue;
         }
+
         result.emplace(name, column_stats);
     }
+
     return result;
 }
 

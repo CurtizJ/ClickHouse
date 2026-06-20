@@ -964,8 +964,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
     /// (computed above to choose the serialization kind) into the main statistics so the per-column
     /// `num_defaults` is persisted in serialization.json; they are removed before the statistics files are written.
     if (serialization_settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
-        gathered_data.implicit_serialization_statistics
-            = addImplicitSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
+        gathered_data.serialization_statistics = addSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
 
     auto out = std::make_unique<MergedBlockOutputStream>(
         new_data_part,
@@ -1192,8 +1191,8 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
     /// `serialization.json`; they are removed before the statistics files are written.
     IMergedBlockOutputStream::GatheredData gathered_data;
     if (settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
-        gathered_data.implicit_serialization_statistics
-            = addImplicitSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
+        gathered_data.serialization_statistics
+            = addSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
 
     auto finalizer = out->finalizePartAsync(new_data_part, gathered_data, false);
     temp_part->part = new_data_part;

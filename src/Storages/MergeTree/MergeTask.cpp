@@ -747,13 +747,13 @@ bool MergeTask::ExecuteAndFinalizeHorizontalPart::prepare() const
         global_ctx->gathered_data.statistics = ColumnsStatistics(global_ctx->metadata_snapshot->getColumns());
     }
 
-    /// For serialization-info versions older than WITHOUT_DATA, `serialization.json` stores the per-column
-    /// `num_defaults`. Add implicit `Basic` statistics for sparse-capable columns into the main statistics so
-    /// they are recomputed over the merged output by the regular statistics machinery (handling row-reducing
-    /// merges); they are removed again before the statistics files are written (see `getStatisticsToPersist`).
+    /// For versions before WITHOUT_DATA, add implicit `Basic` statistics for sparse-capable columns so the
+    /// per-column `num_defaults` for `serialization.json` is built over the output; removed before writing files.
     if (info_settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
-        global_ctx->gathered_data.implicit_serialization_statistics = addImplicitSerializationStatistics(
-            global_ctx->gathered_data.statistics, global_ctx->storage_columns, info_settings);
+    {
+        auto added_statistics = addSerializationStatistics(global_ctx->gathered_data.statistics, global_ctx->storage_columns, info_settings);
+        global_ctx->gathered_data.serialization_statistics = std::move(added_statistics);
+    }
 
     if (global_ctx->merge_may_reduce_rows)
     {

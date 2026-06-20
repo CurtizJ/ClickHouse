@@ -150,13 +150,13 @@ ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & bloc
 /// Add implicit serialization `Basic` statistics into `statistics` for every column that lacks `Basic`, so the
 /// per-column `num_defaults` is computed by the regular statistics machinery. Returns the columns whose `Basic`
 /// was added implicitly (to be removed before writing the statistics files; see `getStatisticsToPersist`).
-NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics);
-NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings);
+NameSet addSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics);
+NameSet addSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings);
 
 /// Statistics to persist into the part's statistics files: the implicitly added serialization `Basic` stats
-/// (`implicit_serialization_statistics`) are removed and columns left empty are dropped. NOTE: removes the
+/// (`serialization_statistics`) are removed and columns left empty are dropped. NOTE: removes the
 /// implicit `Basic` objects in place, so the caller must already have extracted any needed estimates.
-ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & implicit_serialization_statistics);
+ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & serialization_statistics);
 
 /// Write `serialization.json`.
 /// For `WITHOUT_DATA` and newer only the serialization kind is written and `estimates` is ignored.

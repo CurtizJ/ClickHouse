@@ -384,7 +384,7 @@ MergedBlockOutputStream::WrittenFiles MergedBlockOutputStream::finalizePartOnDis
 
     new_part->setEstimates(estimates);
 
-    auto statistics = getStatisticsToPersist(gathered_data.statistics, gathered_data.implicit_serialization_statistics);
+    auto statistics = getStatisticsToPersist(gathered_data.statistics, gathered_data.serialization_statistics);
     if (!statistics.empty())
     {
         if (isFullPartStorage(new_part->getDataPartStorage()))
