@@ -960,7 +960,12 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
 
     IMergedBlockOutputStream::GatheredData gathered_data;
     gathered_data.statistics = std::move(statistics);
-    gathered_data.statistics_for_serializations = std::move(statistics_for_serializations);
+    /// For serialization-info versions before WITHOUT_DATA, fold the implicit serialization `Basic` statistics
+    /// (computed above to choose the serialization kind) into the main statistics so the per-column
+    /// `num_defaults` is persisted in serialization.json; they are removed before the statistics files are written.
+    if (serialization_settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+        gathered_data.implicit_serialization_statistics
+            = addImplicitSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
 
     auto out = std::make_unique<MergedBlockOutputStream>(
         new_data_part,
@@ -1182,10 +1187,13 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
     out->writeWithPermutation(block, perm_ptr, &permuted_columns_cache);
     out->finalizeIndexGranularity();
 
-    /// Carry the implicit statistics that chose the serialization (above) to part finalization, where
-    /// versions before WITHOUT_DATA persist the real per-column default counts in `serialization.json`.
+    /// For versions before WITHOUT_DATA, fold the implicit serialization `Basic` statistics (that chose the
+    /// serialization above) into the main statistics so the real per-column default counts are persisted in
+    /// `serialization.json`; they are removed before the statistics files are written.
     IMergedBlockOutputStream::GatheredData gathered_data;
-    gathered_data.statistics_for_serializations = std::move(statistics_for_serializations);
+    if (settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+        gathered_data.implicit_serialization_statistics
+            = addImplicitSerializationStatistics(gathered_data.statistics, statistics_for_serializations);
 
     auto finalizer = out->finalizePartAsync(new_data_part, gathered_data, false);
     temp_part->part = new_data_part;

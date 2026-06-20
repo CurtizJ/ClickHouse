@@ -731,10 +731,29 @@ bool MergeTask::ExecuteAndFinalizeHorizontalPart::prepare() const
         mutable_snapshot.addPatches(global_ctx->future_part->patch_parts);
     }
 
+    SerializationInfo::Settings info_settings
+    {
+        static_cast<double>((*merge_tree_settings)[MergeTreeSetting::ratio_of_defaults_for_sparse_serialization]),
+        true,
+        (*merge_tree_settings)[MergeTreeSetting::serialization_info_version],
+        (*merge_tree_settings)[MergeTreeSetting::string_serialization_version],
+        (*merge_tree_settings)[MergeTreeSetting::nullable_serialization_version],
+        (*merge_tree_settings)[MergeTreeSetting::map_serialization_version],
+        (*merge_tree_settings)[MergeTreeSetting::propagate_types_serialization_versions_to_nested_types],
+    };
+
     if ((*merge_tree_settings)[MergeTreeSetting::materialize_statistics_on_merge])
     {
         global_ctx->gathered_data.statistics = ColumnsStatistics(global_ctx->metadata_snapshot->getColumns());
     }
+
+    /// For serialization-info versions older than WITHOUT_DATA, `serialization.json` stores the per-column
+    /// `num_defaults`. Add implicit `Basic` statistics for sparse-capable columns into the main statistics so
+    /// they are recomputed over the merged output by the regular statistics machinery (handling row-reducing
+    /// merges); they are removed again before the statistics files are written (see `getStatisticsToPersist`).
+    if (info_settings.version < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+        global_ctx->gathered_data.implicit_serialization_statistics = addImplicitSerializationStatistics(
+            global_ctx->gathered_data.statistics, global_ctx->storage_columns, info_settings);
 
     if (global_ctx->merge_may_reduce_rows)
     {
@@ -772,17 +791,6 @@ bool MergeTask::ExecuteAndFinalizeHorizontalPart::prepare() const
             }
         }
     }
-
-    SerializationInfo::Settings info_settings
-    {
-        static_cast<double>((*merge_tree_settings)[MergeTreeSetting::ratio_of_defaults_for_sparse_serialization]),
-        true,
-        (*merge_tree_settings)[MergeTreeSetting::serialization_info_version],
-        (*merge_tree_settings)[MergeTreeSetting::string_serialization_version],
-        (*merge_tree_settings)[MergeTreeSetting::nullable_serialization_version],
-        (*merge_tree_settings)[MergeTreeSetting::map_serialization_version],
-        (*merge_tree_settings)[MergeTreeSetting::propagate_types_serialization_versions_to_nested_types],
-    };
 
     SerializationInfoByName infos(global_ctx->storage_columns, info_settings);
     global_ctx->alter_conversions.reserve(global_ctx->future_part->parts.size());
@@ -2891,10 +2899,7 @@ BuildStatisticsTransformPtr MergeTask::addBuildStatisticsStep(QueryPlan & plan, 
 void MergeTask::mergeBuiltStatistics(BuildStatisticsTransformMap && build_statistics_transforms, const GlobalRuntimeContextPtr & global_ctx)
 {
     for (const auto & [name, transform] : build_statistics_transforms)
-    {
-        const auto & built_statistics = transform->getStatistics();
-        global_ctx->gathered_data.statistics.merge(built_statistics);
-    }
+        global_ctx->gathered_data.statistics.merge(transform->getStatistics());
 }
 
 void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const

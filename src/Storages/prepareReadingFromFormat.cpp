@@ -342,7 +342,12 @@ void ReadFromFormatInfo::serialize(IQueryPlanStep::Serialization & ctx) const
     writeStringBinary(columns_description.toString(false), ctx.out);
     requested_columns.writeTextWithNamesInStorage(ctx.out);
     requested_virtual_columns.writeTextWithNamesInStorage(ctx.out);
-    writeSerializationInfosJSON(ctx.out, serialization_hints, ColumnsStatistics());
+    /// Serialization hints carry no row data, so for versions before WITHOUT_DATA we still must emit a
+    /// per-column entry (`num_rows`/`num_defaults` = 0); only the serialization kind is authoritative here.
+    Estimates serialization_estimates;
+    for (const auto & [name, info] : serialization_hints)
+        serialization_estimates.emplace(name, Estimate{});
+    writeSerializationInfosJSON(ctx.out, serialization_hints, serialization_estimates);
 
     ctx.out << "\n";
 

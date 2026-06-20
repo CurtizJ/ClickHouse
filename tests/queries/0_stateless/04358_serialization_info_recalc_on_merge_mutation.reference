@@ -1,0 +1,8 @@
+wide after merge	2000	50	74500
+wide after vertical mutation	2000	1
+wide after delete + merge	1980
+compact after merge	2000	50	74500
+compact after mutation	2000	74520
+replacing after merge	1000
+vertical after merge	2000	50	74500
+vertical after delete + merge	1990

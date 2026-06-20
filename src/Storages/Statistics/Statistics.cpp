@@ -157,6 +157,18 @@ void ColumnStatistics::merge(const ColumnStatisticsPtr & other)
     }
 }
 
+void ColumnStatistics::addStatistics(StatisticsType type, StatisticsPtr stat)
+{
+    stats_desc.types_to_desc.emplace(type, SingleStatisticsDescription(type, nullptr, /*is_implicit=*/ true));
+    stats[type] = std::move(stat);
+}
+
+void ColumnStatistics::removeStatistics(StatisticsType type)
+{
+    stats.erase(type);
+    stats_desc.types_to_desc.erase(type);
+}
+
 bool ColumnStatistics::structureEquals(const ColumnStatistics & other) const
 {
     if (stats.size() != other.stats.size())

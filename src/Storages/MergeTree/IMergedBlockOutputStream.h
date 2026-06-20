@@ -30,7 +30,10 @@ public:
         MergeTreeData::DataPart::Checksums checksums;
         ColumnsSubstreams columns_substreams;
         ColumnsStatistics statistics;
-        ColumnsStatistics statistics_for_serializations;
+        /// Columns whose `Basic` statistics were added implicitly for serialization (to recompute the
+        /// per-column `num_defaults` stored in `serialization.json` for versions before WITHOUT_DATA).
+        /// They are part of `statistics` while building, and removed before the statistics files are written.
+        NameSet implicit_serialization_statistics;
     };
 
     virtual void write(const Block & block) = 0;

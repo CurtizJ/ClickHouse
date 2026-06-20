@@ -307,11 +307,17 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsForLegacyVersionCanBeReadBack)
     settings.string_serialization_version = MergeTreeStringSerializationVersion::WITH_SIZE_STREAM;
 
     auto string_type = std::make_shared<DataTypeString>();
-    NamesAndTypesList columns{{"s", string_type}};
-    SerializationInfoByName infos(columns, settings);
+    auto column = string_type->createColumn();
+    for (size_t i = 0; i < 10; ++i)
+        column->insert(i < 6 ? Field("") : Field("value"));
+    Block block{ColumnWithTypeAndName{std::move(column), string_type, "s"}};
+
+    auto statistics_for_serializations = getImplicitStatisticsForSparseSerialization(block, settings);
+    statistics_for_serializations.build(block);
+    auto infos = loadSerializationInfosFromStatistics(statistics_for_serializations, settings);
 
     WriteBufferFromOwnString out;
-    writeSerializationInfosJSON(out, infos, ColumnsStatistics());
+    writeSerializationInfosJSON(out, infos, statistics_for_serializations.getEstimates());
     auto json = out.str();
 
     EXPECT_THAT(json, testing::HasSubstr("num_rows"));
@@ -351,7 +357,7 @@ TEST(SerializationInfoByNameJSON, WriteWithStatsUsesRealDefaultCount)
     EXPECT_FALSE(ISerialization::hasKind(infos.getKindStack("s"), ISerialization::Kind::SPARSE));
 
     WriteBufferFromOwnString out;
-    writeSerializationInfosJSON(out, infos, statistics_for_serializations);
+    writeSerializationInfosJSON(out, infos, statistics_for_serializations.getEstimates());
 
     auto result = loadSerializationInfosFromString(out.str());
     ASSERT_TRUE(result.stats.has_value());

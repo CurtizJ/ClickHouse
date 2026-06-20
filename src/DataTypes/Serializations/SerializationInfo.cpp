@@ -579,13 +579,13 @@ SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatis
     return infos;
 }
 
-ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings)
+ColumnsStatistics getImplicitStatisticsForSparseSerialization(const NamesAndTypesList & columns, const SerializationInfoSettings & settings)
 {
     if (settings.ratio_of_defaults_for_sparse >= 1.0)
         return {};
 
     ColumnsStatistics statistics;
-    for (const auto & column : block)
+    for (const auto & column : columns)
     {
         if (!column.type->supportsSparseSerialization())
             continue;
@@ -602,17 +602,63 @@ ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & bloc
     return statistics;
 }
 
-void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const ColumnsStatistics & stats)
+ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings)
+{
+    return getImplicitStatisticsForSparseSerialization(block.getNamesAndTypesList(), settings);
+}
+
+NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics)
+{
+    NameSet added;
+    for (const auto & [name, implicit_column] : implicit_statistics)
+    {
+        auto basic_it = implicit_column->getStats().find(StatisticsType::Basic);
+        if (basic_it == implicit_column->getStats().end())
+            continue;
+
+        auto it = statistics.find(name);
+        if (it == statistics.end())
+        {
+            statistics.emplace(name, implicit_column);
+            added.insert(name);
+        }
+        else if (!it->second->getStats().contains(StatisticsType::Basic))
+        {
+            it->second->addStatistics(StatisticsType::Basic, basic_it->second);
+            added.insert(name);
+        }
+    }
+    return added;
+}
+
+NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings)
+{
+    return addImplicitSerializationStatistics(statistics, getImplicitStatisticsForSparseSerialization(columns, settings));
+}
+
+ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & implicit_serialization_statistics)
+{
+    ColumnsStatistics result;
+    for (const auto & [name, column_stats] : statistics)
+    {
+        if (implicit_serialization_statistics.contains(name))
+        {
+            /// Drop the `Basic` statistics added implicitly for serialization; explicit statistics are kept.
+            column_stats->removeStatistics(StatisticsType::Basic);
+            if (column_stats->getStats().empty())
+                continue;
+        }
+        result.emplace(name, column_stats);
+    }
+    return result;
+}
+
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const Estimates & estimates)
 {
     if (infos.getVersion() >= MergeTreeSerializationInfoVersion::WITHOUT_DATA)
-    {
         infos.writeJSON(out);
-    }
     else
-    {
-        auto estimates = stats.getEstimates();
         infos.writeJSONWithStats(out, estimates);
-    }
 }
 
 }

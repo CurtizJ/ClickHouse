@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Core/MergeTreeSerializationEnums.h>
+#include <Core/Names.h>
 #include <Core/Types_fwd.h>
 #include <DataTypes/Serializations/ISerialization.h>
 #include <DataTypes/Serializations/SerializationInfoSettings.h>
@@ -142,11 +143,24 @@ SerializationInfosLoadResult loadSerializationInfosFromBuffer(ReadBuffer & in);
 SerializationInfosLoadResult loadSerializationInfosFromString(const std::string & str);
 SerializationInfoByName loadSerializationInfosFromStatistics(const ColumnsStatistics & statistics, const SerializationInfoSettings & settings);
 
+/// Create empty `Basic` statistics objects for every sparse-capable column.
+ColumnsStatistics getImplicitStatisticsForSparseSerialization(const NamesAndTypesList & columns, const SerializationInfoSettings & settings);
 ColumnsStatistics getImplicitStatisticsForSparseSerialization(const Block & block, const SerializationInfoSettings & settings);
 
+/// Add implicit serialization `Basic` statistics into `statistics` for every column that lacks `Basic`, so the
+/// per-column `num_defaults` is computed by the regular statistics machinery. Returns the columns whose `Basic`
+/// was added implicitly (to be removed before writing the statistics files; see `getStatisticsToPersist`).
+NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const ColumnsStatistics & implicit_statistics);
+NameSet addImplicitSerializationStatistics(ColumnsStatistics & statistics, const NamesAndTypesList & columns, const SerializationInfoSettings & settings);
+
+/// Statistics to persist into the part's statistics files: the implicitly added serialization `Basic` stats
+/// (`implicit_serialization_statistics`) are removed and columns left empty are dropped. NOTE: removes the
+/// implicit `Basic` objects in place, so the caller must already have extracted any needed estimates.
+ColumnsStatistics getStatisticsToPersist(const ColumnsStatistics & statistics, const NameSet & implicit_serialization_statistics);
+
 /// Write `serialization.json`.
-/// For `WITHOUT_DATA` and newer only the serialization kind is written and `stats` is ignored.
-/// Older versions additionally write the per-column row/default counts from `stats`.
-void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const ColumnsStatistics & stats);
+/// For `WITHOUT_DATA` and newer only the serialization kind is written and `estimates` is ignored.
+/// Older versions additionally write the per-column row/default counts taken from `estimates`.
+void writeSerializationInfosJSON(WriteBuffer & out, const SerializationInfoByName & infos, const Estimates & estimates);
 
 }

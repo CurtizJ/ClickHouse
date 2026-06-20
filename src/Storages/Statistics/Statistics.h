@@ -113,6 +113,12 @@ public:
     void build(const ColumnPtr & column);
     void merge(const ColumnStatisticsPtr & other);
 
+    /// Add a single statistics object of `type` (and its description). Used to attach `Basic` statistics
+    /// implicitly for serialization to a column that already has other (explicit) statistics.
+    void addStatistics(StatisticsType type, StatisticsPtr stat);
+    /// Remove a single statistics object of `type` (and its description), if present.
+    void removeStatistics(StatisticsType type);
+
     UInt64 getNumRows() const { return rows; }
     /// Total NULL rows for a Nullable column when `Basic` statistics are present; 0 otherwise.
     /// Callers should consult `hasNullCount` first.

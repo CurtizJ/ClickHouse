@@ -1308,21 +1308,42 @@ static void finalizeMutatedPart(
         written_files.push_back(std::move(out_ttl));
     }
 
+    /// `statistics` carries the `Basic` statistics added implicitly for serialization of the rewritten
+    /// columns; the per-column `num_defaults` for serialization.json come from there. For versions before
+    /// WITHOUT_DATA every persisted column needs a count, so carry over the counts of the columns that were
+    /// not rewritten (their data is hardlinked) from the source part. The implicit statistics are removed
+    /// below before the statistics files are written.
     const auto & serialization_infos = new_data_part->getSerializationInfos();
+    const bool legacy_serialization = serialization_infos.getVersion() < MergeTreeSerializationInfoVersion::WITHOUT_DATA;
+    auto estimates = all_gathered_data.statistics.getEstimates();
+    if (legacy_serialization)
+    {
+        auto source_estimates = source_part->getEstimates();
+        for (const auto & [name, info] : serialization_infos)
+        {
+            if (estimates.contains(name))
+                continue;
+            if (auto it = source_estimates.find(name); it != source_estimates.end())
+                estimates.emplace(name, it->second);
+        }
+    }
+
     if (serialization_infos.needsPersistence())
     {
         auto out_serialization = new_data_part->getDataPartStorage().writeFile(IMergeTreeDataPart::SERIALIZATION_FILE_NAME, 4096, context->getWriteSettings());
         HashingWriteBuffer out_hashing(*out_serialization);
-        writeSerializationInfosJSON(out_hashing, serialization_infos, all_gathered_data.statistics_for_serializations);
+        writeSerializationInfosJSON(out_hashing, serialization_infos, estimates);
         out_hashing.finalize();
         new_data_part->checksums.files[IMergeTreeDataPart::SERIALIZATION_FILE_NAME].file_size = out_hashing.count();
         new_data_part->checksums.files[IMergeTreeDataPart::SERIALIZATION_FILE_NAME].file_hash = out_hashing.getHash();
         written_files.push_back(std::move(out_serialization));
     }
 
-    const auto & statistics = all_gathered_data.statistics;
-    new_data_part->setEstimates(statistics.getEstimates());
+    /// A reloaded legacy part exposes the serialization.json counts via getEstimates(); keep the in-memory
+    /// part consistent so a later vertical mutation can carry these counts forward.
+    new_data_part->setEstimates(estimates);
 
+    auto statistics = getStatisticsToPersist(all_gathered_data.statistics, all_gathered_data.implicit_serialization_statistics);
     if (!statistics.empty())
     {
         if (isFullPartStorage(new_data_part->getDataPartStorage()))
@@ -1695,6 +1716,9 @@ bool PartMergerWriter::mutateOriginalPartAndPrepareProjections()
         if (ctx->minmax_idx)
             ctx->minmax_idx->update(cur_block, ctx->minmax_idx_columns);
 
+        /// `statistics` also carries the `Basic` statistics added implicitly for serialization (to recompute
+        /// the per-column `num_defaults` for serialization.json); they are removed before the statistics files
+        /// are written (see `finalizeMutatedPart` / `MergedBlockOutputStream::finalizePartOnDisk`).
         if (!ctx->all_gathered_data.statistics.empty())
             ctx->all_gathered_data.statistics.buildIfExists(cur_block);
 
@@ -2231,6 +2255,15 @@ private:
             *ctx->source_part,
             ctx->metadata_snapshot);
 
+        /// For serialization-info versions older than WITHOUT_DATA, add implicit `Basic` statistics for
+        /// sparse-capable columns into the main statistics so the per-column `num_defaults` for
+        /// serialization.json is recomputed over the rewritten data; they are removed before the statistics
+        /// files are written (see `finalizeMutatedPart`).
+        const auto & serialization_infos = ctx->new_data_part->getSerializationInfos();
+        if (serialization_infos.getVersion() < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+            ctx->all_gathered_data.implicit_serialization_statistics = addImplicitSerializationStatistics(
+                ctx->all_gathered_data.statistics, ctx->new_data_part->getColumns(), serialization_infos.getSettings());
+
         ctx->out = std::make_shared<MergedBlockOutputStream>(
             ctx->new_data_part,
             ctx->data->getSettings(),
@@ -2519,6 +2552,15 @@ private:
                     if (new_part_columns_set.contains(col.name))
                         columns_for_writer.push_back(col);
             }
+
+            /// For serialization-info versions older than WITHOUT_DATA, add implicit `Basic` statistics for the
+            /// rewritten sparse-capable columns into the main statistics so their `num_defaults` is recomputed;
+            /// the counts of columns that are not rewritten (their data is hardlinked from the source) are
+            /// carried over in `finalizeMutatedPart`. The implicit statistics are removed before writing.
+            const auto & serialization_infos = ctx->new_data_part->getSerializationInfos();
+            if (serialization_infos.getVersion() < MergeTreeSerializationInfoVersion::WITHOUT_DATA)
+                ctx->all_gathered_data.implicit_serialization_statistics = addImplicitSerializationStatistics(
+                    ctx->all_gathered_data.statistics, columns_for_writer, serialization_infos.getSettings());
 
             ctx->out = std::make_shared<MergedColumnOnlyOutputStream>(
                 ctx->new_data_part,

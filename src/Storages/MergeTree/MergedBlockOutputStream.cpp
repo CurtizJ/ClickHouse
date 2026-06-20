@@ -367,17 +367,24 @@ MergedBlockOutputStream::WrittenFiles MergedBlockOutputStream::finalizePartOnDis
     }
 
     const auto & serialization_infos = new_part->getSerializationInfos();
+    /// For serialization-info versions before WITHOUT_DATA the per-column row/default counts are written to
+    /// serialization.json. They come from the `Basic` statistics (added implicitly for sparse-capable columns)
+    /// that are part of `gathered_data.statistics`; the estimates are taken before those implicit statistics
+    /// are removed for the statistics files. Keeping the in-memory part's estimates consistent with a reloaded
+    /// legacy part lets a later merge or vertical mutation carry these counts forward.
+    auto estimates = gathered_data.statistics.getEstimates();
+
     if (serialization_infos.needsPersistence())
     {
         write_hashed_file(IMergeTreeDataPart::SERIALIZATION_FILE_NAME, [&](auto & buffer)
         {
-            writeSerializationInfosJSON(buffer, serialization_infos, gathered_data.statistics_for_serializations);
+            writeSerializationInfosJSON(buffer, serialization_infos, estimates);
         });
     }
 
-    const auto & statistics = gathered_data.statistics;
-    new_part->setEstimates(statistics.getEstimates());
+    new_part->setEstimates(estimates);
 
+    auto statistics = getStatisticsToPersist(gathered_data.statistics, gathered_data.implicit_serialization_statistics);
     if (!statistics.empty())
     {
         if (isFullPartStorage(new_part->getDataPartStorage()))
