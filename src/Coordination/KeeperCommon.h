@@ -2,7 +2,9 @@
 
 #include <Common/Logger.h>
 
+#include <cstdint>
 #include <functional>
+#include <string>
 
 
 namespace Coordination
@@ -20,6 +22,9 @@ namespace DB
 
 class IDisk;
 using DiskPtr = std::shared_ptr<IDisk>;
+
+bool isLocalDisk(const IDisk & disk);
+
 class KeeperContext;
 using KeeperContextPtr = std::shared_ptr<KeeperContext>;
 
@@ -31,7 +36,8 @@ enum class KeeperDigestVersion : uint8_t
     V1 = 1,
     V2 = 2, // added system nodes that modify the digest on startup so digest from V0 is invalid
     V3 = 3, // fixed bug with casting, removed duplicate czxid usage
-    V4 = 4  // 0 is not a valid digest value
+    V4 = 4, // 0 is not a valid digest value
+    V5 = 5  // added TTL fields (destroy_time and ttl) to the node digest
 };
 
 struct KeeperDigest
@@ -40,11 +46,11 @@ struct KeeperDigest
     uint64_t value{0};
 };
 
-static constexpr auto KEEPER_CURRENT_DIGEST_VERSION = KeeperDigestVersion::V4;
+static constexpr auto KEEPER_CURRENT_DIGEST_VERSION = KeeperDigestVersion::V5;
 
 struct KeeperResponseForSession
 {
-    int64_t session_id;
+    int64_t session_id{};
     Coordination::ZooKeeperResponsePtr response;
     Coordination::ZooKeeperRequestPtr request = nullptr;
 };
@@ -53,11 +59,11 @@ using KeeperResponsesForSessions = std::vector<KeeperResponseForSession>;
 
 struct KeeperRequestForSession
 {
-    int64_t session_id;
+    int64_t session_id{};
     int64_t time{0};
     Coordination::ZooKeeperRequestPtr request;
     int64_t zxid{0};
-    std::optional<KeeperDigest> digest;
+    std::optional<KeeperDigest> digest {};
     int64_t log_idx{0};
     bool use_xid_64{false};
 };
@@ -73,5 +79,14 @@ void moveFileBetweenDisks(
     std::function<void()> before_file_remove_op,
     LoggerPtr logger,
     const KeeperContextPtr & keeper_context);
+
+/// Callback invoked by KeeperDispatcher to deliver responses to clients.
+/// Must be safe for concurrent invocation: setResponse (from responseThread) and
+/// finishSession (from dead session cleaner) may invoke copies of the same callback
+/// concurrently for the same session.
+/// Returns true if the response was retained in some kind of queue and KeeperDispatcher::onResponseDeallocated will be called for it later.
+/// It is valid to always return false - that just makes the queue bloat prevention less effective;
+/// if you do return true, you *must* call KeeperDispatcher::onResponseDeallocated later.
+using ZooKeeperResponseCallback = std::function<bool(const Coordination::ZooKeeperResponsePtr & response, Coordination::ZooKeeperRequestPtr request)>;
 
 }
