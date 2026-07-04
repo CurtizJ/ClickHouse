@@ -2398,25 +2398,48 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
         reader.read(0, condition.get(), granule, all_match ? nullptr : &ranges);
         auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
 
-        for (const auto & range : ranges)
+        /// The per-query checks in mayBeTrueOnGranule are monotone with respect to the row range:
+        /// if the condition cannot be true on a range, it cannot be true on any of its subranges.
+        /// So check the whole span of the requested ranges once to skip the per-mark loop when
+        /// the part cannot contain matches at all. The disjunction analysis needs per-mark partial
+        /// results, so do not short-circuit when it is enabled.
+        bool span_may_be_true = true;
+        const bool need_partial_disjunction_results = use_skip_indexes_for_disjunctions && key_condition_rpn_template;
+
+        if (!ranges.empty() && !need_partial_disjunction_results)
         {
-            for (size_t mark = range.begin; mark < range.end; ++mark)
+            size_t span_begin = part->index_granularity->getMarkStartingRow(ranges.front().begin);
+            size_t span_end = part->index_granularity->getMarkStartingRow(ranges.back().end);
+
+            if (span_begin < span_end)
             {
-                size_t row_begin = part->index_granularity->getMarkStartingRow(mark);
-                size_t row_end = part->index_granularity->getMarkStartingRow(mark + 1);
+                granule_text.setCurrentRange(RowsRange(span_begin, span_end - 1));
+                span_may_be_true = condition->mayBeTrueOnGranule(granule, nullptr);
+            }
+        }
 
-                if (row_begin == row_end)
-                    continue;
-
-                granule_text.setCurrentRange(RowsRange(row_begin, row_end - 1));
-                bool may_be_true = condition->mayBeTrueOnGranule(granule, create_update_partial_disjunction_result_fn(mark));
-
-                if (may_be_true)
+        if (span_may_be_true)
+        {
+            for (const auto & range : ranges)
+            {
+                for (size_t mark = range.begin; mark < range.end; ++mark)
                 {
-                    if (res.empty() || mark - res.back().end > min_marks_for_seek)
-                        res.push_back(MarkRange(mark, mark + 1));
-                    else
-                        res.back().end = mark + 1;
+                    size_t row_begin = part->index_granularity->getMarkStartingRow(mark);
+                    size_t row_end = part->index_granularity->getMarkStartingRow(mark + 1);
+
+                    if (row_begin == row_end)
+                        continue;
+
+                    granule_text.setCurrentRange(RowsRange(row_begin, row_end - 1));
+                    bool may_be_true = condition->mayBeTrueOnGranule(granule, create_update_partial_disjunction_result_fn(mark));
+
+                    if (may_be_true)
+                    {
+                        if (res.empty() || mark - res.back().end > min_marks_for_seek)
+                            res.push_back(MarkRange(mark, mark + 1));
+                        else
+                            res.back().end = mark + 1;
+                    }
                 }
             }
         }

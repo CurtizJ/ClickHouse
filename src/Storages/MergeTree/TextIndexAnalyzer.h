@@ -65,6 +65,16 @@ public:
     const absl::flat_hash_set<String> & getMissingTokens() const { return missing_tokens; }
     const QueryBuilder & getQueryBuilder(const TextSearchQuery & query) const;
 
+    /// Returns the query builder for the query at the given index in the flattened list
+    /// of the condition's RPN queries (see MergeTreeIndexConditionText::getRPNQueries).
+    /// The builders are resolved once in the constructor, so unlike getQueryBuilder
+    /// this does not hash the query. Used on the hot path of mayBeTrueOnGranule.
+    const QueryBuilder & getRPNQueryBuilder(size_t idx) const
+    {
+        chassert(idx < rpn_query_builders.size());
+        return *rpn_query_builders[idx];
+    }
+
     /// True if at least one active query still depends on this token.
     bool isTokenNeeded(std::string_view token) const;
     /// True if this token's posting list has already been added (embdded or read from disk).
@@ -105,7 +115,12 @@ private:
 
     TextSearchMode global_search_mode;
     /// One builder per parsed query, keyed by the query's stable hash.
+    /// No entries are inserted or erased after the constructor, so pointers
+    /// to the builders (see rpn_query_builders) stay valid.
     absl::flat_hash_map<UInt128, QueryBuilder> query_builders;
+    /// Builders of the condition's RPN queries in the RPN order, resolved once
+    /// to avoid a hash lookup per RPN element per granule in mayBeTrueOnGranule.
+    std::vector<const QueryBuilder *> rpn_query_builders;
     /// Active queries that still depend on a given token.
     absl::flat_hash_map<String, QueryHashes> queries_by_token;
     /// Pattern queries grouped by their compiled regex; static for the analyzer's lifetime.

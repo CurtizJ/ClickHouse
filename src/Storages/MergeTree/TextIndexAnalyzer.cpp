@@ -173,6 +173,14 @@ TextIndexAnalyzer::TextIndexAnalyzer(const MergeTreeIndexConditionText & conditi
         for (const auto & pattern : query->patterns)
             queries_by_pattern[&pattern].insert(hash);
     }
+
+    /// Resolve builders for the RPN queries once. The pointers stay valid because
+    /// no entries are inserted into or erased from query_builders after this point.
+    const auto & rpn_queries = condition_text.getRPNQueries();
+    rpn_query_builders.reserve(rpn_queries.size());
+
+    for (const auto & query : rpn_queries)
+        rpn_query_builders.push_back(&query_builders.at(query->getHash()));
 }
 
 const TextIndexAnalyzer::QueryBuilder & TextIndexAnalyzer::getQueryBuilder(const TextSearchQuery & query) const
@@ -347,7 +355,7 @@ void TextIndexAnalyzer::bypassPatternQueries()
 
     for (const auto & query_hash : all_pattern_queries)
     {
-        auto & query_builder = query_builders[query_hash];
+        auto & query_builder = query_builders.at(query_hash);
         query_builder.markBypassed();
 
         for (const auto & [query_token, _] : query_builder.tokens)
@@ -474,7 +482,7 @@ void TextIndexAnalyzer::processTokenOperation(std::string_view token, Operation 
 
     for (const auto & query_hash : token_queries)
     {
-        auto & query_builder = query_builders[query_hash];
+        auto & query_builder = query_builders.at(query_hash);
         if (query_builder.is_failed || query_builder.is_bypassed)
             continue;
 
@@ -507,6 +515,8 @@ static size_t estimateAbslFlatContainerBytes(const Container & c)
 size_t TextIndexAnalyzer::memoryUsageBytes() const
 {
     size_t result = sizeof(*this);
+
+    result += rpn_query_builders.capacity() * sizeof(const QueryBuilder *);
 
     /// query_builders: map<UInt128, QueryBuilder>, each QueryBuilder has tokens map and optional postings.
     result += estimateAbslFlatContainerBytes(query_builders);

@@ -103,6 +103,7 @@ public:
     bool hasSearchPatterns() const;
     const std::vector<String> & getAllSearchTokens() const { return all_search_tokens; }
     const std::unordered_map<UInt128, TextSearchQueryPtr> & getAllSearchQueries() const { return all_search_queries; }
+    const std::vector<TextSearchQueryPtr> & getRPNQueries() const { return rpn_flat_queries; }
     TextSearchMode getGlobalSearchMode() const { return global_search_mode; }
     const Block & getHeader() const { return header; }
 
@@ -147,6 +148,11 @@ private:
 
         Function function = FUNCTION_UNKNOWN;
         std::vector<TextSearchQueryPtr> text_search_queries;
+        /// Index of the first query of this element in the flattened list of
+        /// queries of all RPN elements (see getRPNQueries). Used to find the
+        /// query builders resolved per granule (see TextIndexAnalyzer) in O(1)
+        /// on the hot path of mayBeTrueOnGranule.
+        size_t queries_offset = 0;
     };
 
     using RPN = std::vector<RPNElement>;
@@ -195,6 +201,9 @@ private:
     std::vector<String> all_search_tokens;
     /// Search queries from all RPN elements
     std::unordered_map<UInt128, TextSearchQueryPtr> all_search_queries;
+    /// Search queries of all RPN elements flattened in the RPN order.
+    /// RPNElement::queries_offset points into this vector.
+    std::vector<TextSearchQueryPtr> rpn_flat_queries;
     /// Mapping from virtual column (optimized for direct read from text index) to search query.
     std::unordered_map<String, TextSearchQueryPtr> virtual_column_to_search_query;
     /// If global mode is All, then we can exit analysis earlier if any token is missing in granule.

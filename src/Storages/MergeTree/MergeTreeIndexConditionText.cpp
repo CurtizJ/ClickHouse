@@ -23,7 +23,9 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
+#include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Storages/MergeTree/TextIndexCache.h>
+#include <absl/container/inlined_vector.h>
 #include <DataTypes/DataTypeMapHelpers.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Columns/ColumnTuple.h>
@@ -179,12 +181,15 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
 
     NameSet all_search_tokens_set;
 
-    for (const auto & element : rpn)
+    for (auto & element : rpn)
     {
+        element.queries_offset = rpn_flat_queries.size();
+
         for (const auto & search_query : element.text_search_queries)
         {
             all_search_tokens_set.insert(search_query->tokens.begin(), search_query->tokens.end());
             all_search_queries[search_query->getHash()] = search_query;
+            rpn_flat_queries.push_back(search_query);
         }
 
         if (requiresReadingAllTokens(element))
@@ -357,14 +362,98 @@ bool MergeTreeIndexConditionText::alwaysUnknownOrTrue() const
          RPNElement::FUNCTION_HAS_ANY_ELEMENTS});
 }
 
+namespace
+{
+
+/// Returns whether a text search query may match some row in current_range,
+/// given the per-granule analysis state of the query (query_builder).
+/// This is a hot path: it is called for RPN atoms for every data granule (mark) of a part.
+///
+/// A query in `Any` mode folds postings by union, so the folded posting list is complete
+/// (and therefore usable for pruning) only when the postings of all tokens have been read.
+/// A query in `All` mode folds postings by intersection, so a partially folded posting
+/// list is a superset of the result and can be used for pruning right away. The caller
+/// distinguishes these cases with only_if_all_postings_read.
+bool queryMayBeTrueInRange(
+    const TextSearchQuery & query,
+    const TextIndexAnalyzer::QueryBuilder & query_builder,
+    const std::optional<RowsRange> & current_range,
+    bool only_if_all_postings_read)
+{
+    /// Failure dominates bypass — a proven-empty query stays empty even when pattern analysis is incomplete.
+    if (query_builder.is_failed)
+        return false;
+
+    /// Pattern bypass means analysis is incomplete, so conservatively return true.
+    if (query_builder.is_bypassed && !query.patterns.empty())
+        return true;
+
+    if (!current_range.has_value())
+        return true;
+
+    if (!query_builder.rows_range.has_value())
+        return false;
+
+    if (!query_builder.rows_range->intersectWith(*current_range))
+        return false;
+
+    bool check_postings = query_builder.postings.has_value()
+        && (!only_if_all_postings_read || !query_builder.needReadPostings());
+
+    /// An allocation-free check that the folded posting list has a value in the closed range of rows.
+    if (check_postings
+        && !roaring::api::roaring_bitmap_intersect_with_range(
+            &query_builder.postings->roaring, current_range->begin, static_cast<UInt64>(current_range->end) + 1))
+        return false;
+
+    return true;
+}
+
+bool hasAnyQueryTokensInRange(const TextSearchQuery & query, const TextIndexAnalyzer::QueryBuilder & query_builder, const std::optional<RowsRange> & current_range)
+{
+    if (query.tokens.empty())
+        return false;
+
+    return queryMayBeTrueInRange(query, query_builder, current_range, /*only_if_all_postings_read=*/ true);
+}
+
+bool hasAnyQueryPatternsInRange(const TextSearchQuery & query, const TextIndexAnalyzer::QueryBuilder & query_builder, const std::optional<RowsRange> & current_range)
+{
+    if (query.patterns.empty())
+        return false;
+
+    return queryMayBeTrueInRange(query, query_builder, current_range, /*only_if_all_postings_read=*/ true);
+}
+
+bool hasAllQueryTokensOrEmptyInRange(const TextSearchQuery & query, const TextIndexAnalyzer::QueryBuilder & query_builder, const std::optional<RowsRange> & current_range)
+{
+    if (query.tokens.empty())
+        return true;
+
+    return queryMayBeTrueInRange(query, query_builder, current_range, /*only_if_all_postings_read=*/ false);
+}
+
+bool hasAllQueryTokensInRange(const TextSearchQuery & query, const TextIndexAnalyzer::QueryBuilder & query_builder, const std::optional<RowsRange> & current_range)
+{
+    if (query.tokens.empty())
+        return false;
+
+    return hasAllQueryTokensOrEmptyInRange(query, query_builder, current_range);
+}
+
+}
+
 bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr idx_granule, const UpdatePartialDisjunctionResultFn & update_partial_disjunction_result_fn) const
 {
     const auto * granule = typeid_cast<const MergeTreeIndexGranuleText *>(idx_granule.get());
     if (!granule)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index condition got a granule with the wrong type.");
 
+    const auto & analyzer = granule->getAnalyzer();
+    const auto & current_range = granule->getCurrentRange();
+
     /// Check like in KeyCondition.
-    std::vector<BoolMask> rpn_stack;
+    absl::InlinedVector<BoolMask, 8> rpn_stack;
     size_t element_idx = 0;
     for (const auto & element : rpn)
     {
@@ -376,7 +465,8 @@ bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr id
         {
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
-            bool exists_in_granule = granule->hasAnyQueryPatterns(*text_search_query);
+            const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset);
+            bool exists_in_granule = hasAnyQueryPatternsInRange(*text_search_query, query_builder, current_range);
             rpn_stack.emplace_back(exists_in_granule, true);
 
         }
@@ -384,14 +474,16 @@ bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr id
         {
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
-            bool exists_in_granule = granule->hasAnyQueryTokens(*text_search_query);
+            const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset);
+            bool exists_in_granule = hasAnyQueryTokensInRange(*text_search_query, query_builder, current_range);
             rpn_stack.emplace_back(exists_in_granule, true);
         }
         else if (element.function == RPNElement::FUNCTION_HAS_ALL_TOKENS)
         {
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
-            bool exists_in_granule = granule->hasAllQueryTokens(*text_search_query);
+            const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset);
+            bool exists_in_granule = hasAllQueryTokensInRange(*text_search_query, query_builder, current_range);
             rpn_stack.emplace_back(exists_in_granule, true);
         }
         else if (element.function == RPNElement::FUNCTION_HAS_PHRASE)
@@ -400,14 +492,16 @@ bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr id
             /// Actual positional phrase checking is done at the row level via position data.
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
-            bool exists_in_granule = granule->hasAllQueryTokens(*text_search_query);
+            const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset);
+            bool exists_in_granule = hasAllQueryTokensInRange(*text_search_query, query_builder, current_range);
             rpn_stack.emplace_back(exists_in_granule, true);
         }
         else if (element.function == RPNElement::FUNCTION_EQUALS)
         {
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
-            bool exists_in_granule = granule->hasAllQueryTokensOrEmpty(*text_search_query);
+            const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset);
+            bool exists_in_granule = hasAllQueryTokensOrEmptyInRange(*text_search_query, query_builder, current_range);
             rpn_stack.emplace_back(exists_in_granule, true);
         }
         else if (element.function == RPNElement::FUNCTION_HAS_ANY_ELEMENTS)
@@ -415,9 +509,12 @@ bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr id
             /// OR across per-element queries.
             bool exists_in_granule = false;
 
-            for (const auto & text_search_query : element.text_search_queries)
+            for (size_t i = 0; i < element.text_search_queries.size(); ++i)
             {
-                if (granule->hasAllQueryTokensOrEmpty(*text_search_query))
+                const auto & text_search_query = element.text_search_queries[i];
+                const auto & query_builder = analyzer.getRPNQueryBuilder(element.queries_offset + i);
+
+                if (hasAllQueryTokensOrEmptyInRange(*text_search_query, query_builder, current_range))
                 {
                     exists_in_granule = true;
                     break;
