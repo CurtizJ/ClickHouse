@@ -127,6 +127,7 @@
     M(TextIndexPositionsDecodeMicroseconds, "Total time spent decoding text index position lists (.pos) for phrase search.", ValueType::Microseconds) \
     M(TextIndexPhraseMatchMicroseconds, "Total time spent in the roaringish phrase-match intersection.", ValueType::Microseconds) \
     M(TextIndexReadPostings, "Number of times a posting list has been read from the text index.", ValueType::Number) \
+    M(TextIndexPostingsBlocksSkipped, "Number of packed blocks of text index posting lists that were not decompressed because they do not intersect the readable row ranges.", ValueType::Number) \
     M(TextIndexUsedEmbeddedPostings, "Number of times a posting list embedded in the dictionary has been used.", ValueType::Number) \
     M(TextIndexUseHint, "Number of index granules where a direct reading from the text index was added as hint and was used.", ValueType::Number) \
     M(TextIndexDiscardHint, "Number of index granules where a direct reading from the text index was added as hint and was discarded due to low selectivity.", ValueType::Number) \

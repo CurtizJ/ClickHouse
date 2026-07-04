@@ -300,6 +300,42 @@ bool TextIndexAnalyzer::hasReadPostings(std::string_view token) const
     return tokens_with_postings.contains(token);
 }
 
+std::optional<RowsRange> TextIndexAnalyzer::getPostingsClipRange(std::string_view token) const
+{
+    std::optional<RowsRange> clip_range;
+
+    if (readable_rows)
+        clip_range = readable_rows->coarseRange();
+
+    /// If the token is used by exactly one query with `All` mode, any row matching the query
+    /// lies within the intersection of the row ranges of all its tokens (rows_range),
+    /// so the token's postings outside of it cannot affect the result.
+    auto it = queries_by_token.find(token);
+    if (it == queries_by_token.end() || it->second.size() != 1)
+        return clip_range;
+
+    auto query_it = query_builders.find(*it->second.begin());
+    if (query_it == query_builders.end())
+        return clip_range;
+
+    const auto & query_builder = query_it->second;
+
+    if (query_builder.is_failed || query_builder.is_bypassed
+        || query_builder.query->search_mode != TextSearchMode::All
+        || !query_builder.rows_range)
+        return clip_range;
+
+    if (!clip_range)
+        return query_builder.rows_range;
+
+    /// rows_range is built from token ranges already clipped to the readable rows,
+    /// so the intersection cannot be empty. If it is (no row can match at all),
+    /// any clip range is valid, so keep the readable rows cover.
+    auto intersection = clip_range->intersectWith(*query_builder.rows_range);
+    chassert(intersection);
+    return intersection ? intersection : clip_range;
+}
+
 void TextIndexAnalyzer::bypassPatternQueries()
 {
     QueryHashes all_pattern_queries;

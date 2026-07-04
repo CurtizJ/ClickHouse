@@ -1,8 +1,14 @@
 #include <gtest/gtest.h>
 #include <config.h>
 #include <Storages/MergeTree/BitpackingBlockCodec.h>
+#include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <IO/ReadBufferFromMemory.h>
+#include <IO/WriteBufferFromString.h>
 
 #include <cstddef>
+#include <limits>
+#include <optional>
 #include <random>
 #include <span>
 #include <vector>
@@ -567,7 +573,7 @@ TEST(PostingListCodecTest, MixedRandomMonotonicLarger)
         std::uniform_int_distribution<uint32_t> dist(0, m);
         for (auto &x: v) x = dist(rng);
     }
-    sort(v.begin(), v.end());
+    std::sort(v.begin(), v.end());
     return v;
 }
 
@@ -815,4 +821,180 @@ TEST(PostingListCodecTest, PortableEncodeDecodedBySSEAndSSEEncodeDecodedByPortab
 #else
     GTEST_SKIP() << "SSE not available on this platform.";
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Clipped decoding of a posting list (PostingListCodecBitpacking::decode with
+// a clip range): only the packed blocks intersecting the range are decoded and
+// the result is trimmed exactly to the range.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+/// Encode sorted `row_ids` with the bitpacking posting list codec and return the serialized bytes.
+/// `info` receives per-segment offsets and row ranges.
+std::string encodePostingList(const std::vector<uint32_t> & row_ids, DB::TokenPostingsInfo & info, size_t max_rowids_in_segment)
+{
+    roaring::Roaring postings;
+    postings.addMany(row_ids.size(), row_ids.data());
+
+    DB::WriteBufferFromOwnString out;
+    DB::PostingListCodecBitpacking codec;
+    codec.encode(postings, max_rowids_in_segment, info, out);
+    out.finalize();
+    return out.str();
+}
+
+/// Decode one segment starting at `offset`, optionally clipped to `clip`.
+std::vector<uint32_t> decodeSegment(const std::string & data, size_t offset, const std::optional<DB::RowsRange> & clip)
+{
+    DB::ReadBufferFromMemory in(data.data() + offset, data.size() - offset);
+    roaring::Roaring postings;
+    DB::PostingListCodecBitpacking codec;
+    codec.decode(in, postings, clip ? &*clip : nullptr);
+
+    std::vector<uint32_t> result(postings.cardinality());
+    postings.toUint32Array(result.data());
+    return result;
+}
+
+std::vector<uint32_t> referenceClip(const std::vector<uint32_t> & row_ids, const DB::RowsRange & clip)
+{
+    std::vector<uint32_t> result;
+    for (auto row_id : row_ids)
+    {
+        if (row_id >= clip.begin && row_id <= clip.end)
+            result.push_back(row_id);
+    }
+    return result;
+}
+
+std::vector<uint32_t> generateSortedRowIds(size_t count, uint32_t max_gap, size_t seed)
+{
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
+    std::uniform_int_distribution<uint32_t> gap(1, max_gap);
+
+    std::vector<uint32_t> row_ids(count);
+    uint32_t current = gap(rng);
+    for (auto & row_id : row_ids)
+    {
+        row_id = current;
+        current += gap(rng);
+    }
+    return row_ids;
+}
+
+}
+
+TEST(PostingListCodecClippedDecode, SingleSegment)
+{
+    /// 1000 row ids: 7 full packed blocks + a tail block.
+    const auto row_ids = generateSortedRowIds(1000, 20, /*seed=*/42);
+    DB::TokenPostingsInfo info;
+    const auto data = encodePostingList(row_ids, info, 1 << 20);
+    ASSERT_EQ(info.offsets.size(), 1u);
+
+    /// No clip range: the full posting list is decoded.
+    ASSERT_EQ(decodeSegment(data, 0, std::nullopt), row_ids);
+
+    const uint32_t first = row_ids.front();
+    const uint32_t last = row_ids.back();
+
+    const std::vector<DB::RowsRange> clips =
+    {
+        {first, last},                        /// full span
+        {0, first - 1},                       /// before the first row
+        {last + 1, last + 1000},              /// after the last row
+        {0, std::numeric_limits<uint32_t>::max()},  /// covers everything
+        {row_ids[10], row_ids[10]},           /// single present row
+        {row_ids[0], row_ids[127]},           /// exactly the first block
+        {row_ids[128], row_ids[255]},         /// exactly the second block
+        {row_ids[100], row_ids[300]},         /// crosses block boundaries
+        {row_ids[900], last},                 /// includes the tail block
+        {row_ids[999], last},                 /// only the last row
+        {first + 1, last - 1},                /// trims boundary rows
+    };
+
+    for (const auto & clip : clips)
+    {
+        EXPECT_EQ(decodeSegment(data, 0, clip), referenceClip(row_ids, clip))
+            << "clip range [" << clip.begin << ", " << clip.end << "]";
+    }
+
+    /// Random clip ranges.
+    std::mt19937 rng(123);
+    std::uniform_int_distribution<uint32_t> dist(0, last + 100);
+    for (size_t i = 0; i < 500; ++i)
+    {
+        uint32_t begin = dist(rng);
+        uint32_t end = dist(rng);
+        if (begin > end)
+            std::swap(begin, end);
+
+        DB::RowsRange clip(begin, end);
+        ASSERT_EQ(decodeSegment(data, 0, clip), referenceClip(row_ids, clip))
+            << "clip range [" << clip.begin << ", " << clip.end << "]";
+    }
+}
+
+TEST(PostingListCodecClippedDecode, TailOnlySegment)
+{
+    /// Fewer row ids than BLOCK_SIZE: a single (tail) packed block.
+    const auto row_ids = generateSortedRowIds(100, 50, /*seed=*/7);
+    DB::TokenPostingsInfo info;
+    const auto data = encodePostingList(row_ids, info, 1 << 20);
+    ASSERT_EQ(info.offsets.size(), 1u);
+
+    std::mt19937 rng(321);
+    std::uniform_int_distribution<uint32_t> dist(0, row_ids.back() + 100);
+    for (size_t i = 0; i < 200; ++i)
+    {
+        uint32_t begin = dist(rng);
+        uint32_t end = dist(rng);
+        if (begin > end)
+            std::swap(begin, end);
+
+        DB::RowsRange clip(begin, end);
+        ASSERT_EQ(decodeSegment(data, 0, clip), referenceClip(row_ids, clip))
+            << "clip range [" << clip.begin << ", " << clip.end << "]";
+    }
+}
+
+TEST(PostingListCodecClippedDecode, MultipleSegments)
+{
+    /// Small segments: 1000 row ids split into segments of 256 (BLOCK_SIZE-aligned).
+    const auto row_ids = generateSortedRowIds(1000, 20, /*seed=*/99);
+    DB::TokenPostingsInfo info;
+    const auto data = encodePostingList(row_ids, info, 256);
+    ASSERT_EQ(info.offsets.size(), 4u);
+    ASSERT_EQ(info.ranges.size(), 4u);
+
+    std::mt19937 rng(555);
+
+    for (size_t segment_idx = 0; segment_idx < info.offsets.size(); ++segment_idx)
+    {
+        const size_t segment_begin = segment_idx * 256;
+        const size_t segment_end = std::min<size_t>(segment_begin + 256, row_ids.size());
+        const std::vector<uint32_t> segment_rows(row_ids.begin() + segment_begin, row_ids.begin() + segment_end);
+
+        const auto & segment_range = info.ranges[segment_idx];
+        ASSERT_EQ(segment_range.begin, segment_rows.front());
+        ASSERT_EQ(segment_range.end, segment_rows.back());
+
+        ASSERT_EQ(decodeSegment(data, info.offsets[segment_idx], std::nullopt), segment_rows);
+
+        std::uniform_int_distribution<uint32_t> dist(0, row_ids.back() + 100);
+        for (size_t i = 0; i < 100; ++i)
+        {
+            uint32_t begin = dist(rng);
+            uint32_t end = dist(rng);
+            if (begin > end)
+                std::swap(begin, end);
+
+            DB::RowsRange clip(begin, end);
+            ASSERT_EQ(decodeSegment(data, info.offsets[segment_idx], clip), referenceClip(segment_rows, clip))
+                << "segment " << segment_idx << ", clip range [" << clip.begin << ", " << clip.end << "]";
+        }
+    }
 }

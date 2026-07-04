@@ -183,7 +183,10 @@ struct PostingsSerialization
     void serialize(PostingListBuilder & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
     void serialize(const PostingList & postings, TokenPostingsInfo & info, size_t posting_list_block_size, WriteBuffer & ostr);
     void serialize(const roaring::api::roaring_bitmap_t & postings, UInt64 header, WriteBuffer & ostr);
-    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
+    /// If `clip_range` is set and the posting list is compressed with a per-block index
+    /// (HasBlockIndex flag), only the packed blocks intersecting the range are decompressed
+    /// and the returned posting list is clipped to the range.
+    PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, const RowsRange * clip_range = nullptr);
     const IPostingListCodec * getPostingListCodec() const { return posting_list_codec.get(); }
 
 private:
@@ -360,13 +363,17 @@ public:
     IPostingListCodec::Type getPostingsCodecType() const { return postings_codec_type; }
     MergeTreeIndexVersion getSerializationVersion() const { return serialization_version; }
 
+    /// If `clip_range` is set, only the rows within the range are guaranteed to be decoded
+    /// (see PostingsSerialization::deserialize); a partially decoded posting list is cached
+    /// under a separate key that includes the clip bounds.
     static PostingListPtr readPostingsBlock(
         MergeTreeIndexReaderStream & stream,
         MergeTreeIndexDeserializationState & state,
         const TokenPostingsInfo & token_info,
         size_t block_idx,
         PostingsSerialization & postings_serialization,
-        const String & index_id_for_caches);
+        const String & index_id_for_caches,
+        const RowsRange * clip_range = nullptr);
 
 private:
     bool hasAnyTokensImpl(const TextSearchQuery & query) const;

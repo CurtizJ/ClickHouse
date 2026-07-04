@@ -18,6 +18,8 @@ public:
         explicit ReadableRows(std::vector<RowsRange> ranges_);
         std::optional<RowsRange> clipRowsRange(const RowsRange & rows_range) const;
         PostingList clipPostings(const PostingList & postings);
+        /// Coarse single-interval cover of all readable ranges.
+        RowsRange coarseRange() const { return {ranges.front().begin, ranges.back().end}; }
         size_t getSizeInBytes() const;
 
     private:
@@ -67,6 +69,9 @@ public:
     bool isTokenNeeded(std::string_view token) const;
     /// True if this token's posting list has already been added (embdded or read from disk).
     bool hasReadPostings(std::string_view token) const;
+    /// Returns a coarse range of rows outside of which the token's postings cannot affect
+    /// the result of any query, so decoding of the posting list may be clipped to it.
+    std::optional<RowsRange> getPostingsClipRange(std::string_view token) const;
 
     void addMissingToken(std::string_view token);
     void addTokenInfo(std::string_view token, TokenPostingsInfoPtr token_info);

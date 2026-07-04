@@ -199,7 +199,7 @@ void PostingsSerialization::serialize(PostingListBuilder & postings, TokenPostin
     }
 }
 
-PostingListPtr PostingsSerialization::deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality)
+PostingListPtr PostingsSerialization::deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality, const RowsRange * clip_range)
 {
     if (header & IsCompressed)
     {
@@ -226,7 +226,8 @@ PostingListPtr PostingsSerialization::deserialize(ReadBuffer & istr, UInt64 head
         }
 
         auto postings = std::make_shared<PostingList>();
-        posting_list_codec->decode(istr, *postings);
+        /// Clipped decoding needs the per-block Index Section after the segment payload.
+        posting_list_codec->decode(istr, *postings, (header & HasBlockIndex) ? clip_range : nullptr);
         return postings;
     }
     else if (header & RawPostings)
@@ -691,20 +692,43 @@ PostingListPtr MergeTreeIndexGranuleText::readPostingsBlock(
     const TokenPostingsInfo & token_info,
     size_t block_idx,
     PostingsSerialization & postings_serialization,
-    const String & index_id_for_caches)
+    const String & index_id_for_caches,
+    const RowsRange * clip_range)
 {
     auto * data_buffer = stream.getDataBuffer();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
+
+    /// Clipping requires the per-block Index Section and pays off only when the clip range
+    /// covers the segment partially. When it covers the whole segment, decode it fully under
+    /// the range-independent cache key, so the entry is shared with unclipped reads.
+    std::optional<RowsRange> effective_clip;
+    if (clip_range && (token_info.header & PostingsSerialization::Flags::HasBlockIndex))
+    {
+        const auto & segment_range = token_info.ranges[block_idx];
+        if (!(clip_range->begin <= segment_range.begin && segment_range.end <= clip_range->end))
+        {
+            auto intersection = clip_range->intersectWith(segment_range);
+            if (!intersection)
+                return std::make_shared<PostingList>();
+
+            effective_clip = *intersection;
+        }
+    }
 
     const auto load_postings = [&]
     {
         ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
         stream.seekToMark({token_info.offsets[block_idx], 0});
-        auto postings = postings_serialization.deserialize(*data_buffer, token_info.header, token_info.cardinality);
+        auto postings = postings_serialization.deserialize(
+            *data_buffer, token_info.header, token_info.cardinality, effective_clip ? &*effective_clip : nullptr);
         return std::make_shared<TextIndexPostingsCacheCell>(std::move(postings));
     };
 
-    auto hash = TextIndexPostingsCache::hash(index_id_for_caches, token_info.offsets[block_idx], static_cast<UInt8>(TextIndexPostingsCacheKind::Roaring));
+    /// A clipped posting list is partial, so it must not be cached under the same key as the full one.
+    auto hash = effective_clip
+        ? TextIndexPostingsCache::hash(index_id_for_caches, token_info.offsets[block_idx], static_cast<UInt8>(TextIndexPostingsCacheKind::Roaring), effective_clip->begin, effective_clip->end)
+        : TextIndexPostingsCache::hash(index_id_for_caches, token_info.offsets[block_idx], static_cast<UInt8>(TextIndexPostingsCacheKind::Roaring));
+
     auto cell = condition_text.postingsCache()->getOrSet(hash, load_postings);
     return std::get<PostingListPtr>(cell->value);
 }
@@ -722,7 +746,10 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
     {
         if (token_info->offsets.size() == 1 && analyzer->isTokenNeeded(token) && !analyzer->hasReadPostings(token))
         {
-            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+            /// Clip the decoding to the rows that can affect the result of the queries,
+            /// so only the packed blocks intersecting them are decompressed.
+            auto clip_range = analyzer->getPostingsClipRange(token);
+            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches, clip_range ? &*clip_range : nullptr);
             analyzer->addPostings(token, std::move(block));
         }
 

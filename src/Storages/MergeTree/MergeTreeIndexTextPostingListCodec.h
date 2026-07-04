@@ -9,6 +9,7 @@
 namespace DB
 {
 struct TokenPostingsInfo;
+struct RowsRange;
 class WriteBuffer;
 class ReadBuffer;
 using PostingList = roaring::Roaring;
@@ -141,7 +142,11 @@ public:
     ///
     /// Decompression restores delta values and then performs an inclusive scan
     /// to reconstruct absolute row ids.
-    void decode(ReadBuffer & in, PostingList & postings);
+    ///
+    /// If `clip_range` is set, the segment must be followed by a per-block Index Section
+    /// (see the HasBlockIndex flag) and only the packed blocks intersecting the range
+    /// are decompressed (see decodeClipped).
+    void decode(ReadBuffer & in, PostingList & postings, const RowsRange * clip_range = nullptr);
 
 private:
     void reset()
@@ -198,6 +203,15 @@ private:
     /// - Updates prev_row_id to the last decoded row id
     static void decodeBlock(std::span<const std::byte> & in, size_t count, uint32_t & prev_row_id, std::vector<uint32_t> & current_segment);
 
+    /// Decode only the packed blocks of one segment that intersect `clip_range`.
+    ///
+    /// Reads the per-block Index Section that follows the segment payload in `in`
+    /// (see serializeTo), finds the contiguous run of blocks intersecting the range
+    /// using the per-block last row ids, and decompresses only that run from `payload`.
+    /// Row ids outside `clip_range` are trimmed from the boundary blocks, so the
+    /// result contains exactly the segment's row ids within `clip_range`.
+    void decodeClipped(ReadBuffer & in, const Header & header, const RowsRange & clip_range, std::span<const std::byte> payload, PostingList & postings);
+
     /// All segments
     std::string compressed_data;
     /// Last encoded/decoded row id
@@ -234,7 +248,7 @@ public:
     PostingListCodecBitpacking() : IPostingListCodec(Type::Bitpacking) {}
 
     void encode(const PostingList & postings, size_t max_rowids_in_segment, TokenPostingsInfo & info, WriteBuffer & out) const override;
-    void decode(ReadBuffer & in, PostingList & postings) const override;
+    void decode(ReadBuffer & in, PostingList & postings, const RowsRange * clip_range) const override;
 };
 
 /// A posting list codec that doesn't compress (no-op).
@@ -246,7 +260,7 @@ public:
     PostingListCodecNone() : IPostingListCodec(Type::None) {}
 
     void encode(const PostingList &, size_t, TokenPostingsInfo &, WriteBuffer &) const override {}
-    void decode(ReadBuffer &, PostingList &) const override {}
+    void decode(ReadBuffer &, PostingList &, const RowsRange *) const override {}
 };
 
 }

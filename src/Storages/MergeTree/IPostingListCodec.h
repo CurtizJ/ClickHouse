@@ -11,6 +11,7 @@ namespace DB
 {
 
 struct TokenPostingsInfo;
+struct RowsRange;
 class ReadBuffer;
 class WriteBuffer;
 using PostingList = roaring::Roaring;
@@ -41,7 +42,11 @@ public:
     virtual void encode(const PostingList & postings, size_t posting_list_block_size, TokenPostingsInfo & info, WriteBuffer & out) const = 0;
 
     /// Reads an encoded posting list, decodes it, and returns a posting list.
-    virtual void decode(ReadBuffer & in, PostingList & postings) const = 0;
+    /// If `clip_range` is set, the segment must have a per-block Index Section
+    /// (see the HasBlockIndex flag) and only the packed blocks intersecting the
+    /// range are decompressed. The result is guaranteed to contain all row ids
+    /// within `clip_range` and no row ids outside of it.
+    virtual void decode(ReadBuffer & in, PostingList & postings, const RowsRange * clip_range = nullptr) const = 0;
 private:
     Type type{};
 };
