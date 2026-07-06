@@ -357,11 +357,10 @@ ChunkAndProgress MergeTreeSelectProcessor::buildVirtualRowFromIndex(
         : read_mark_ranges.back().end;
 
     size_t num_pk_columns = pk_block_header.columns();
-    if (index->size() < num_pk_columns)
+    if (index->getNumColumns() < num_pk_columns)
         return {};
 
-    bool has_value = std::ranges::all_of(*index, [&](const auto & col) { return col->size() > next_mark; });
-    if (!has_value)
+    if (index->getNumRows() <= next_mark)
         return {};
 
     ColumnsWithTypeAndName pk_columns;
@@ -370,7 +369,7 @@ ChunkAndProgress MergeTreeSelectProcessor::buildVirtualRowFromIndex(
     {
         const auto & header_col = pk_block_header.getByPosition(j);
         auto column = header_col.column->cloneEmpty();
-        column->insert((*(*index)[j])[next_mark]);
+        column->insert(index->get(j, next_mark));
         pk_columns.push_back({std::move(column), header_col.type, header_col.name});
     }
     Block pk_block(std::move(pk_columns));

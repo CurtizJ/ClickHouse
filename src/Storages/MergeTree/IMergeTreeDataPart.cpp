@@ -580,8 +580,16 @@ void IMergeTreeDataPart::setIndex(Columns index_columns)
     if (index)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "The index of data part can be set only once");
 
-    optimizeIndexColumns(index_granularity->getMarksCount(), index_columns);
-    index = std::make_shared<Index>(std::move(index_columns));
+    index = optimizeIndexColumns(index_granularity->getMarksCount(), std::move(index_columns));
+}
+
+void IMergeTreeDataPart::setIndex(IndexPtr new_index)
+{
+    std::scoped_lock lock(index_mutex);
+    if (index)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "The index of data part can be set only once");
+
+    index = std::move(new_index);
 }
 
 void IMergeTreeDataPart::unloadIndex()
@@ -995,25 +1003,13 @@ void IMergeTreeDataPart::removeIfNeeded()
 UInt64 IMergeTreeDataPart::getIndexSizeInBytes() const
 {
     std::scoped_lock lock(index_mutex);
-    if (!index)
-        return 0;
-
-    UInt64 res = 0;
-    for (const auto & column : *index)
-        res += column->byteSize();
-    return res;
+    return index ? index->bytes() : 0;
 }
 
 UInt64 IMergeTreeDataPart::getIndexSizeInAllocatedBytes() const
 {
     std::scoped_lock lock(index_mutex);
-    if (!index)
-        return 0;
-
-    UInt64 res = 0;
-    for (const auto & column : *index)
-        res += column->allocatedBytes();
-    return res;
+    return index ? index->allocatedBytes() : 0;
 }
 
 UInt64 IMergeTreeDataPart::getIndexGranularityBytes() const
@@ -1443,19 +1439,18 @@ void IMergeTreeDataPart::loadIndexGranularity()
 }
 
 
-template <typename Columns>
-void IMergeTreeDataPart::optimizeIndexColumns(size_t marks_count, Columns & index_columns) const
+std::shared_ptr<IMergeTreeDataPart::Index> IMergeTreeDataPart::optimizeIndexColumns(size_t marks_count, Columns index_columns) const
 {
     if (marks_count == 0)
     {
         chassert(isEmpty());
-        return;
+        return std::make_shared<Index>(std::move(index_columns), /*try_compress=*/ false);
     }
 
     /// Do not optimize index for patch parts because patch parts
-    /// use manual index analysis which requires all index columns.
+    /// use manual index analysis which requires all raw index columns.
     if (info.isPatch())
-        return;
+        return std::make_shared<Index>(std::move(index_columns), /*try_compress=*/ false);
 
     size_t key_size = index_columns.size();
     Float64 ratio_to_drop_suffix_columns = static_cast<double>((*storage.getSettings())[MergeTreeSetting::primary_key_ratio_of_unique_prefix_values_to_skip_suffix_columns]);
@@ -1482,6 +1477,8 @@ void IMergeTreeDataPart::optimizeIndexColumns(size_t marks_count, Columns & inde
 
         LOG_TEST(storage.log, "Loaded primary key index for part {}, {} columns are kept in memory", name, key_size);
     }
+
+    return std::make_shared<Index>(std::move(index_columns), /*try_compress=*/ true);
 }
 
 std::shared_ptr<IMergeTreeDataPart::Index> IMergeTreeDataPart::loadIndex() const
@@ -1530,14 +1527,10 @@ std::shared_ptr<IMergeTreeDataPart::Index> IMergeTreeDataPart::loadIndex() const
             key_serializations[j]->deserializeBinary(*loaded_index[j], *index_file, format_settings);
     }
 
-    optimizeIndexColumns(marks_count, loaded_index);
-    size_t total_bytes = 0;
-
     for (const auto & column : loaded_index)
     {
         column->shrinkToFit();
         column->protect();
-        total_bytes += column->byteSize();
 
         if (column->size() != marks_count)
             throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA, "Cannot read all data from index file {}(expected size: "
@@ -1547,11 +1540,14 @@ std::shared_ptr<IMergeTreeDataPart::Index> IMergeTreeDataPart::loadIndex() const
     if (!index_file->eof())
         throw Exception(ErrorCodes::EXPECTED_END_OF_FILE, "Index file {} is unexpectedly long", index_path);
 
+    Columns index_columns(std::make_move_iterator(loaded_index.begin()), std::make_move_iterator(loaded_index.end()));
+    auto res = optimizeIndexColumns(marks_count, std::move(index_columns));
+
     ProfileEvents::increment(ProfileEvents::LoadedPrimaryIndexFiles);
     ProfileEvents::increment(ProfileEvents::LoadedPrimaryIndexRows, marks_count);
-    ProfileEvents::increment(ProfileEvents::LoadedPrimaryIndexBytes, total_bytes);
+    ProfileEvents::increment(ProfileEvents::LoadedPrimaryIndexBytes, res->bytes());
 
-    return std::make_shared<Index>(std::make_move_iterator(loaded_index.begin()), std::make_move_iterator(loaded_index.end()));
+    return res;
 }
 
 NameSet IMergeTreeDataPart::getFileNamesWithoutChecksums() const

@@ -2,7 +2,7 @@
 #include <Common/CacheBase.h>
 #include <Common/ProfileEvents.h>
 #include <Common/HashTable/Hash.h>
-#include <Columns/IColumn_fwd.h>
+#include <Storages/MergeTree/MergeTreePrimaryKey.h>
 
 namespace ProfileEvents
 {
@@ -13,7 +13,7 @@ namespace ProfileEvents
 namespace DB
 {
 
-using PrimaryIndex = std::vector<ColumnPtr>;
+using PrimaryIndex = PrimaryKey;
 
 /// Estimate of number of bytes in cache for primary index.
 struct PrimaryIndexWeightFunction

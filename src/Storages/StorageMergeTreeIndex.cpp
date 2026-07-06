@@ -104,9 +104,9 @@ protected:
 
                 /// Some of the columns from suffix of primary index may be not loaded
                 /// according to setting 'primary_key_ratio_of_unique_prefix_values_to_skip_suffix_columns'.
-                if (index_position < index_ptr->size())
+                if (index_position < index_ptr->getNumColumns())
                 {
-                    result_columns[pos] = index_ptr->at(index_position);
+                    result_columns[pos] = index_ptr->getFullColumn(index_position, column_type);
                 }
                 else
                 {

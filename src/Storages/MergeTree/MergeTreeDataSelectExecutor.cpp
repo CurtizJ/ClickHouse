@@ -1683,7 +1683,6 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
 
     const auto & primary_key = metadata_snapshot->getPrimaryKey();
     const auto & sorting_key = metadata_snapshot->getSortingKey();
-    auto index_columns = std::make_shared<ColumnsWithTypeAndName>();
     std::vector<bool> reverse_flags;
 
     const auto index = part->getIndex();
@@ -1691,6 +1690,18 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
         = settings[Setting::use_lightweight_primary_key_index_analysis];
 
     size_t num_key_columns = 0;
+
+    /// Number of loaded columns of the primary key. Suffix columns of the primary key
+    /// may be not loaded in memory (see IMergeTreeDataPart::optimizeIndexColumns).
+    const size_t num_loaded_key_columns = index->getNumColumns();
+
+    /// If the key condition has chains of monotonic functions, index columns are materialized
+    /// into a block, and FieldRef with a reference to the block allows to cache results of
+    /// functions applied to whole index columns (see applyFunction in KeyCondition.cpp).
+    /// Otherwise, passing explicit fields extracted from the index (which may be compressed
+    /// in memory) to FieldRef allows to optimize ranges and shows better performance.
+    const bool need_index_block = key_condition.hasMonotonicFunctionsChain();
+    auto index_columns = std::make_shared<ColumnsWithTypeAndName>();
 
     /// Non-sparse representation that includes all columns whether Filter needs or not
     DataTypes key_types;
@@ -1712,17 +1723,14 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
         /// There is no need to process later key columns
         const size_t used_key_prefix_size = key_condition.getUsedKeyPrefixSize();
 
-        /// If earlier columns have high cardinality, then later columns may not be loaded
-        const size_t num_index_columns_loaded = index->size();
-
         /// Do not process more columns than needed
-        num_key_columns = std::min(used_key_prefix_size, num_index_columns_loaded);
+        num_key_columns = std::min(used_key_prefix_size, num_loaded_key_columns);
 
         for (size_t i = 0; i < num_key_columns; ++i)
         {
-            chassert(i < index->size());
-            chassert(index->at(i));
-            index_columns->emplace_back(index->at(i), primary_key.data_types[i], primary_key.column_names[i]);
+            if (need_index_block)
+                index_columns->emplace_back(index->getFullColumn(i, primary_key.data_types[i]), primary_key.data_types[i], primary_key.column_names[i]);
+
             reverse_flags.push_back(!sorting_key.reverse_flags.empty() && sorting_key.reverse_flags[i]);
         }
 
@@ -1764,15 +1772,19 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
         {
             for (size_t i = 0; i < num_key_columns; ++i)
             {
-                if (i < index->size())
+                if (i < num_loaded_key_columns)
                 {
-                    index_columns->emplace_back(index->at(i), primary_key.data_types[i], primary_key.column_names[i]);
+                    if (need_index_block)
+                        index_columns->emplace_back(index->getFullColumn(i, primary_key.data_types[i]), primary_key.data_types[i], primary_key.column_names[i]);
+
                     reverse_flags.push_back(!sorting_key.reverse_flags.empty() && sorting_key.reverse_flags[i]);
                 }
                 else
                 {
                     /// The column of the primary key was not loaded in memory - we'll skip it.
-                    index_columns->emplace_back();
+                    if (need_index_block)
+                        index_columns->emplace_back();
+
                     reverse_flags.push_back(false);
                 }
 
@@ -1785,10 +1797,8 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
         index_right.resize(used_key_size);
     }
 
-    /// If there are no monotonic functions, there is no need to save block reference.
-    /// Passing explicit field to FieldRef allows to optimize ranges and shows better performance.
     std::function<void(size_t, size_t, FieldRef &)> create_field_ref;
-    if (key_condition.hasMonotonicFunctionsChain())
+    if (need_index_block)
     {
         create_field_ref = [index_columns](size_t row, size_t column, FieldRef & field)
         {
@@ -1800,10 +1810,9 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
     }
     else
     {
-        create_field_ref = [index_columns](size_t row, size_t column, FieldRef & field)
+        create_field_ref = [index](size_t row, size_t column, FieldRef & field)
         {
-            chassert((*index_columns)[column].column);
-            (*index_columns)[column].column->get(row, field);
+            index->get(column, row, field);
             // NULL_LAST
             if (field.isNull())
                 field = POSITIVE_INFINITY;
@@ -1836,11 +1845,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                     /// value at range.begin is NULL (create_field_ref maps NULL to +inf for NULL_LAST
                     /// ordering). A non-nullable column is never NULL, so its boundaries are never equal.
                     for (size_t i = 0; i < num_key_columns; ++i)
-                    {
-                        const auto & col = (*index_columns)[i].column;
-                        chassert(col);
-                        equal_boundaries_mask[i] = col->isNullAt(range.begin);
-                    }
+                        equal_boundaries_mask[i] = index->isNullAt(i, range.begin);
 
                     for (size_t sparse_pos = 0; sparse_pos < sparse_keys_size; ++sparse_pos)
                     {
@@ -1858,13 +1863,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                 {
                     /// Non-final mark: compare PK index values at range.begin and range.end for all key columns.
                     for (size_t i = 0; i < num_key_columns; ++i)
-                    {
-                        const auto & col = (*index_columns)[i].column;
-
-                        chassert(col);
-
-                        equal_boundaries_mask[i] = (col->compareAt(range.begin, range.end, *col, 1) == 0);
-                    }
+                        equal_boundaries_mask[i] = index->equalAt(i, range.begin, range.end);
 
                     /// Build left/right boundaries only for used key columns.
                     for (size_t sparse_pos = 0; sparse_pos < sparse_keys_size; ++sparse_pos)
@@ -1894,7 +1893,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                 {
                     auto & left = reverse_flags[i] ? index_right[i] : index_left[i];
                     auto & right = reverse_flags[i] ? index_left[i] : index_right[i];
-                    if ((*index_columns)[i].column)
+                    if (i < num_loaded_key_columns)
                         create_field_ref(range.begin, i, left);
                     else
                         left = NEGATIVE_INFINITY;
@@ -1908,7 +1907,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                 {
                     auto & left = reverse_flags[i] ? index_right[i] : index_left[i];
                     auto & right = reverse_flags[i] ? index_left[i] : index_right[i];
-                    if ((*index_columns)[i].column)
+                    if (i < num_loaded_key_columns)
                     {
                         create_field_ref(range.begin, i, left);
                         create_field_ref(range.end, i, right);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <span>
+#include <type_traits>
 
 #include <base/types.h>
 #include <Common/PODArray.h>
@@ -22,7 +23,11 @@ class BitPackedUInt64Array
 {
 public:
     BitPackedUInt64Array() = default;
-    explicit BitPackedUInt64Array(std::span<const UInt64> values);
+
+    /// Values of narrower unsigned integer types are widened to UInt64.
+    template <typename T>
+    requires std::is_unsigned_v<T>
+    explicit BitPackedUInt64Array(std::span<const T> values);
 
     UInt64 get(size_t idx) const;
 

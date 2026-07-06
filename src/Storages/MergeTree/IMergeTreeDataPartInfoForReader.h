@@ -29,7 +29,9 @@ class SerializationInfoByName;
 class AlterConversions;
 using AlterConversionsPtr = std::shared_ptr<const AlterConversions>;
 
-using Index = Columns;
+struct PrimaryKey;
+
+using Index = PrimaryKey;
 using IndexPtr = std::shared_ptr<const Index>;
 
 /**

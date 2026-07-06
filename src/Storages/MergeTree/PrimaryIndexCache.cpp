@@ -14,11 +14,7 @@ namespace DB
 
 size_t PrimaryIndexWeightFunction::operator()(const PrimaryIndex & index) const
 {
-    size_t res = PRIMARY_INDEX_CACHE_OVERHEAD;
-    res += index.capacity() * sizeof(PrimaryIndex::value_type);
-    for (const auto & column : index)
-        res += column->allocatedBytes();
-    return res;
+    return PRIMARY_INDEX_CACHE_OVERHEAD + index.allocatedBytes();
 }
 
 template class CacheBase<UInt128, PrimaryIndex, UInt128TrivialHash, PrimaryIndexWeightFunction>;

@@ -1,0 +1,39 @@
+-- compressed index takes less memory than raw columns (raw is at least 29 bytes per mark)
+1	1	1
+-- point queries
+1
+1
+0	str_0000000
+999	str_0000999
+29999	str_0029999
+-- the same queries with the lightweight index analysis
+1
+1
+-- and without it
+1
+1
+-- queries with a chain of monotonic functions
+1
+1
+-- the index is decompressed for the mergeTreeIndex table function
+0	str_0000000
+1	str_0000001
+2	str_0000002
+1
+-- the index loaded from disk is compressed as well
+1
+1
+1	1	1
+-- point queries by the String key column
+1
+1
+1
+1000
+str_0000000	2024-01-01
+str_0000001	2024-01-01
+str_0000002	2024-01-01
+1	1
+-- queries over incompressible and nullable key columns
+1
+3334
+0

@@ -69,11 +69,12 @@ MarkRanges getRangesInPatchPartMerge(const DataPartPtr & original_part, const Pa
     if (patch_index->empty())
         return {};
 
-    if (patch_index->size() != 2)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Index of patch part must have 2 columns, got {}", patch_index->size());
+    if (patch_index->getNumColumns() != 2)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Index of patch part must have 2 columns, got {}", patch_index->getNumColumns());
 
-    const auto & patch_name_column = assert_cast<const ColumnLowCardinality &>(*patch_index->at(0));
-    const auto & patch_offset_data = assert_cast<const ColumnUInt64 &>(*patch_index->at(1)).getData();
+    /// The index of a patch part is never compressed in memory (see IMergeTreeDataPart::optimizeIndexColumns).
+    const auto & patch_name_column = assert_cast<const ColumnLowCardinality &>(*patch_index->getRawColumn(0));
+    const auto & patch_offset_data = assert_cast<const ColumnUInt64 &>(*patch_index->getRawColumn(1)).getData();
 
     for (const auto & range : original_ranges)
     {
@@ -107,10 +108,11 @@ MarkRanges getRangesInPatchPartJoin(const PatchPartInfoForReader & patch)
     if (patch_index->empty())
         return {};
 
-    if (patch_index->size() != 2)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Index of patch part must have 2 columns, got {}", patch_index->size());
+    if (patch_index->getNumColumns() != 2)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Index of patch part must have 2 columns, got {}", patch_index->getNumColumns());
 
-    const auto & patch_name_column = assert_cast<const ColumnLowCardinality &>(*patch_index->at(0));
+    /// The index of a patch part is never compressed in memory (see IMergeTreeDataPart::optimizeIndexColumns).
+    const auto & patch_name_column = assert_cast<const ColumnLowCardinality &>(*patch_index->getRawColumn(0));
 
     for (const auto & source_part_name : patch.source_parts)
     {

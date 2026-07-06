@@ -22,6 +22,7 @@
 #include <Storages/MergeTree/MergeTreeIndexGranularityInfo.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreePartition.h>
+#include <Storages/MergeTree/MergeTreePrimaryKey.h>
 #include <Storages/MergeTree/PatchParts/SourcePartsSetForPatch.h>
 #include <Storages/MergeTree/UniqueKey/DeleteBitmap.h>
 #include <Storages/MergeTree/VectorSimilarityIndexCache.h>
@@ -92,7 +93,7 @@ public:
     using ColumnSizeByNameConstPtr = std::shared_ptr<const ColumnSizeByName>;
     using NameToNumber = std::unordered_map<std::string, size_t>;
 
-    using Index = Columns;
+    using Index = PrimaryKey;
     using IndexPtr = std::shared_ptr<const Index>;
     using IndexSizeByName = std::unordered_map<std::string, ColumnSize>;
     using IndexSizeByNameConstPtr = std::shared_ptr<const IndexSizeByName>;
@@ -431,6 +432,7 @@ public:
     void removeFromVectorIndexCache(VectorSimilarityIndexCache * vector_similarity_index_cache) const;
 
     void setIndex(Columns index_columns);
+    void setIndex(IndexPtr new_index);
     void unloadIndex();
     bool isIndexLoaded() const;
 
@@ -797,9 +799,9 @@ private:
     /// Loads the index file.
     std::shared_ptr<Index> loadIndex() const;
 
-    /// Optimize index. Drop useless columns from suffix of primary key.
-    template <typename Columns>
-    void optimizeIndexColumns(size_t marks_count, Columns & index_columns) const;
+    /// Creates the in-memory representation of the primary key from the raw index columns.
+    /// Drops useless columns from suffix of primary key and tries to compress the rest in memory.
+    std::shared_ptr<Index> optimizeIndexColumns(size_t marks_count, Columns index_columns) const;
 
     /// Load rows count for this part from disk (for the newer storage format version).
     /// For the older format version calculates rows count from the size of a column with a fixed size.

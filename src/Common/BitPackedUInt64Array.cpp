@@ -10,7 +10,9 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt64> values)
+template <typename T>
+requires std::is_unsigned_v<T>
+BitPackedUInt64Array::BitPackedUInt64Array(std::span<const T> values)
     : num_values(values.size())
 {
     if (num_values == 0)
@@ -32,8 +34,8 @@ BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt64> values)
 
         for (size_t i = block_begin + 1; i < block_end; ++i)
         {
-            min_value = std::min(min_value, values[i]);
-            max_value = std::max(max_value, values[i]);
+            min_value = std::min(min_value, static_cast<UInt64>(values[i]));
+            max_value = std::max(max_value, static_cast<UInt64>(values[i]));
         }
 
         BlockInfo & block = blocks[block_idx];
@@ -54,9 +56,14 @@ BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt64> values)
     {
         const BlockInfo & block = blocks[idx / VALUES_PER_BLOCK];
         size_t bit_offset = block.bit_offset_in_packed_array + (idx % VALUES_PER_BLOCK) * block.bits_per_value;
-        writeBitsPacked64(packed.data(), bit_offset, values[idx] - block.min_value);
+        writeBitsPacked64(packed.data(), bit_offset, static_cast<UInt64>(values[idx]) - block.min_value);
     }
 }
+
+template BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt8> values);
+template BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt16> values);
+template BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt32> values);
+template BitPackedUInt64Array::BitPackedUInt64Array(std::span<const UInt64> values);
 
 UInt64 BitPackedUInt64Array::get(size_t idx) const
 {
