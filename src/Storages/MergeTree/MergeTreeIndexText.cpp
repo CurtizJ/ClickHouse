@@ -1657,6 +1657,29 @@ void MergeTreeIndexTextGranuleBuilder::addTokensFromLowCardinalityArray(const Co
     });
 }
 
+void MergeTreeIndexTextGranuleBuilder::addTokensFromArray(const ColumnArray & array, size_t start_row, size_t rows_read)
+{
+    const auto & array_offsets = array.getOffsets();
+    const auto & tokens_data = assert_cast<const ColumnString &>(array.getData());
+
+    for (size_t row = start_row; row < start_row + rows_read; ++row)
+    {
+        /// Dense position counter: dropped (empty) tokens leave no gap, so positions
+        /// reflect the surviving token sequence only.
+        UInt32 token_position = 0;
+        for (size_t j = array_offsets[row - 1]; j < array_offsets[row]; ++j)
+        {
+            const std::string_view token = tokens_data.getDataAt(j);
+            if (token.empty()) /// Token dropped by the postprocessor (e.g. a stop word mapped to an empty string).
+                continue;
+
+            addToken(token, token_position);
+            ++token_position;
+        }
+        incrementCurrentRow();
+    }
+}
+
 void MergeTreeIndexTextGranuleBuilder::incrementCurrentRow()
 {
     is_empty = false;
@@ -1761,9 +1784,35 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
 
     if (postprocessor->hasActions())
     {
-        ColumnPtr tokenized = tokenizeToArray(*tokenizer, *preprocessed_column, offset, rows_read);
-        ColumnPtr postprocessed = postprocessor->processTokensArrayBatch(assert_cast<const ColumnArray *>(tokenized.get()));
-        granule_builder.addTokensFromLowCardinalityArray(assert_cast<const ColumnArray &>(*postprocessed), 0, rows_read);
+        /// Dictionary encoding of tokens lets the postprocessor expression run once per unique
+        /// token, but when the share of distinct tokens is high it saves almost no expression
+        /// executions while paying extra hashing per unique token (re-uniquification of the
+        /// transformed dictionary, slot resolution, index remapping). Skip it altogether when
+        /// the stats accumulated over previous batches show more than half of tokens distinct,
+        /// and fall back to the flat form for a single batch when its own share is that high.
+        const bool dictionary_encode = num_tokenized_distinct_tokens * 2 <= num_tokenized_tokens;
+        ColumnPtr tokenized = tokenizeToArray(*tokenizer, *preprocessed_column, offset, rows_read, dictionary_encode);
+        const auto * tokenized_array = assert_cast<const ColumnArray *>(tokenized.get());
+        const auto * tokens_lc = typeid_cast<const ColumnLowCardinality *>(&tokenized_array->getData());
+
+        if (tokens_lc)
+        {
+            num_tokenized_tokens += tokens_lc->size();
+            num_tokenized_distinct_tokens += tokens_lc->getDictionary().size();
+
+            if (tokens_lc->getDictionary().size() * 2 > tokens_lc->size())
+            {
+                tokenized = ColumnArray::create(tokens_lc->convertToFullColumn(), tokenized_array->getOffsetsPtr());
+                tokenized_array = assert_cast<const ColumnArray *>(tokenized.get());
+                tokens_lc = nullptr;
+            }
+        }
+
+        ColumnPtr postprocessed = postprocessor->processTokensArrayBatch(tokenized_array);
+        if (tokens_lc)
+            granule_builder.addTokensFromLowCardinalityArray(assert_cast<const ColumnArray &>(*postprocessed), 0, rows_read);
+        else
+            granule_builder.addTokensFromArray(assert_cast<const ColumnArray &>(*postprocessed), 0, rows_read);
     }
     else if (isArray(index_column.type))
     {

@@ -40,10 +40,13 @@ public:
     /// overhead over all tokens rather than paying it once per token.
     ColumnPtr processTokensBatch(const ColumnString * tokens) const;
 
-    /// Processes a ColumnArray(LowCardinality(String)) (as built by tokenizeToArray) where each
-    /// row is an array of tokens for one document. The postprocessor expression is executed once
-    /// per unique dictionary token; the transformed dictionary is re-uniquified and the indexes
-    /// are remapped. Returns a new ColumnArray(LowCardinality(String)) with the original offsets.
+    /// Processes an array column where each row is an array of tokens for one document.
+    /// Accepts two forms, preserving the form and the offsets in the result:
+    ///   - ColumnArray(LowCardinality(String)) (as built by tokenizeToArray): the expression is
+    ///     executed once per unique dictionary token; the transformed dictionary is re-uniquified
+    ///     and the indexes are remapped.
+    ///   - ColumnArray(String), for batches of mostly distinct tokens where dictionary encoding
+    ///     does not pay off: the expression is executed on every token occurrence.
     /// Tokens mapped to an empty string by the postprocessor are skipped by the consumer.
     ColumnPtr processTokensArrayBatch(const ColumnArray * tokens) const;
 

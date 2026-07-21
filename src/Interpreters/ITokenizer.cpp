@@ -475,61 +475,83 @@ void forEachTokenToBloomFilter(const ITokenizer & tokenizer, const char * data, 
         });
 }
 
-ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, size_t from, size_t rows)
+ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, size_t from, size_t rows, bool dictionary_encode)
 {
     chassert(from + rows <= input.size());
 
-    /// Tokens are dictionary-encoded on the fly: the data column is LowCardinality(String),
-    /// so flat token strings are never materialized and consumers (e.g. the text index
-    /// postprocessor) can process each unique token once. The dictionary and the positions
-    /// are filled directly (not via ColumnLowCardinality::insertData) to keep the per-token
-    /// work down to the hash insert. UInt32 positions cannot overflow: the dictionary would
-    /// have to hold 2^32 unique tokens in a single batch.
-    MutableColumnUniquePtr tokens_dictionary = DataTypeLowCardinality::createColumnUnique(DataTypeString{});
-    auto tokens_positions = ColumnUInt32::create();
     auto tokens_offsets = ColumnArray::ColumnOffsets::create();
     tokens_offsets->reserve(rows);
 
-    auto tokenize = [&](std::string_view doc)
+    /// Iterates the input rows, feeding each token to add_token and recording an array offset
+    /// (the running token count from get_num_tokens) after each row.
+    auto iterate = [&](auto && add_token, auto && get_num_tokens)
     {
-        forEachToken(tokenizer, doc.data(), doc.size(),
+        auto tokenize = [&](std::string_view doc)
+        {
+            forEachToken(tokenizer, doc.data(), doc.size(),
+                [&](const char * token_start, size_t token_length)
+                {
+                    add_token(token_start, token_length);
+                    return false;
+                });
+        };
+
+        if (const auto * col_array = typeid_cast<const ColumnArray *>(&input))
+        {
+            const IColumn & data = col_array->getData();
+            const IColumn::Offsets & src_offsets = col_array->getOffsets();
+            /// isNullable() is false for LowCardinality(Nullable), so use the helper that also
+            /// covers that case, otherwise getDataAt() throws NOT_IMPLEMENTED on a NULL element.
+            const bool data_is_nullable = isColumnNullableOrLowCardinalityNullable(data);
+
+            for (size_t i = from; i < from + rows; ++i)
+            {
+                for (size_t j = src_offsets[i - 1]; j < src_offsets[i]; ++j)
+                {
+                    if (data_is_nullable && data.isNullAt(j))
+                        continue;
+                    tokenize(data.getDataAt(j));
+                }
+                tokens_offsets->getData().push_back(get_num_tokens());
+            }
+        }
+        else
+        {
+            for (size_t i = from; i < from + rows; ++i)
+            {
+                if (!input.isNullAt(i))
+                    tokenize(input.getDataAt(i));
+                tokens_offsets->getData().push_back(get_num_tokens());
+            }
+        }
+    };
+
+    if (dictionary_encode)
+    {
+        /// Tokens are dictionary-encoded on the fly: the data column is LowCardinality(String),
+        /// so flat token strings are never materialized and consumers (e.g. the text index
+        /// postprocessor) can process each unique token once. The dictionary and the positions
+        /// are filled directly (not via ColumnLowCardinality::insertData) to keep the per-token
+        /// work down to the hash insert. UInt32 positions cannot overflow: the dictionary would
+        /// have to hold 2^32 unique tokens in a single batch.
+        MutableColumnUniquePtr tokens_dictionary = DataTypeLowCardinality::createColumnUnique(DataTypeString{});
+        auto tokens_positions = ColumnUInt32::create();
+        iterate(
             [&](const char * token_start, size_t token_length)
             {
                 tokens_positions->getData().push_back(static_cast<UInt32>(tokens_dictionary->uniqueInsertData(token_start, token_length)));
-                return false;
-            });
-    };
+            },
+            [&] { return tokens_positions->size(); });
 
-    if (const auto * col_array = typeid_cast<const ColumnArray *>(&input))
-    {
-        const IColumn & data = col_array->getData();
-        const IColumn::Offsets & src_offsets = col_array->getOffsets();
-        /// isNullable() is false for LowCardinality(Nullable), so use the helper that also
-        /// covers that case, otherwise getDataAt() throws NOT_IMPLEMENTED on a NULL element.
-        const bool data_is_nullable = isColumnNullableOrLowCardinalityNullable(data);
-
-        for (size_t i = from; i < from + rows; ++i)
-        {
-            for (size_t j = src_offsets[i - 1]; j < src_offsets[i]; ++j)
-            {
-                if (data_is_nullable && data.isNullAt(j))
-                    continue;
-                tokenize(data.getDataAt(j));
-            }
-            tokens_offsets->getData().push_back(tokens_positions->size());
-        }
-    }
-    else
-    {
-        for (size_t i = from; i < from + rows; ++i)
-        {
-            if (!input.isNullAt(i))
-                tokenize(input.getDataAt(i));
-            tokens_offsets->getData().push_back(tokens_positions->size());
-        }
+        auto tokens_data = ColumnLowCardinality::create(std::move(tokens_dictionary), MutableColumnPtr(std::move(tokens_positions)), /*is_shared=*/false);
+        return ColumnArray::create(std::move(tokens_data), std::move(tokens_offsets));
     }
 
-    auto tokens_data = ColumnLowCardinality::create(std::move(tokens_dictionary), MutableColumnPtr(std::move(tokens_positions)), /*is_shared=*/false);
+    auto tokens_data = ColumnString::create();
+    iterate(
+        [&](const char * token_start, size_t token_length) { tokens_data->insertData(token_start, token_length); },
+        [&] { return tokens_data->size(); });
+
     return ColumnArray::create(std::move(tokens_data), std::move(tokens_offsets));
 }
 

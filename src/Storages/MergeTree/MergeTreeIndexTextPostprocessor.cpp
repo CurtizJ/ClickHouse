@@ -5,6 +5,7 @@
 #include <Columns/ColumnString.h>
 #include <Columns/IColumnUnique.h>
 #include <Common/assert_cast.h>
+#include <Common/typeid_cast.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeString.h>
@@ -111,7 +112,18 @@ ColumnPtr MergeTreeIndexTextPostprocessor::processTokensArrayBatch(const ColumnA
 {
     chassert(actions); /// Always called when hasActions() is true.
 
-    /// tokenizeToArray dictionary-encodes the tokens, so the expression runs on unique tokens only.
+    /// Flat form, chosen by the caller for batches of mostly distinct tokens, where dictionary
+    /// encoding does not pay off: apply the expression to every token occurrence in one execution.
+    /// The transform maps each token 1:1, so the original offsets still apply and can be reused.
+    /// Tokens transformed to empty string (e.g. stop words) are skipped by the consumer.
+    if (const auto * flat_tokens = typeid_cast<const ColumnString *>(&tokens->getData()))
+    {
+        ColumnPtr transformed = executeUnaryExpressionActions(
+            *actions, flat_tokens->getPtr(), string_type, postprocessor_token_name, flat_tokens->size());
+        return ColumnArray::create(transformed->convertToFullColumnIfConst(), tokens->getOffsetsPtr());
+    }
+
+    /// Dictionary-encoded form (as built by tokenizeToArray): the expression runs on unique tokens only.
     const auto & tokens_lc = assert_cast<const ColumnLowCardinality &>(tokens->getData());
     const ColumnPtr & unique_tokens = tokens_lc.getDictionary().getNestedColumn();
     ColumnPtr transformed = executeUnaryExpressionActions(*actions, unique_tokens, string_type, postprocessor_token_name, unique_tokens->size());

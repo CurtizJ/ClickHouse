@@ -462,6 +462,9 @@ struct MergeTreeIndexTextGranuleBuilder
     /// for rows [start_row, start_row + rows_read). The token maps are probed once per unique
     /// dictionary token; the occurrences are added through the resolved slots by index.
     void addTokensFromLowCardinalityArray(const ColumnArray & array, size_t start_row, size_t rows_read);
+    /// Same for a flat Array(String) of tokens: every occurrence is added with addToken.
+    /// Preferred over addTokensFromLowCardinalityArray for batches of mostly distinct tokens.
+    void addTokensFromArray(const ColumnArray & array, size_t start_row, size_t rows_read);
 
     void incrementCurrentRow();
     void setCurrentRow(size_t row) { current_row = row; }
@@ -515,6 +518,12 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
 private:
     /// Iterates over a ColumnArray(String) slice and calls addDocument on each element.
     void addDocumentsFromArray(ColumnPtr column, size_t start_row, size_t rows_read);
+
+    /// Token stats accumulated across update calls when tokens were dictionary-encoded.
+    /// Once they show a high share of distinct tokens, subsequent batches are tokenized
+    /// into the flat form without attempting dictionary encoding at all.
+    UInt64 num_tokenized_tokens = 0;
+    UInt64 num_tokenized_distinct_tokens = 0;
 
     String index_column_name;
     MergeTreeIndexTextParams params;
