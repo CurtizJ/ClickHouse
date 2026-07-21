@@ -442,6 +442,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     LoggerPtr logger;
 };
 
+class ColumnArray;
+
 struct ITokenizer;
 using TokenizerPtr = const ITokenizer *;
 
@@ -456,6 +458,10 @@ struct MergeTreeIndexTextGranuleBuilder
     void addDocument(std::string_view document);
     // Adds a document to the granule. The document is inserted directly as a single token.
     void addToken(std::string_view token, UInt32 token_position);
+    /// Adds all token occurrences of a dictionary-encoded token array (as built by tokenizeToArray)
+    /// for rows [start_row, start_row + rows_read). The token maps are probed once per unique
+    /// dictionary token; the occurrences are added through the resolved slots by index.
+    void addTokensFromLowCardinalityArray(const ColumnArray & array, size_t start_row, size_t rows_read);
 
     void incrementCurrentRow();
     void setCurrentRow(size_t row) { current_row = row; }
@@ -507,8 +513,7 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
     UInt64 getNumProcessedTokens() const { return granule_builder.num_processed_tokens; }
 
 private:
-    /// Iterates over a ColumnArray(String) slice and calls addDocument<tokenize> on each element.
-    template <bool tokenize>
+    /// Iterates over a ColumnArray(String) slice and calls addDocument on each element.
     void addDocumentsFromArray(ColumnPtr column, size_t start_row, size_t rows_read);
 
     String index_column_name;

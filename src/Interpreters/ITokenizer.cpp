@@ -1,11 +1,16 @@
 #include <Interpreters/ITokenizer.h>
 
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnString.h>
+#include <Columns/ColumnsNumber.h>
+#include <Columns/IColumnUnique.h>
 #include <Common/quoteString.h>
 #include <Common/StringUtils.h>
 #include <Common/typeid_cast.h>
 #include <Common/UTF8Helpers.h>
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeString.h>
 
 #if defined(__SSE2__)
 #  include <emmintrin.h>
@@ -474,7 +479,14 @@ ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, s
 {
     chassert(from + rows <= input.size());
 
-    auto tokens_data = ColumnString::create();
+    /// Tokens are dictionary-encoded on the fly: the data column is LowCardinality(String),
+    /// so flat token strings are never materialized and consumers (e.g. the text index
+    /// postprocessor) can process each unique token once. The dictionary and the positions
+    /// are filled directly (not via ColumnLowCardinality::insertData) to keep the per-token
+    /// work down to the hash insert. UInt32 positions cannot overflow: the dictionary would
+    /// have to hold 2^32 unique tokens in a single batch.
+    MutableColumnUniquePtr tokens_dictionary = DataTypeLowCardinality::createColumnUnique(DataTypeString{});
+    auto tokens_positions = ColumnUInt32::create();
     auto tokens_offsets = ColumnArray::ColumnOffsets::create();
     tokens_offsets->reserve(rows);
 
@@ -483,7 +495,7 @@ ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, s
         forEachToken(tokenizer, doc.data(), doc.size(),
             [&](const char * token_start, size_t token_length)
             {
-                tokens_data->insertData(token_start, token_length);
+                tokens_positions->getData().push_back(static_cast<UInt32>(tokens_dictionary->uniqueInsertData(token_start, token_length)));
                 return false;
             });
     };
@@ -504,7 +516,7 @@ ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, s
                     continue;
                 tokenize(data.getDataAt(j));
             }
-            tokens_offsets->getData().push_back(tokens_data->size());
+            tokens_offsets->getData().push_back(tokens_positions->size());
         }
     }
     else
@@ -513,10 +525,11 @@ ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, s
         {
             if (!input.isNullAt(i))
                 tokenize(input.getDataAt(i));
-            tokens_offsets->getData().push_back(tokens_data->size());
+            tokens_offsets->getData().push_back(tokens_positions->size());
         }
     }
 
+    auto tokens_data = ColumnLowCardinality::create(std::move(tokens_dictionary), MutableColumnPtr(std::move(tokens_positions)), /*is_shared=*/false);
     return ColumnArray::create(std::move(tokens_data), std::move(tokens_offsets));
 }
 

@@ -1,8 +1,12 @@
 #include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
 
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnString.h>
+#include <Columns/IColumnUnique.h>
+#include <Common/assert_cast.h>
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeString.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/ExpressionActions.h>
@@ -91,21 +95,39 @@ ColumnPtr MergeTreeIndexTextPostprocessor::processTokensBatch(const ColumnString
     if (!actions)
         return tokens->getPtr();
 
-    return executeUnaryExpressionActions(*actions, tokens->getPtr(), string_type, postprocessor_token_name, tokens->size());
+    /// Token batches are highly repetitive while the expression may be expensive (e.g. stem).
+    /// Dictionary-encode the batch, execute the expression once per unique token, and expand the results back by index.
+    /// The expression is deterministic (enforced by validateTransformActionsDAG), so this is equivalent to per-token execution.
+    auto lc_column = DataTypeLowCardinality(string_type).createColumn();
+    auto & lc = assert_cast<ColumnLowCardinality &>(*lc_column);
+    lc.insertRangeFromFullColumn(*tokens, 0, tokens->size());
+
+    const ColumnPtr & unique_tokens = lc.getDictionary().getNestedColumn();
+    ColumnPtr transformed = executeUnaryExpressionActions(*actions, unique_tokens, string_type, postprocessor_token_name, unique_tokens->size());
+    return transformed->index(lc.getIndexes(), 0);
 }
 
 ColumnPtr MergeTreeIndexTextPostprocessor::processTokensArrayBatch(const ColumnArray * tokens) const
 {
     chassert(actions); /// Always called when hasActions() is true.
 
-    /// Apply the postprocessor on all token strings across all rows in one execution.
-    const ColumnString * flat_tokens = typeid_cast<const ColumnString *>(tokens->getDataPtr().get());
-    chassert(flat_tokens); /// Array(String) data column must be ColumnString
-    ColumnPtr flat_transformed = processTokensBatch(flat_tokens);
+    /// tokenizeToArray dictionary-encodes the tokens, so the expression runs on unique tokens only.
+    const auto & tokens_lc = assert_cast<const ColumnLowCardinality &>(tokens->getData());
+    const ColumnPtr & unique_tokens = tokens_lc.getDictionary().getNestedColumn();
+    ColumnPtr transformed = executeUnaryExpressionActions(*actions, unique_tokens, string_type, postprocessor_token_name, unique_tokens->size());
+    transformed = transformed->convertToFullColumnIfConst();
+
+    /// The transform may map distinct tokens to one value (e.g. stemming collapses word forms),
+    /// so re-uniquify the transformed dictionary and remap the indexes through the
+    /// old-position -> new-position map returned by uniqueInsertRangeFrom.
+    MutableColumnUniquePtr transformed_dictionary = DataTypeLowCardinality::createColumnUnique(*string_type);
+    MutableColumnPtr position_map = transformed_dictionary->uniqueInsertRangeFrom(*transformed, 0, transformed->size());
+    MutableColumnPtr transformed_indexes = position_map->index(tokens_lc.getIndexes(), 0)->assumeMutable();
+    auto transformed_lc = ColumnLowCardinality::create(std::move(transformed_dictionary), std::move(transformed_indexes), /*is_shared=*/false);
 
     /// The transform maps each token 1:1, so the original offsets still apply and can be reused.
     /// Tokens transformed to empty string (e.g. stop words) are skipped in addDocumentsFromArray.
-    return ColumnArray::create(flat_transformed->convertToFullColumnIfConst(), tokens->getOffsetsPtr());
+    return ColumnArray::create(std::move(transformed_lc), tokens->getOffsetsPtr());
 }
 
 ActionsDAG MergeTreeIndexTextPostprocessor::getOriginalActionsDAG(

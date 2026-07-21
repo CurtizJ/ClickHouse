@@ -3,6 +3,7 @@
 
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnNullable.h>
+#include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnString.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
@@ -1559,6 +1560,103 @@ void MergeTreeIndexTextGranuleBuilder::addToken(std::string_view token, UInt32 t
     ++num_processed_tokens;
 }
 
+namespace
+{
+
+/// Calls f with the typed index data of a LowCardinality indexes column.
+template <typename F>
+void withLowCardinalityIndexes(const IColumn & indexes, F && f)
+{
+    if (const auto * indexes_uint8 = typeid_cast<const ColumnUInt8 *>(&indexes))
+        f(indexes_uint8->getData());
+    else if (const auto * indexes_uint16 = typeid_cast<const ColumnUInt16 *>(&indexes))
+        f(indexes_uint16->getData());
+    else if (const auto * indexes_uint32 = typeid_cast<const ColumnUInt32 *>(&indexes))
+        f(indexes_uint32->getData());
+    else if (const auto * indexes_uint64 = typeid_cast<const ColumnUInt64 *>(&indexes))
+        f(indexes_uint64->getData());
+    else
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected type of LowCardinality indexes column: {}", indexes.getName());
+}
+
+}
+
+void MergeTreeIndexTextGranuleBuilder::addTokensFromLowCardinalityArray(const ColumnArray & array, size_t start_row, size_t rows_read)
+{
+    const auto & array_offsets = array.getOffsets();
+    const auto & tokens_lc = assert_cast<const ColumnLowCardinality &>(array.getData());
+    const auto & tokens_dictionary = assert_cast<const ColumnString &>(*tokens_lc.getDictionary().getNestedColumn());
+    const size_t dictionary_size = tokens_dictionary.size();
+
+    /// Mark the dictionary entries that occur in the processed rows: the dictionary may contain
+    /// entries without occurrences (e.g. its default empty-string entry), which must not produce
+    /// tokens with empty posting lists.
+    PaddedPODArray<UInt8> occurs(dictionary_size, 0);
+    withLowCardinalityIndexes(tokens_lc.getIndexes(), [&](const auto & indexes)
+    {
+        for (size_t j = array_offsets[start_row - 1]; j < array_offsets[start_row + rows_read - 1]; ++j)
+            occurs[indexes[j]] = 1;
+    });
+
+    /// Resolve the builder slot for each occurring token, probing the token maps once per unique
+    /// token instead of once per occurrence. All tokens are inserted before any slot pointer is
+    /// taken: StringHashMap invalidates mapped pointers on rehash.
+    for (size_t i = 0; i < dictionary_size; ++i)
+    {
+        std::string_view token = tokens_dictionary.getDataAt(i);
+        if (!occurs[i] || token.empty())
+            continue;
+
+        bool inserted = false;
+        TokenToPostingsBuilderMap::LookupResult it;
+        ArenaKeyHolder key_holder(token, *arena);
+        tokens_map.emplace(key_holder, it, inserted);
+
+        if (position_map)
+        {
+            TokenToPositionListMap::LookupResult pos_it;
+            position_map->emplace(key_holder, pos_it, inserted);
+        }
+    }
+
+    PaddedPODArray<PostingListBuilder *> posting_slots(dictionary_size, nullptr);
+    PaddedPODArray<PositionListBuilder *> position_slots(position_map ? dictionary_size : 0, nullptr);
+    for (size_t i = 0; i < dictionary_size; ++i)
+    {
+        std::string_view token = tokens_dictionary.getDataAt(i);
+        if (!occurs[i] || token.empty())
+            continue;
+
+        posting_slots[i] = &tokens_map.find(token)->getMapped();
+        if (position_map)
+            position_slots[i] = &position_map->find(token)->getMapped();
+    }
+
+    withLowCardinalityIndexes(tokens_lc.getIndexes(), [&](const auto & indexes)
+    {
+        for (size_t row = start_row; row < start_row + rows_read; ++row)
+        {
+            /// Dense position counter: dropped (empty) tokens leave no gap, so positions
+            /// reflect the surviving token sequence only.
+            UInt32 token_position = 0;
+            for (size_t j = array_offsets[row - 1]; j < array_offsets[row]; ++j)
+            {
+                PostingListBuilder * posting_slot = posting_slots[indexes[j]];
+                if (!posting_slot) /// Token dropped by the postprocessor (e.g. a stop word mapped to an empty string).
+                    continue;
+
+                posting_slot->add(static_cast<UInt32>(current_row), posting_lists);
+                if (position_map)
+                    position_slots[indexes[j]]->add(static_cast<UInt32>(current_row), token_position);
+
+                ++token_position;
+                ++num_processed_tokens;
+            }
+            incrementCurrentRow();
+        }
+    });
+}
+
 void MergeTreeIndexTextGranuleBuilder::incrementCurrentRow()
 {
     is_empty = false;
@@ -1665,11 +1763,11 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
     {
         ColumnPtr tokenized = tokenizeToArray(*tokenizer, *preprocessed_column, offset, rows_read);
         ColumnPtr postprocessed = postprocessor->processTokensArrayBatch(assert_cast<const ColumnArray *>(tokenized.get()));
-        addDocumentsFromArray<false>(postprocessed, 0, rows_read);
+        granule_builder.addTokensFromLowCardinalityArray(assert_cast<const ColumnArray &>(*postprocessed), 0, rows_read);
     }
     else if (isArray(index_column.type))
     {
-        addDocumentsFromArray<true>(preprocessed_column, offset, rows_read);
+        addDocumentsFromArray(preprocessed_column, offset, rows_read);
     }
     else
     {
@@ -1689,7 +1787,6 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
     *pos += rows_read;
 }
 
-template <bool tokenize>
 void MergeTreeIndexAggregatorText::addDocumentsFromArray(ColumnPtr column, size_t start_row, size_t rows_read)
 {
     const ColumnArray * column_array = assert_cast<const ColumnArray *>(column.get());
@@ -1701,9 +1798,6 @@ void MergeTreeIndexAggregatorText::addDocumentsFromArray(ColumnPtr column, size_
 
     for (size_t i = start_row; i < start_row + rows_read; ++i)
     {
-        /// Dense position counter: dropped (empty/null) tokens leave no gap, so positions
-        /// reflect the surviving token sequence only.
-        UInt32 token_position = 0;
         for (size_t element_idx = column_offsets[i - 1]; element_idx < column_offsets[i]; ++element_idx)
         {
             if (data_is_nullable && column_data.isNullAt(element_idx))
@@ -1713,10 +1807,7 @@ void MergeTreeIndexAggregatorText::addDocumentsFromArray(ColumnPtr column, size_
             if (ref.empty())
                 continue;
 
-            if constexpr (tokenize)
-                granule_builder.addDocument(ref);
-            else
-                granule_builder.addToken(ref, token_position++);
+            granule_builder.addDocument(ref);
         }
         granule_builder.incrementCurrentRow();
     }

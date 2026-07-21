@@ -507,7 +507,8 @@ void forEachToken(const ITokenizer & tokenizer, const char * __restrict data, si
 
 void forEachTokenToBloomFilter(const ITokenizer & tokenizer, const char * data, size_t length, BloomFilter & bloom_filter);
 
-/// Tokenizes `rows`-many rows of `input`, starting at offset `from`. Returns a ColumnArray(String) with one array per row, containing the tokens.
+/// Tokenizes `rows`-many rows of `input`, starting at offset `from`. Returns a ColumnArray(LowCardinality(String))
+/// with one array per row, containing the tokens dictionary-encoded across the whole batch.
 ColumnPtr tokenizeToArray(const ITokenizer & tokenizer, const IColumn & input, size_t from, size_t rows);
 
 }

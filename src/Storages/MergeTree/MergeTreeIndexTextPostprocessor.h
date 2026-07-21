@@ -34,14 +34,17 @@ public:
     /// The postprocessor expression is applied to the whole column in a single
     /// vectorized ExpressionActions execution. Returns a new ColumnString of
     /// transformed tokens, one per row, in the same order as the input.
+    /// The batch is dictionary-encoded first, so the expression runs once per
+    /// unique token and the results are expanded back by index.
     /// Preferred over processTokens because it amortizes expression-execution
     /// overhead over all tokens rather than paying it once per token.
     ColumnPtr processTokensBatch(const ColumnString * tokens) const;
 
-    /// Processes a ColumnArray(String) where each row is an array of tokens for one document.
-    /// The postprocessor expression is applied to all elements across the whole column in a
-    /// single execution. Tokens mapped to an empty string by the postprocessor are dropped from
-    /// their respective arrays. Returns a new ColumnArray(String) with updated offsets.
+    /// Processes a ColumnArray(LowCardinality(String)) (as built by tokenizeToArray) where each
+    /// row is an array of tokens for one document. The postprocessor expression is executed once
+    /// per unique dictionary token; the transformed dictionary is re-uniquified and the indexes
+    /// are remapped. Returns a new ColumnArray(LowCardinality(String)) with the original offsets.
+    /// Tokens mapped to an empty string by the postprocessor are skipped by the consumer.
     ColumnPtr processTokensArrayBatch(const ColumnArray * tokens) const;
 
     bool hasActions() const { return actions.has_value(); }
