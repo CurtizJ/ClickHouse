@@ -354,7 +354,7 @@ size_t TokenPostingsInfo::bytesAllocated() const
     return sizeof(TokenPostingsInfo)
         + offsets.capacity() * sizeof(UInt64)
         + ranges.capacity() * sizeof(RowsRange)
-        + (embedded_postings ? embedded_postings->getSizeInBytes() : 0);
+        + (embedded_postings.capacity() > MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS ? embedded_postings.capacity() * sizeof(UInt32) : 0);
 }
 
 MergeTreeIndexGranuleText::MergeTreeIndexGranuleText(MergeTreeIndexTextParams params_)
@@ -789,7 +789,7 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         if (token_info->offsets.size() == 1 && analyzer->isTokenNeeded(token) && !analyzer->hasReadPostings(token))
         {
             auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
-            analyzer->addPostings(token, std::move(block));
+            analyzer->addPostings(token, *block);
         }
 
         if (analyzer->alwaysFalse())
@@ -1177,13 +1177,19 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
         }
         else
         {
-            auto postings = postings_serialization->deserialize(istr, info.header, info.cardinality);
-            if (postings && postings->cardinality() > 0)
+            if (!(info.header & RawPostings))
+                throw Exception(ErrorCodes::CORRUPTED_DATA, "Embedded postings must be serialized as raw values, got header {}", info.header);
+
+            /// Read the raw values directly into the inline array, avoiding a roaring bitmap per token.
+            info.embedded_postings.resize(info.cardinality);
+            for (auto & value : info.embedded_postings)
+                readVarUInt(value, istr);
+
+            if (!info.embedded_postings.empty())
             {
                 info.offsets.emplace_back(0);
-                info.ranges.emplace_back(postings->minimum(), postings->maximum());
+                info.ranges.emplace_back(info.embedded_postings.front(), info.embedded_postings.back());
             }
-            info.embedded_postings = std::move(postings);
             ProfileEvents::increment(ProfileEvents::TextIndexUsedEmbeddedPostings);
         }
     }

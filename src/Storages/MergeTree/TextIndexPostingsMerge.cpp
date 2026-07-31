@@ -40,7 +40,7 @@ TokenPostingsMergeCursor::TokenPostingsMergeCursor(
 
     if (info.header & EmbeddedPostings)
     {
-        if (!info.embedded_postings)
+        if (info.embedded_postings.empty())
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Posting list header marks embedded postings but they are not deserialized");
 
         mode = Mode::Embedded;
@@ -107,10 +107,8 @@ void TokenPostingsMergeCursor::fillEmbedded()
         return;
 
     started = true;
-    size_t cardinality = info.embedded_postings->cardinality();
-    batch_buffer.resize(cardinality);
-    info.embedded_postings->toUint32Array(batch_buffer.data());
-    current_batch = std::span<const UInt32>(batch_buffer.data(), cardinality);
+    batch_buffer.assign(info.embedded_postings.begin(), info.embedded_postings.end());
+    current_batch = std::span<const UInt32>(batch_buffer.data(), batch_buffer.size());
 }
 
 void TokenPostingsMergeCursor::fillRaw()
@@ -201,14 +199,14 @@ void TokenPostingsMergeCursor::fillRoaringBlocks()
     }
 }
 
-void TokenPostingsMergeCursor::remapBatch()
+void remapPostingRowIds(std::span<UInt32> values, const MergedPartOffsets * merged_part_offsets, size_t part_index)
 {
     if (!merged_part_offsets)
         return;
 
-    for (size_t i = 0; i < current_batch.size(); ++i)
+    for (auto & value : values)
     {
-        UInt64 new_offset = (*merged_part_offsets)[part_index, batch_buffer[i]];
+        UInt64 new_offset = (*merged_part_offsets)[part_index, value];
 
         if (new_offset > std::numeric_limits<UInt32>::max())
         {
@@ -217,8 +215,13 @@ void TokenPostingsMergeCursor::remapBatch()
                 new_offset, std::numeric_limits<UInt32>::max());
         }
 
-        batch_buffer[i] = static_cast<UInt32>(new_offset);
+        value = static_cast<UInt32>(new_offset);
     }
+}
+
+void TokenPostingsMergeCursor::remapBatch()
+{
+    remapPostingRowIds(std::span<UInt32>(batch_buffer.data(), current_batch.size()), merged_part_offsets, part_index);
 }
 
 void mergeTokenPostings(std::span<TokenPostingsMergeCursor * const> cursors, const std::function<void(std::span<UInt32>)> & consume)

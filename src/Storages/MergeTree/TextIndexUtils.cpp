@@ -23,8 +23,10 @@
 #include <Storages/MergeTree/DataPartStorageOnDiskFull.h>
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 
+#include <array>
 #include <deque>
 #include <limits>
+#include <optional>
 
 namespace ProfileEvents
 {
@@ -36,6 +38,7 @@ namespace DB
 
 namespace ErrorCodes
 {
+    extern const int CORRUPTED_DATA;
     extern const int LOGICAL_ERROR;
     extern const int FILE_DOESNT_EXIST;
     extern const int SUPPORT_IS_DISABLED;
@@ -363,6 +366,87 @@ void MergeTextIndexesTask::readDictionaryBlock(size_t source_num)
     queue.push(cursors[source_num]);
 }
 
+std::optional<TokenPostingsInfo> MergeTextIndexesTask::tryMergeTinyTokenPostings(UInt64 total_cardinality)
+{
+    using enum PostingsSerialization::Flags;
+
+    if (total_cardinality > MAX_CARDINALITY_FOR_RAW_POSTINGS)
+        return std::nullopt;
+
+    /// Tiny lists written by the current format are always raw or embedded. Anything else
+    /// (a potential legacy layout) takes the generic cursor path below.
+    for (const auto & pending : pending_postings)
+    {
+        if (!(pending.info.header & RawPostings))
+            return std::nullopt;
+    }
+
+    std::array<UInt32, MAX_CARDINALITY_FOR_RAW_POSTINGS> values;
+    size_t num_values = 0;
+
+    for (const auto & pending : pending_postings)
+    {
+        const auto & info = pending.info;
+        size_t source_begin = num_values;
+
+        if (info.header & EmbeddedPostings)
+        {
+            for (UInt32 value : info.embedded_postings)
+                values[num_values++] = value;
+        }
+        else
+        {
+            if (info.offsets.size() != 1)
+                throw Exception(ErrorCodes::CORRUPTED_DATA, "Raw posting list must have exactly one block, got {}", info.offsets.size());
+
+            auto * stream = input_streams[pending.source_num].at(MergeTreeIndexSubstream::Type::TextIndexPostings);
+            stream->seekToMark({info.offsets[0], 0});
+            auto & istr = *stream->getDataBuffer();
+
+            for (size_t i = 0; i < info.cardinality; ++i)
+            {
+                readVarUInt(values[num_values], istr);
+                ++num_values;
+            }
+        }
+
+        remapPostingRowIds(
+            std::span<UInt32>(values.data() + source_begin, num_values - source_begin),
+            merged_part_offsets.get(),
+            segments[pending.source_num].part_index);
+    }
+
+    chassert(num_values == total_cardinality);
+    std::sort(values.begin(), values.begin() + num_values);
+
+    for (size_t i = 1; i < num_values; ++i)
+    {
+        if (values[i] == values[i - 1])
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Merged text index posting lists contain duplicate row id {}", values[i]);
+    }
+
+    TokenPostingsInfo info;
+    info.cardinality = static_cast<UInt32>(num_values);
+
+    if (num_values <= MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS)
+    {
+        info.header = RawPostings | EmbeddedPostings;
+        info.embedded_postings.assign(values.begin(), values.begin() + num_values);
+    }
+    else
+    {
+        auto * postings_stream = output_streams.at(MergeTreeIndexSubstream::Type::TextIndexPostings);
+        info.header = RawPostings | SingleBlock;
+        info.offsets.emplace_back(postings_stream->plain_hashing.count());
+        info.ranges.emplace_back(values.front(), values[num_values - 1]);
+
+        for (size_t i = 0; i < num_values; ++i)
+            writeVarUInt(values[i], postings_stream->plain_hashing);
+    }
+
+    return info;
+}
+
 void MergeTextIndexesTask::flushPostingList()
 {
     chassert(!pending_postings.empty());
@@ -374,6 +458,14 @@ void MergeTextIndexesTask::flushPostingList()
     UInt64 total_cardinality = 0;
     for (const auto & pending : pending_postings)
         total_cardinality += pending.info.cardinality;
+
+    /// Most tokens in typical datasets are rare. Merge them on the stack, without
+    /// cursors, staging buffers, or a roaring bitmap.
+    if (auto tiny_info = tryMergeTinyTokenPostings(total_cardinality))
+    {
+        finalizeTokenInfo(std::move(*tiny_info));
+        return;
+    }
 
     std::deque<PostingsReaderStreamAdapter> stream_adapters;
     std::vector<std::unique_ptr<TokenPostingsMergeCursor>> cursor_holders;
@@ -437,9 +529,17 @@ void MergeTextIndexesTask::flushPostingList()
         token_info = TextIndexSerialization::serializePostings(builder, *postings_stream, params, postings_serialization);
 
         if (token_info.header & PostingsSerialization::Flags::EmbeddedPostings)
-            token_info.embedded_postings = std::make_shared<PostingList>(output_postings);
+        {
+            token_info.embedded_postings.resize(output_postings.cardinality());
+            output_postings.toUint32Array(token_info.embedded_postings.data());
+        }
     }
 
+    finalizeTokenInfo(std::move(token_info));
+}
+
+void MergeTextIndexesTask::finalizeTokenInfo(TokenPostingsInfo token_info)
+{
     /// Serialize position data if positions are enabled.
     if (params.positions && !output_positions.empty())
     {
@@ -465,7 +565,7 @@ void MergeTextIndexesTask::flushPostingList()
         TextIndexPositionCodec::encode(output_positions, positions_stream->plain_hashing);
     }
 
-    output_infos.push_back(token_info);
+    output_infos.push_back(std::move(token_info));
     output_postings.clear();
     output_positions.clear();
     pending_postings.clear();
@@ -504,8 +604,8 @@ void MergeTextIndexesTask::flushDictionaryBlock()
 
         if (output_infos[i].header & PostingsSerialization::Flags::EmbeddedPostings)
         {
-            const auto & roaring_bitmap = output_infos[i].embedded_postings->roaring;
-            postings_serialization.serialize(roaring_bitmap, output_infos[i].header, ostr);
+            for (UInt32 value : output_infos[i].embedded_postings)
+                writeVarUInt(value, ostr);
         }
     }
 

@@ -125,7 +125,7 @@ EncodedSource encodeEmbeddedSource(const std::vector<UInt32> & values)
     EncodedSource source;
     source.info.header = RawPostings | EmbeddedPostings;
     source.info.cardinality = static_cast<UInt32>(values.size());
-    source.info.embedded_postings = std::make_shared<PostingList>(values.size(), values.data());
+    source.info.embedded_postings.assign(values.begin(), values.end());
     return source;
 }
 

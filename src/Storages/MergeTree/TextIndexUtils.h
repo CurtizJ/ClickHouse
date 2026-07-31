@@ -10,6 +10,8 @@
 #include <Core/SortCursor.h>
 #include <Processors/ISimpleTransform.h>
 
+#include <optional>
+
 namespace DB
 {
 
@@ -110,6 +112,12 @@ private:
     /// k-way merges their row ids (remapped via merged_part_offsets) and encodes them
     /// either directly with the bitpacking codec or through the roaring fallback sink.
     void flushPostingList();
+    /// Fast path of flushPostingList for tokens whose merged cardinality fits into raw postings:
+    /// merges the values on the stack, without cursors or a roaring bitmap.
+    /// Returns nullopt if a source uses a layout other than raw or embedded postings.
+    std::optional<TokenPostingsInfo> tryMergeTinyTokenPostings(UInt64 total_cardinality);
+    /// Common tail of flushPostingList: positions data, accumulation, and per-token state reset.
+    void finalizeTokenInfo(TokenPostingsInfo token_info);
     void flushDictionaryBlock();
 
     std::vector<TextIndexSegment> segments;

@@ -111,4 +111,8 @@ private:
 /// Throws a LOGICAL_ERROR exception if the merged sequence is not strictly increasing.
 void mergeTokenPostings(std::span<TokenPostingsMergeCursor * const> cursors, const std::function<void(std::span<UInt32>)> & consume);
 
+/// Remaps source row ids to merged part row ids in place. No-op if the mapping is null.
+/// Throws a SUPPORT_IS_DISABLED exception if a remapped row id doesn't fit into UInt32.
+void remapPostingRowIds(std::span<UInt32> values, const MergedPartOffsets * merged_part_offsets, size_t part_index);
+
 }
