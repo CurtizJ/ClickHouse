@@ -1702,6 +1702,13 @@ the total storage volume of all the data to be merged. If the volume exceeds
 data to the storage disk using the direct I/O interface (`O_DIRECT` option).
 If `min_merge_bytes_to_use_direct_io = 0`, then direct I/O is disabled.
 )", 0) \
+    DECLARE(UInt64, max_rows_to_compress_merged_offsets, 100000000, R"(
+If the total number of rows in a merge is less than this value, the in-memory
+mapping from source part offsets to merged part offsets (used to remap row ids
+when merging text indexes and projections with a parent part offset) is stored
+in plain arrays instead of bit-packed pages. Plain storage uses 8 bytes per row
+but makes inserts and lookups cheaper. Value 0 means the mapping is always compressed.
+)", 0) \
     DECLARE(UInt64, index_granularity_bytes, 10 * 1024 * 1024, R"(
 Maximum size of data granules in bytes.
 

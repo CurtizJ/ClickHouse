@@ -136,6 +136,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsBool materialize_projections_on_merge;
     extern const MergeTreeSettingsUInt64 merge_max_block_size_bytes;
     extern const MergeTreeSettingsNonZeroUInt64 merge_max_block_size;
+    extern const MergeTreeSettingsUInt64 max_rows_to_compress_merged_offsets;
     extern const MergeTreeSettingsUInt64 min_merge_bytes_to_use_direct_io;
     extern const MergeTreeSettingsBool compute_exact_num_defaults_for_sparse_columns;
     extern const MergeTreeSettingsFloat ratio_of_defaults_for_sparse_serialization;
@@ -3099,6 +3100,12 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
     global_ctx->horizontal_stage_progress = std::make_unique<MergeStageProgress>(
         ctx->column_sizes ? ctx->column_sizes->keyColumnsWeight() : 1.0);
 
+    /// For small merges, keep the offsets mapping uncompressed: cheaper to build and to look up.
+    size_t total_source_rows = 0;
+    for (const auto & part : global_ctx->future_part->parts)
+        total_source_rows += part->rows_count;
+    const bool compress_merged_offsets = total_source_rows >= (*merge_tree_settings)[MergeTreeSetting::max_rows_to_compress_merged_offsets];
+
     Names merging_column_names = global_ctx->merging_columns.getNames();
     for (const auto * projection : global_ctx->projections_to_merge)
     {
@@ -3109,8 +3116,8 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
             {
                 chassert(global_ctx->merged_part_offsets == nullptr);
                 chassert(std::find(merging_column_names.begin(), merging_column_names.end(), "_part_index") == merging_column_names.end());
-                global_ctx->merged_part_offsets
-                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled);
+                global_ctx->merged_part_offsets = std::make_shared<MergedPartOffsets>(
+                    global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled, compress_merged_offsets);
                 merging_column_names.push_back("_part_index");
             }
             else
@@ -3126,7 +3133,8 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
         && !global_ctx->text_indexes_to_merge.empty()
         && (!global_ctx->merged_part_offsets || !global_ctx->merged_part_offsets->isMappingEnabled()))
     {
-        global_ctx->merged_part_offsets = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled);
+        global_ctx->merged_part_offsets = std::make_shared<MergedPartOffsets>(
+            global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled, compress_merged_offsets);
         merging_column_names.push_back("_part_index");
     }
 

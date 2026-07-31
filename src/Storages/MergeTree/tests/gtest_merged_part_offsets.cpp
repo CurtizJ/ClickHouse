@@ -305,6 +305,52 @@ TEST(PackedPartOffsetsTest, MemoryAllocation)
     EXPECT_GT(filled_memory, empty_memory);
 }
 
+// Test plain (uncompressed) storage mode
+TEST(PackedPartOffsetsTest, PlainStorageBasic)
+{
+    PackedPartOffsets offsets;
+    offsets.disableCompression();
+
+    std::vector<UInt64> values = {1, 2, 5, 10, 20};
+    for (const auto & val : values)
+        offsets.insert(val);
+
+    // Values must be readable both before and after flush (flush is a no-op).
+    for (size_t i = 0; i < values.size(); ++i)
+        EXPECT_EQ(offsets[i], values[i]);
+
+    offsets.flush();
+    offsets.clearTemporaryStorage();
+
+    for (size_t i = 0; i < values.size(); ++i)
+        EXPECT_EQ(offsets[i], values[i]);
+
+    EXPECT_GT(offsets.totalAllocatedMemory(), 0);
+}
+
+// Plain storage must return exactly the same values as compressed storage
+TEST(PackedPartOffsetsTest, PlainMatchesPacked)
+{
+    PackedPartOffsets packed;
+    PackedPartOffsets plain;
+    plain.disableCompression();
+
+    auto values = generateMonotonicValues(TEST_PAGE_SIZE * 2 + 123);
+    for (const auto & val : values)
+    {
+        packed.insert(val);
+        plain.insert(val);
+    }
+    packed.flush();
+    plain.flush();
+
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        EXPECT_EQ(packed[i], values[i]);
+        EXPECT_EQ(plain[i], values[i]);
+    }
+}
+
 //////////////////////////
 // MergedPartOffsets Tests
 //////////////////////////
@@ -368,6 +414,25 @@ TEST(MergedPartOffsetsTest, SizeAndEmpty)
     // Flush should not change size
     merged_offsets.flush();
     EXPECT_EQ(merged_offsets.size(), 5);
+}
+
+// Plain storage mode must produce the same mapping as the compressed one
+TEST(MergedPartOffsetsTest, PlainStorageMultipleParts)
+{
+    std::vector<UInt64> part_indices = {0, 1, 2, 0, 1, 2, 0, 1, 2};
+    MergedPartOffsets merged_offsets(3, MergedPartOffsets::MappingMode::Enabled, /*compress_offsets=*/ false);
+    merged_offsets.insert(part_indices.data(), part_indices.data() + part_indices.size());
+    merged_offsets.flush();
+
+    EXPECT_EQ(merged_offsets.size(), 9);
+
+    std::vector<UInt64> offsets(3);
+    for (size_t i = 0; i < part_indices.size(); ++i)
+    {
+        auto part = part_indices[i];
+        EXPECT_EQ((merged_offsets[part, offsets[part]]), i);
+        ++offsets[part];
+    }
 }
 
 TEST(MergedPartOffsetsTest, ManyValues)
