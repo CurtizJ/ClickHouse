@@ -668,12 +668,13 @@ bool MergeTextIndexesTask::executeStep()
 
         /// Postings are read and merged at flush time. The info must be copied because
         /// readDictionaryBlock below may replace the source block before the token is flushed.
-        pending_postings.push_back({current->order, inputs[current->order].token_infos[current->getRow()]});
+        /// The (source, row) pair is consumed exactly once, so the info can be moved out of the block.
+        pending_postings.push_back({current->order, std::move(inputs[current->order].token_infos[current->getRow()])});
 
         /// Read and merge position data if positions are enabled.
         if (params.positions)
         {
-            const auto & token_info = inputs[current->order].token_infos[current->getRow()];
+            const auto & token_info = pending_postings.back().info;
             if (token_info.header & PostingsSerialization::Flags::HasPositions)
             {
                 auto * pos_stream = input_streams[current->order].at(MergeTreeIndexSubstream::Type::TextIndexPositions);
