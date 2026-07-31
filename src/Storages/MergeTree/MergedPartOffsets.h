@@ -124,28 +124,10 @@ private:
     PODArray<UInt64> current_page_values;
     Arena arena;
 
-    /// If false, values are stored in `plain_values` as is: cheaper inserts and lookups
-    /// at the price of 8 bytes per row. Chosen once, before the first insert.
-    bool compress = true;
-    PaddedPODArray<UInt64> plain_values;
-
 public:
-    void disableCompression()
-    {
-        chassert(pages.empty() && current_page_values.empty() && plain_values.empty());
-        compress = false;
-    }
-
     /// @param val The _part_offset value to insert (must be greater than all previously inserted values)
     void insert(UInt64 val)
     {
-        if (!compress)
-        {
-            chassert(plain_values.empty() || plain_values.back() < val);
-            plain_values.push_back(val);
-            return;
-        }
-
         if (current_page_values.size() >= PACKED_PAGE_SIZE)
             flush();
 
@@ -157,7 +139,7 @@ public:
     /// Called automatically when a page is full or at the end to finalize the structure.
     void flush()
     {
-        if (!compress || current_page_values.empty())
+        if (current_page_values.empty())
             return;
 
         if (current_page_values.size() == 1)
@@ -182,28 +164,15 @@ public:
     /// Decompresses the _part_offset value at the specified index
     UInt64 operator[](size_t i) const
     {
-        if (!compress)
-        {
-            chassert(i < plain_values.size());
-            return plain_values[i];
-        }
-
         size_t page_pos = i >> PACKED_PAGE_SIZE_DEGREE;
         chassert(page_pos < pages.size());
         size_t page_idx = i & PACKED_PAGE_MASK;
         return pages[page_pos][page_idx];
     }
 
-    void clearTemporaryStorage()
-    {
-        if (compress)
-            current_page_values = {};
-    }
+    void clearTemporaryStorage() { current_page_values = {}; }
 
-    size_t totalAllocatedMemory() const
-    {
-        return pages.allocated_bytes() + current_page_values.allocated_bytes() + arena.allocatedBytes() + plain_values.allocated_bytes();
-    }
+    size_t totalAllocatedMemory() const { return pages.allocated_bytes() + current_page_values.allocated_bytes() + arena.allocatedBytes(); }
 };
 
 
@@ -219,19 +188,11 @@ public:
         Disabled /// No mapping needed (e.g., no sorting key)
     };
 
-    /// If compress_offsets is false, per-part mappings are stored in plain arrays
-    /// instead of bit-packed pages. Makes sense for merges with a small number of rows,
-    /// where lookup speed matters more than the memory saved by compression.
-    explicit MergedPartOffsets(size_t num_parts, MappingMode mode_ = MappingMode::Enabled, bool compress_offsets = true)
+    explicit MergedPartOffsets(size_t num_parts, MappingMode mode_ = MappingMode::Enabled)
         : mode(mode_)
         , offset_maps(mode == MappingMode::Enabled ? num_parts : 0)
         , finalized(mode == MappingMode::Disabled)
     {
-        if (!compress_offsets)
-        {
-            for (auto & map : offset_maps)
-                map.disableCompression();
-        }
     }
 
     /// Records _part_offset mappings for a batch of _part_index values.
