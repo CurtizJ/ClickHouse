@@ -1,0 +1,56 @@
+parts before merge	3
+source posting lists per part
+big0	400	0	0	0	1
+cmp67	6	1	1	0	1
+common	400	0	0	0	1
+edge256	86	0	0	0	1
+edge257	86	0	0	0	1
+emb33	3	1	1	0	1
+mix3a	3	1	1	0	1
+only0	5	1	1	0	1
+raw34	3	1	1	0	1
+raw66	6	1	1	0	1
+cmp67	7	0	1	0	1
+common	400	0	0	0	1
+edge256	85	0	0	0	1
+edge257	86	0	0	0	1
+emb33	3	1	1	0	1
+mix3a	300	0	0	0	1
+mixraw	300	0	0	0	1
+only1	5	1	1	0	1
+raw34	4	1	1	0	1
+raw66	6	1	1	0	1
+common	400	0	0	0	1
+edge256	85	0	0	0	1
+edge257	85	0	0	0	1
+mixraw	10	0	1	0	1
+only2	5	1	1	0	1
+parts after merge	1
+merged posting lists
+big0	400	0	0	0	1
+cmp67	13	0	0	0	1
+common	1200	0	0	0	1
+edge256	256	0	0	0	1
+edge257	257	0	0	0	1
+emb33	6	1	1	0	1
+mix3a	303	0	0	0	1
+mixraw	310	0	0	0	1
+only0	5	1	1	0	1
+only1	5	1	1	0	1
+only2	5	1	1	0	1
+raw34	7	0	1	0	1
+raw66	12	0	1	0	1
+search results after merge: with index vs brute force
+common	(1200,719400)	(1200,719400)
+big0	(400,239400)	(400,239400)
+only0	(5,30)	(5,30)
+only1	(5,35)	(5,35)
+only2	(5,40)	(5,40)
+emb33	(6,21)	(6,21)
+raw34	(7,31)	(7,31)
+raw66	(12,96)	(12,96)
+cmp67	(13,115)	(13,115)
+mix3a	(303,134859)	(303,134859)
+mixraw	(310,135005)	(310,135005)
+edge256	(256,32640)	(256,32640)
+edge257	(257,32896)	(257,32896)

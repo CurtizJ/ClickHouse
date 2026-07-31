@@ -105,11 +105,10 @@ private:
     bool isNewToken(const SortCursor & cursor) const;
     /// Reads the next dictionary block for the given source index.
     void readDictionaryBlock(size_t source_num);
-    /// Reads the next posting lists for the next token in the given source index.
-    std::vector<PostingListPtr> readPostingLists(size_t source_num);
-    /// Adjusts row numbers in the postings list according to merged part offsets.
-    PostingListPtr adjustPartOffsets(size_t source_num, PostingListPtr posting_list);
 
+    /// Streams the pending sources of the current token into the output posting list:
+    /// k-way merges their row ids (remapped via merged_part_offsets) and encodes them
+    /// either directly with the bitpacking codec or through the roaring fallback sink.
     void flushPostingList();
     void flushDictionaryBlock();
 
@@ -136,11 +135,29 @@ private:
     std::vector<DictionaryBlock> inputs;
     SortingQueue<SortCursor> queue;
 
+    /// One source's postings of the token that is currently being merged.
+    /// The info is copied from the source dictionary block, because the block
+    /// may be replaced by readDictionaryBlock before the token is flushed.
+    struct PendingTokenPostings
+    {
+        size_t source_num;
+        TokenPostingsInfo info;
+    };
+
+    /// Per-source postings format resolved from the source part's index header.
+    struct SourcePostingsFormat
+    {
+        IPostingListCodec::Type codec_type;
+        MergeTreeIndexVersion version;
+    };
+
     /// Tokens accumulated for the current dictionary block.
     MutableColumnPtr output_tokens;
     /// Tokens infos accumulated for the current dictionary block.
     std::vector<TokenPostingsInfo> output_infos;
-    /// Postings accumulated for the current token.
+    /// Sources of the current token accumulated since the last flush.
+    std::vector<PendingTokenPostings> pending_postings;
+    /// Postings of the current token, used only by the roaring fallback sink of flushPostingList.
     PostingList output_postings;
     /// Positions accumulated for the current token (phrase query support).
     PODArray<RoaringishEntry> output_positions;
@@ -152,6 +169,8 @@ private:
     PostingsSerialization postings_serialization;
     /// Per-source deserializers, each using the codec read from that source part's own header.
     std::vector<PostingsSerialization> source_postings_serializations;
+    /// Per-source codec type and serialization version, used to build merge cursors.
+    std::vector<SourcePostingsFormat> source_formats;
 
     bool is_initialized = false;
 };

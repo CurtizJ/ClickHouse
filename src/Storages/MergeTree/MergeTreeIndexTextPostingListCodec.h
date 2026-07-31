@@ -29,6 +29,7 @@ namespace ErrorCodes
 /// Assumes that input row ids are strictly increasing.
 class PostingListCodecBitpackingImpl
 {
+public:
     /// Header written at the beginning of each segment before the payload.
     struct Header
     {
@@ -75,6 +76,15 @@ class PostingListCodecBitpackingImpl
         uint32_t first_row_id = 0;
     };
 
+    /// Reads one segment header at the current position of `in`, validating the codec type tag.
+    static Header readSegmentHeader(ReadBuffer & in)
+    {
+        Header header;
+        header.read(in);
+        return header;
+    }
+
+private:
     /// In-memory descriptor of one segment inside `compressed_data`.
     struct SegmentDescriptor
     {
@@ -143,6 +153,14 @@ public:
     /// to reconstruct absolute row ids.
     void decode(ReadBuffer & in, PostingList & postings);
 
+    /// Decode one compressed block into `current_segment` and reconstruct absolute row ids.
+    ///
+    /// - Reads bits-width byte
+    /// - Codec::decode fills `current_segment` with delta values
+    /// - inclusive_scan converts deltas -> row ids using `prev_row_id` as initial prefix
+    /// - Updates prev_row_id to the last decoded row id
+    static void decodeBlock(std::span<const std::byte> & in, size_t count, uint32_t & prev_row_id, std::vector<uint32_t> & current_segment);
+
 private:
     void reset()
     {
@@ -189,14 +207,6 @@ private:
     ///
     /// Also updates current segment metadata (count, max, payload size).
     void encodeBlock(std::span<uint32_t> segment);
-
-    /// Decode one compressed block into `current_segment` and reconstruct absolute row ids.
-    ///
-    /// - Reads bits-width byte
-    /// - Codec::decode fills `current_segment` with delta values
-    /// - inclusive_scan converts deltas -> row ids using `prev_row_id` as initial prefix
-    /// - Updates prev_row_id to the last decoded row id
-    static void decodeBlock(std::span<const std::byte> & in, size_t count, uint32_t & prev_row_id, std::vector<uint32_t> & current_segment);
 
     /// All segments
     std::string compressed_data;

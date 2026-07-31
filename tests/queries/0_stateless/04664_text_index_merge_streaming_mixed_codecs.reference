@@ -1,0 +1,34 @@
+none source + bitpacking source merged into bitpacking destination
+source codecs differ (p1big, p2big)
+0
+1
+parts after merge	1
+merged posting lists
+bulk	600	0	0	1	3
+common	800	0	0	1	4
+p1big	400	0	0	1	2
+p2big	400	0	0	1	2
+shared	20	0	0	1	1
+search results after merge: with index vs brute force
+common	(800,319600)	(800,319600)
+shared	(20,190)	(20,190)
+bulk	(600,179700)	(600,179700)
+p1big	(400,159600)	(400,159600)
+p2big	(400,160000)	(400,160000)
+bitpacking source + none source merged into none destination
+source codecs differ (p1big, p2big)
+1
+0
+parts after merge	1
+merged posting lists
+bulk	600	0	0	0	1
+common	800	0	0	0	1
+p1big	400	0	0	0	1
+p2big	400	0	0	0	1
+shared	20	0	0	0	1
+search results after merge: with index vs brute force
+common	(800,319600)	(800,319600)
+shared	(20,190)	(20,190)
+bulk	(600,179700)	(600,179700)
+p1big	(400,159600)	(400,159600)
+p2big	(400,160000)	(400,160000)

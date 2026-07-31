@@ -148,6 +148,16 @@ private:
     UInt8 small_size;
 };
 
+/// Posting lists up to this cardinality are serialized as raw VarUInt values:
+/// the minimal size of a serialized Roaring Bitmap is 48 bytes, so tiny lists don't use it.
+static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
+/// Posting lists up to this cardinality are embedded into the dictionary block
+/// to avoid additional random reads from disk.
+static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = 6;
+
+static_assert(MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS must be less or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
+static_assert(PostingListBuilder::max_small_size <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "max_small_size must be less than or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
+
 /// Save BulkContext to optimize consecutive insertions into the posting list.
 using TokenToPostingsBuilderMap = StringHashMap<PostingListBuilder>;
 /// A token paired with its posting/position builder views.

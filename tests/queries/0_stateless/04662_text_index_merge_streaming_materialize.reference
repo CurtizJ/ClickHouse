@@ -1,0 +1,31 @@
+parts before merge	3
+parts without materialized index before merge	2
+search before merge (index partially materialized)
+1200
+313
+parts after merge	1
+parts without materialized index after merge	0
+merged posting lists
+bigidx	400	0	0	1	2
+bignoidx	400	0	0	1	2
+cmp	13	0	0	1	1
+common	1200	0	0	1	5
+emb	6	1	1	0	1
+idx1	5	1	1	0	1
+mixm	313	0	0	1	2
+noidx0	5	1	1	0	1
+noidx2	5	1	1	0	1
+search results after merge: with index vs brute force
+common	(1200,719400)	(1200,719400)
+bignoidx	(400,239400)	(400,239400)
+bigidx	(400,239800)	(400,239800)
+noidx0	(5,30)	(5,30)
+idx1	(5,35)	(5,35)
+noidx2	(5,40)	(5,40)
+emb	(6,21)	(6,21)
+cmp	(13,115)	(13,115)
+mixm	(313,134717)	(313,134717)
+multi-token search functions
+5
+10
+300

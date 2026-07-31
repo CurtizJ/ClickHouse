@@ -1,0 +1,31 @@
+parts before merge	3
+phrase search before merge
+600
+300
+3
+parts after merge	1
+merged posting lists
+alpha	6	1	1	0	1
+beta	6	1	1	0	1
+brown	900	0	0	1	4
+dog	150	0	0	1	1
+fox	900	0	0	1	4
+lazy	150	0	0	1	1
+marker	144	0	0	1	1
+quick	900	0	0	1	4
+sleeps	150	0	0	1	1
+w	6	1	1	0	1
+zpart0	48	0	0	1	1
+zpart1	48	0	0	1	1
+zpart2	48	0	0	1	1
+phrase search after merge: with index vs brute force
+quick brown	(600,179700)	(600,179700)
+brown quick	(300,224850)	(300,224850)
+brown fox	(600,179700)	(600,179700)
+quick fox	(300,224850)	(300,224850)
+alpha beta	(3,3153)	(3,3153)
+w alpha	(3,3153)	(3,3153)
+w beta	(3,3162)	(3,3162)
+zpart1 marker	(48,54120)	(48,54120)
+marker zpart1	(0,0)	(0,0)
+fox jumps	(0,0)	(0,0)

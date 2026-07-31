@@ -2418,12 +2418,14 @@ bool MergeTask::MergeTextIndexStage::prepare() const
             }
         }
 
+        /// When rows may be reduced, segments were rebuilt from the merged stream and already
+        /// carry final row ids, so no remapping must be applied.
         auto task = std::make_unique<MergeTextIndexesTask>(
             std::move(segments),
             global_ctx->new_data_part,
             global_ctx->rows_written,
             index_ptr,
-            global_ctx->merged_part_offsets,
+            global_ctx->merge_may_reduce_rows ? nullptr : global_ctx->merged_part_offsets,
             reader_settings,
             global_ctx->to->getWriterSettings(),
             ctx->need_sync);

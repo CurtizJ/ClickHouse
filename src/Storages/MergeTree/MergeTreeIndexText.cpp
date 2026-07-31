@@ -82,12 +82,6 @@ namespace Setting
     extern const SettingsFloat text_index_hint_max_selectivity;
 }
 
-static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
-static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = 6;
-
-static_assert(MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS must be less or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
-static_assert(PostingListBuilder::max_small_size <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "max_small_size must be less than or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
-
 /// Kept as a fixed default rather than a MergeTree setting: a mutable table-level default would let
 /// an index's positions value change after parts exist, mixing positional and non-positional parts
 /// within one index.
