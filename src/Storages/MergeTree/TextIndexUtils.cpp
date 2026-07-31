@@ -400,8 +400,7 @@ void MergeTextIndexesTask::flushPostingList()
     TokenPostingsInfo token_info;
     const auto * destination_codec = postings_serialization.getPostingListCodec();
 
-    if (total_cardinality > MAX_CARDINALITY_FOR_RAW_POSTINGS
-        && destination_codec->getType() == IPostingListCodec::Type::Bitpacking)
+    if (total_cardinality > MAX_CARDINALITY_FOR_RAW_POSTINGS && destination_codec->getType() == IPostingListCodec::Type::Bitpacking)
     {
         /// Stream the merged row ids directly into the bitpacking codec,
         /// without materializing an intermediate posting list.
