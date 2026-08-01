@@ -1,15 +1,24 @@
 #pragma once
 
+#include <optional>
+
 #include <base/types.h>
 #include <Common/Allocator.h>
 #include <Common/Arena.h>
 #include <Common/BitHelpers.h>
+#include <Common/Exception.h>
 #include <Common/PODArray.h>
 #include <Common/formatReadable.h>
 #include <Common/logger_useful.h>
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int INCORRECT_DATA;
+    extern const int LOGICAL_ERROR;
+}
 
 /// Stores _part_offset mapping in a memory-efficient format.
 /// When parts merge, source rows may scatter into the destination,
@@ -37,9 +46,9 @@ private:
     struct Page
     {
     public:
-        /// Special page that holds only one value
-        explicit Page(UInt64 val)
-            : num_vals(1)
+        /// Special page that holds `num_vals_` copies of a single value
+        explicit Page(UInt64 val, size_t num_vals_ = 1)
+            : num_vals(num_vals_)
             , min_val(val)
             , bits_per_val(0)
             , compressed_data(nullptr)
@@ -92,8 +101,8 @@ private:
         {
             chassert(i < num_vals);
 
-            // First value is always the minimum value
-            if (i == 0)
+            // First value is always the minimum value, and a single-value page repeats it
+            if (i == 0 || bits_per_val == 0)
                 return min_val;
 
             // Calculate bit position and decode compressed value
@@ -125,13 +134,13 @@ private:
     Arena arena;
 
 public:
-    /// @param val The _part_offset value to insert (must be greater than all previously inserted values)
+    /// @param val The value to insert (must not be less than all previously inserted values)
     void insert(UInt64 val)
     {
         if (current_page_values.size() >= PACKED_PAGE_SIZE)
             flush();
 
-        chassert(current_page_values.empty() || current_page_values.back() < val);
+        chassert(current_page_values.empty() || current_page_values.back() <= val);
         current_page_values.push_back(val);
     }
 
@@ -142,10 +151,11 @@ public:
         if (current_page_values.empty())
             return;
 
-        if (current_page_values.size() == 1)
+        if (current_page_values.back() == current_page_values.front())
         {
-            /// Construct a single value page
-            pages.emplace_back(current_page_values[0]);
+            /// Construct a page that repeats a single value
+            pages.emplace_back(current_page_values.front(), current_page_values.size());
+            current_page_values.clear();
             return;
         }
 
@@ -179,19 +189,41 @@ public:
 /// Manages _part_offset mapping during data part merges.
 /// Tracks how rows from original parts are positioned in the merged result.
 /// Provides efficient lookup from original _part_offset to new _part_offset in merged data.
+///
+/// In EnabledWithDrops mode the mapping additionally records source rows dropped by the merge
+/// (e.g. by ReplacingMergeTree, lightweight deletes or TTL). Each source row of a part has one
+/// entry indexed by its original _part_offset:
+///   surviving row with new offset n -> (n << 1) | 1
+///   dropped row                     -> (m + 1) << 1, where m is the new offset of the part's
+///                                      previous surviving row (or -1 if there is none yet)
+/// Values stay non-decreasing per part, which keeps the frame-of-reference pages compact.
 class MergedPartOffsets
 {
 public:
     enum class MappingMode
     {
-        Enabled, /// Full offset mapping is required
-        Disabled /// No mapping needed (e.g., no sorting key)
+        Enabled,          /// Full offset mapping is required, every source row survives the merge
+        EnabledWithDrops, /// Full offset mapping is required, the merge may drop source rows
+        Disabled          /// No mapping needed (e.g., no sorting key)
     };
 
     explicit MergedPartOffsets(size_t num_parts, MappingMode mode_ = MappingMode::Enabled)
         : mode(mode_)
         , offset_maps(mode == MappingMode::Enabled ? num_parts : 0)
         , finalized(mode == MappingMode::Disabled)
+    {
+        chassert(mode != MappingMode::EnabledWithDrops);
+    }
+
+    /// EnabledWithDrops mode: per-part numbers of source rows are required
+    /// to record the rows dropped after each part's last surviving row.
+    explicit MergedPartOffsets(std::vector<UInt64> part_rows_)
+        : mode(MappingMode::EnabledWithDrops)
+        , offset_maps(part_rows_.size())
+        , part_rows(std::move(part_rows_))
+        , next_part_offsets(part_rows.size())
+        , dropped_values(part_rows.size())
+        , finalized(false)
     {
     }
 
@@ -206,12 +238,75 @@ public:
         }
     }
 
+    /// Records mappings for a batch of (_part_index, _part_offset) pairs of surviving rows.
+    /// Source rows missing from the per-part offset sequences are recorded as dropped.
+    void insert(const UInt64 * begin_part_index, const UInt64 * end_part_index, const UInt64 * begin_part_offset)
+    {
+        chassert(mode == MappingMode::EnabledWithDrops);
+
+        const UInt64 * offset_it = begin_part_offset;
+        for (const UInt64 * it = begin_part_index; it != end_part_index; ++it, ++offset_it)
+        {
+            UInt64 part_index = *it;
+            UInt64 part_offset = *offset_it;
+            chassert(part_index < offset_maps.size());
+
+            if (part_offset >= part_rows[part_index])
+                throw Exception(
+                    ErrorCodes::LOGICAL_ERROR,
+                    "Got row with offset {} for source part {} that has only {} rows",
+                    part_offset, part_index, part_rows[part_index]);
+
+            UInt64 & next_offset = next_part_offsets[part_index];
+
+            /// Surviving rows of one part must keep their relative order in the merged part.
+            /// A violation means the data is corrupted, e.g. the sign column
+            /// of CollapsingMergeTree has values other than 1 and -1.
+            if (part_offset < next_offset)
+                throw Exception(
+                    ErrorCodes::INCORRECT_DATA,
+                    "Rows of source part {} are merged out of order: got row with offset {} after {} rows of the part have been consumed. "
+                    "It may be caused by corrupted data, e.g. incorrect values of the sign column in CollapsingMergeTree",
+                    part_index, part_offset, next_offset);
+
+            auto & offset_map = offset_maps[part_index];
+            UInt64 & dropped_value = dropped_values[part_index];
+
+            for (; next_offset < part_offset; ++next_offset)
+            {
+                offset_map.insert(dropped_value);
+                ++num_dropped;
+            }
+
+            offset_map.insert((num_rows << 1) | 1);
+            dropped_value = (num_rows + 1) << 1;
+            ++next_offset;
+            ++num_rows;
+        }
+    }
+
     /// Looks up the new _part_offset in the merged data.
     UInt64 operator[](UInt64 part_index, UInt64 part_offset) const
     {
         chassert(mode == MappingMode::Enabled);
         chassert(part_index < offset_maps.size());
         return offset_maps[part_index][part_offset];
+    }
+
+    /// Looks up the new _part_offset in the merged data.
+    /// Returns std::nullopt if the source row was dropped by the merge.
+    std::optional<UInt64> tryGetNewOffset(UInt64 part_index, UInt64 part_offset) const
+    {
+        chassert(mode != MappingMode::Disabled);
+        chassert(part_index < offset_maps.size());
+
+        if (mode == MappingMode::Enabled)
+            return offset_maps[part_index][part_offset];
+
+        UInt64 value = offset_maps[part_index][part_offset];
+        if (!(value & 1))
+            return std::nullopt;
+        return value >> 1;
     }
 
     /// Finalizes all _part_offset maps and releases temporary buffers.
@@ -224,7 +319,20 @@ public:
         chassert(!finalized);
         finalized = true;
 
-        if (num_rows == 0)
+        if (mode == MappingMode::EnabledWithDrops)
+        {
+            /// Record the rows dropped after the last surviving row of each part.
+            for (size_t part_index = 0; part_index < offset_maps.size(); ++part_index)
+            {
+                for (UInt64 & next_offset = next_part_offsets[part_index]; next_offset < part_rows[part_index]; ++next_offset)
+                {
+                    offset_maps[part_index].insert(dropped_values[part_index]);
+                    ++num_dropped;
+                }
+            }
+        }
+
+        if (num_rows == 0 && num_dropped == 0)
             return;
 
         size_t total_allocated_memory = 0;
@@ -237,13 +345,21 @@ public:
 
         LOG_DEBUG(
             logger,
-            "Holding {} merged _part_offset in memory with {} total allocated memory",
+            "Holding {} merged _part_offset ({} dropped) in memory with {} total allocated memory",
             num_rows,
+            num_dropped,
             formatReadableSizeWithBinarySuffix(total_allocated_memory));
     }
 
     bool isFinalized() const { return finalized; }
-    bool isMappingEnabled() const { return mode == MappingMode::Enabled; }
+    bool isMappingEnabled() const { return mode != MappingMode::Disabled; }
+    bool isMappingWithDrops() const { return mode == MappingMode::EnabledWithDrops; }
+
+    bool hasDroppedRows() const
+    {
+        chassert(finalized);
+        return num_dropped > 0;
+    }
 
     bool empty() const { return num_rows == 0; }
     size_t size() const { return num_rows; }
@@ -251,15 +367,25 @@ public:
     void clear()
     {
         offset_maps.clear();
+        part_rows.clear();
+        next_part_offsets.clear();
+        dropped_values.clear();
         num_rows = 0;
     }
 
 private:
     MappingMode mode;
     std::vector<PackedPartOffsets> offset_maps;
+
+    /// Used only in EnabledWithDrops mode.
+    std::vector<UInt64> part_rows;          /// Number of source rows per part
+    std::vector<UInt64> next_part_offsets;  /// Next expected source offset per part
+    std::vector<UInt64> dropped_values;     /// Encoded value for dropped rows per part
+
     bool finalized;
 
     size_t num_rows = 0;
+    size_t num_dropped = 0;
     LoggerPtr logger = getLogger("MergedPartOffsets");
 };
 

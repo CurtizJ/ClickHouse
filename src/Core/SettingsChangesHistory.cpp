@@ -1334,6 +1334,7 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
         {
             {"text_index_max_processed_tokens_before_flush", 100000000, 100000000, "New setting"},
             {"text_index_max_memory_usage_before_flush", std::numeric_limits<UInt64>::max(), 1073741824, "New setting. The previous value disables memory-based flushing to preserve pre-26.8 behavior"},
+            {"merge_text_indexes_and_projections_on_delete_only_merges", false, true, "New setting to merge text indexes and projections with the `_part_offset` column instead of rebuilding them in merges that can only delete rows"},
         });
 
         addSettingsChanges(merge_tree_settings_changes_history, "26.7",

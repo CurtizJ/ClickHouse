@@ -382,21 +382,38 @@ PostingListPtr MergeTextIndexesTask::adjustPartOffsets(size_t source_num, Postin
     posting_list->toUint32Array(offsets.data());
     size_t part_index = segments[source_num].part_index;
 
-    for (auto & offset : offsets)
+    size_t num_remapped = 0;
+    for (auto offset : offsets)
     {
-        UInt64 new_offset = (*merged_part_offsets)[part_index, offset];
-        if (new_offset > std::numeric_limits<UInt32>::max())
+        auto new_offset = merged_part_offsets->tryGetNewOffset(part_index, offset);
+
+        /// The row was dropped by the merge.
+        if (!new_offset)
+            continue;
+
+        if (*new_offset > std::numeric_limits<UInt32>::max())
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
                 "Cannot merge text index: remapped row id {} exceeds the maximum supported row id {}",
-                new_offset, std::numeric_limits<UInt32>::max());
-        offset = static_cast<UInt32>(new_offset);
+                *new_offset, std::numeric_limits<UInt32>::max());
+
+        offsets[num_remapped++] = static_cast<UInt32>(*new_offset);
     }
 
-    return std::make_shared<PostingList>(offsets.size(), offsets.data());
+    return std::make_shared<PostingList>(num_remapped, offsets.data());
 }
 
 void MergeTextIndexesTask::flushPostingList()
 {
+    /// All doc ids of the token may be dropped with the rows deleted by the merge.
+    /// Such a token must be omitted from the merged dictionary.
+    if (output_postings.isEmpty())
+    {
+        chassert(!output_tokens->empty());
+        output_tokens->popBack(1);
+        output_positions.clear();
+        return;
+    }
+
     auto * postings_stream = output_streams.at(MergeTreeIndexSubstream::Type::TextIndexPostings);
     PostingListBuilder builder(&output_postings);
     auto token_info = TextIndexSerialization::serializePostings(builder, *postings_stream, params, postings_serialization);
@@ -520,7 +537,9 @@ bool MergeTextIndexesTask::executeStep()
 
         if (isNewToken(current))
         {
-            if (!output_postings.isEmpty())
+            /// If the tokens column is not empty, its last token's postings are accumulated
+            /// in output_postings and must be flushed (or the token dropped if they are empty).
+            if (!output_tokens->empty())
                 flushPostingList();
 
             if (output_tokens->size() >= params.dictionary_block_size)
@@ -554,15 +573,23 @@ bool MergeTextIndexesTask::executeStep()
                 if (merged_part_offsets)
                 {
                     size_t part_index = segments[current->order].part_index;
-                    for (auto & entry : position_entries)
+                    size_t num_remapped = 0;
+                    for (const auto & entry : position_entries)
                     {
-                        UInt64 new_doc_id = (*merged_part_offsets)[part_index, entry.doc_id];
-                        if (new_doc_id > std::numeric_limits<UInt32>::max())
+                        auto new_doc_id = merged_part_offsets->tryGetNewOffset(part_index, entry.doc_id);
+
+                        /// The row was dropped by the merge.
+                        if (!new_doc_id)
+                            continue;
+
+                        if (*new_doc_id > std::numeric_limits<UInt32>::max())
                             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
                                 "Cannot merge text index: remapped row id {} exceeds the maximum supported row id {}",
-                                new_doc_id, std::numeric_limits<UInt32>::max());
-                        entry = entry.withDocId(static_cast<UInt32>(new_doc_id));
+                                *new_doc_id, std::numeric_limits<UInt32>::max());
+
+                        position_entries[num_remapped++] = entry.withDocId(static_cast<UInt32>(*new_doc_id));
                     }
+                    position_entries.resize(num_remapped);
                 }
 
                 output_positions.insert(output_positions.end(), position_entries.begin(), position_entries.end());
@@ -585,7 +612,7 @@ bool MergeTextIndexesTask::executeStep()
 
 void MergeTextIndexesTask::finalize()
 {
-    if (!output_postings.isEmpty())
+    if (!output_tokens->empty())
         flushPostingList();
 
     if (!output_tokens->empty())
