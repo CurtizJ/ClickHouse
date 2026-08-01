@@ -145,7 +145,9 @@ private:
 
     SortCursorImpls cursors;
     std::vector<DictionaryBlock> inputs;
-    SortingQueue<TokenSortCursor> queue;
+    /// Batch queue: consecutive rows of the top cursor that sort before the next-best
+    /// cursor are consumed as one run, with a single heap fixup per run.
+    SortingQueueBatch<TokenSortCursor> queue;
 
     /// One source's postings of the token that is currently being merged.
     /// The info is copied from the source dictionary block, because the block
