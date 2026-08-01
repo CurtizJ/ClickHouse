@@ -8,6 +8,7 @@
 #include <Storages/MergeTree/MergedPartOffsets.h>
 #include <Storages/MergeTree/TextIndexSegment.h>
 #include <Core/SortCursor.h>
+#include <Columns/ColumnString.h>
 #include <Processors/ISimpleTransform.h>
 
 #include <optional>
@@ -103,8 +104,11 @@ private:
     Block getHeader() const;
     void initializeQueue();
 
+    /// Cursor over the single String sort column with statically dispatched comparisons.
+    using TokenSortCursor = SpecializedSingleColumnSortCursor<ColumnString>;
+
     /// Returns true if the given cursor points to a new token.
-    bool isNewToken(const SortCursor & cursor) const;
+    bool isNewToken(const TokenSortCursor & cursor) const;
     /// Reads the next dictionary block for the given source index.
     void readDictionaryBlock(size_t source_num);
 
@@ -141,7 +145,7 @@ private:
 
     SortCursorImpls cursors;
     std::vector<DictionaryBlock> inputs;
-    SortingQueue<SortCursor> queue;
+    SortingQueue<TokenSortCursor> queue;
 
     /// One source's postings of the token that is currently being merged.
     /// The info is copied from the source dictionary block, because the block
