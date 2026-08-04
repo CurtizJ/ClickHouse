@@ -160,6 +160,10 @@ private:
 
     bool traverseAtomNode(const RPNBuilderTreeNode & node, RPNElement & out) const;
 
+    /// True for the self-contained 3-argument text-search form whose explicit tokenizer
+    /// matches this index (see the definition for the exact conditions).
+    bool isTokenizedTextSearchForm(const RPNBuilderFunctionTreeNode & function_node) const;
+
     bool traverseFunctionNode(
         const RPNBuilderFunctionTreeNode & function_node,
         const RPNBuilderTreeNode & index_column_node,

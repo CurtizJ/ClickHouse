@@ -595,6 +595,32 @@ bool MergeTreeIndexConditionText::hasSearchPatterns() const
     return std::ranges::any_of(all_search_queries, [](const auto & query) { return !query.second->getPatterns().empty(); });
 }
 
+/// `hasAnyTokens`/`hasAllTokens`/`hasPhrase` have a self-contained 3-argument form with an explicit
+/// tokenizer, e.g. `hasAnyTokens(s, ['a', 'b'], 'splitByNonAlpha')`; the query-plan rewrite of the
+/// 2-argument form produces exactly this form too. The index can answer it only when the explicit
+/// tokenizer equals the index tokenizer and the index has no pre/postprocessor: those transforms are
+/// baked into the indexed tokens but not into the function's arguments, so token sets would disagree.
+bool MergeTreeIndexConditionText::isTokenizedTextSearchForm(const RPNBuilderFunctionTreeNode & function_node) const
+{
+    if (function_node.getArgumentsSize() != 3)
+        return false;
+
+    const auto function_name = function_node.getFunctionName();
+    if (function_name != "hasAnyTokens" && function_name != "hasAllTokens" && function_name != "hasPhrase")
+        return false;
+
+    if (has_preprocessor || has_postprocessor)
+        return false;
+
+    Field tokenizer_value;
+    DataTypePtr tokenizer_type;
+    if (!function_node.getArgumentAt(2).tryGetConstant(tokenizer_value, tokenizer_type))
+        return false;
+
+    return tokenizer_value.getType() == Field::Types::String
+        && tokenizer_value.safeGet<String>() == tokenizer->getDescription();
+}
+
 bool MergeTreeIndexConditionText::traverseAtomNode(const RPNBuilderTreeNode & node, RPNElement & out) const
 {
     {
@@ -636,7 +662,7 @@ bool MergeTreeIndexConditionText::traverseAtomNode(const RPNBuilderTreeNode & no
         if (traverseJSONSubcolumnKeyNode(function, out))
             return true;
 
-        if (function_arguments_size != 2)
+        if (function_arguments_size != 2 && !isTokenizedTextSearchForm(function))
             return false;
 
         auto lhs_argument = function.getArgumentAt(0);

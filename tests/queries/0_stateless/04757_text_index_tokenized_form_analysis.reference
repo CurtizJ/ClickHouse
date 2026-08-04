@@ -1,0 +1,21 @@
+-- result parity: 2-arg vs 3-arg
+1
+1
+1
+1
+1
+1
+-- static granule pruning engages for the 3-arg form
+Parts: 1 | Granules: 1
+Granules: 8/8
+Granules: 1/8
+-- direct read engages for the 3-arg forms
+1
+1
+1
+-- a mismatched tokenizer argument must not use the index
+0
+1
+-- an index with a preprocessor must not match the 3-arg form (2-arg control does)
+0
+1
