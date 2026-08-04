@@ -219,6 +219,19 @@ void optimizeTreeSecondPass(
         optimization_settings.make_distributed_plan,
     };
 
+    /// Direct read from a text index rewrites the predicate to a synthetic `__text_index_*` column
+    /// backed by per-step state (`index_read_tasks`, an augmented storage snapshot) that does not
+    /// survive `ReadFromMergeTree` serialization: a node receiving such a plan fragment cannot
+    /// resolve the column against the table. When this plan may still ship reads to another node
+    /// (make_distributed_plan stages, plan-based parallel replicas fragments), defer the rewrite:
+    /// every plan instance that finally executes a read is re-optimized with both features off
+    /// (worker task execution, the single-stage local re-run, the parallel-replicas local fragment,
+    /// a remote replica optimizing the deserialized fragment) and applies the rewrite to its own
+    /// parts there. Reads that stay in this plan under parallel replicas are rewritten by the
+    /// top-up pass after `applyParallelReplicas` below.
+    const bool defer_direct_read_from_text_index
+        = optimization_settings.make_distributed_plan || optimization_settings.enable_parallel_replicas;
+
     Stack stack;
     stack.push_back({.node = &root});
 
@@ -230,7 +243,8 @@ void optimizeTreeSecondPass(
         updateQueryConditionCache(stack, optimization_settings);
 
         /// Must be executed after index analysis and before PREWHERE optimization.
-        processAndOptimizeTextIndexFunctions(stack, nodes, optimization_settings.direct_read_from_text_index);
+        processAndOptimizeTextIndexFunctions(
+            stack, nodes, optimization_settings.direct_read_from_text_index && !defer_direct_read_from_text_index);
 
         auto & frame = stack.back();
 
@@ -365,6 +379,33 @@ void optimizeTreeSecondPass(
         });
 
     applyParallelReplicas(query_plan, nodes, optimization_settings);
+
+    /// Top-up for the deferred direct read under plan-based parallel replicas: reads NOT captured
+    /// into fragments (the non-parallelized side of a JOIN, plans that stayed local because of
+    /// FINAL / subquery sets / an unusable cluster) execute in this plan instance, so rewrite them
+    /// now. Captured fragments are opaque source steps and are re-optimized separately. Running
+    /// after PREWHERE formation is fine: the rewrite lands inside the existing prewhere_info, and
+    /// revisiting an already-rewritten read is a no-op (its index read tasks are present).
+    /// No top-up for make_distributed_plan: its reads are re-optimized in their final stage, and
+    /// rewriting before the plan is split into stages would ship the synthetic column.
+    if (optimization_settings.enable_parallel_replicas && optimization_settings.direct_read_from_text_index)
+    {
+        stack.push_back({.node = &root});
+        while (!stack.empty())
+        {
+            processAndOptimizeTextIndexFunctions(stack, nodes, /*direct_read_from_text_index=*/ true);
+
+            auto & frame = stack.back();
+            if (frame.next_child < frame.node->children.size())
+            {
+                auto next_frame = Frame{.node = frame.node->children[frame.next_child]};
+                ++frame.next_child;
+                stack.push_back(next_frame);
+                continue;
+            }
+            stack.pop_back();
+        }
+    }
 
     stack.push_back({.node = &root});
     while (!stack.empty())

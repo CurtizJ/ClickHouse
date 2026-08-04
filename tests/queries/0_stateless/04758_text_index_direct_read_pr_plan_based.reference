@@ -1,0 +1,14 @@
+-- results match: the same predicate in PREWHERE and WHERE (AST fuzzer shape) and plain WHERE
+1000
+1000
+1000
+-- the plan splits for parallel replicas
+1
+-- the text index is read on the replicas
+1
+-- FINAL stays local and still direct-reads
+1000
+0	1
+-- IN (subquery) stays local and still direct-reads
+100
+0	1
