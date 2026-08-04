@@ -845,6 +845,50 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     return result.filter_node;
 }
 
+/// Moves the `__text_index_*` virtual-column conjuncts to the front of the PREWHERE AND chain.
+/// PREWHERE is split into read steps in conjunct order, and that order was decided by the WHERE
+/// optimizer before this rewrite, when the condition still weighed as its source column -- so the
+/// cheapest condition of the chain would run last. The virtual column reads no table columns, and
+/// filtering by it earlier only removes rows the index proves non-matching (Exact mode) or keeps a
+/// superset (Hint mode) -- the same effect as index granule pruning, so the reorder is safe even
+/// for an explicit user-written PREWHERE.
+static const ActionsDAG::Node * hoistTextIndexVirtualColumns(
+    ActionsDAG & filter_dag,
+    const ActionsDAG::Node * filter_node,
+    const ContextPtr & context)
+{
+    if (filter_node->type != ActionsDAG::ActionType::FUNCTION || !filter_node->function_base
+        || filter_node->function_base->getName() != "and")
+        return filter_node;
+
+    auto is_virtual_column_conjunct = [](const ActionsDAG::Node * node)
+    {
+        while (node->type == ActionsDAG::ActionType::ALIAS)
+            node = node->children.front();
+        return node->type == ActionsDAG::ActionType::INPUT && node->result_name.starts_with(TEXT_INDEX_VIRTUAL_COLUMN_PREFIX);
+    };
+
+    ActionsDAG::NodeRawConstPtrs new_children = filter_node->children;
+    std::ranges::stable_partition(new_children, is_virtual_column_conjunct);
+
+    if (new_children == filter_node->children)
+        return filter_node;
+
+    /// Keep the original result name: downstream steps reference the filter column by name
+    /// when `remove_prewhere_column` is false.
+    auto function_builder = FunctionFactory::instance().get("and", context);
+    const auto * new_filter_node = &filter_dag.addFunction(function_builder, std::move(new_children), filter_node->result_name);
+
+    for (auto & output : filter_dag.getOutputs())
+    {
+        if (output == filter_node)
+            output = new_filter_node;
+    }
+
+    filter_dag.removeUnusedActions();
+    return new_filter_node;
+}
+
 static bool processAndOptimizeTextIndexFunctionsInPrewhere(
     ReadFromMergeTree & read_from_merge_tree_step,
     const PrewhereInfoPtr & prewhere_info,
@@ -861,6 +905,9 @@ static bool processAndOptimizeTextIndexFunctionsInPrewhere(
         return false;
     }
 
+    result_filter_node = hoistTextIndexVirtualColumns(
+        cloned_prewhere_info.prewhere_actions, result_filter_node, read_from_merge_tree_step.getContext());
+
     cloned_prewhere_info.prewhere_column_name = result_filter_node->result_name;
     auto modified_prewhere_info = std::make_shared<PrewhereInfo>(std::move(cloned_prewhere_info));
     read_from_merge_tree_step.updatePrewhereInfo(modified_prewhere_info);
@@ -875,18 +922,26 @@ static bool processAndOptimizeTextIndexFunctionsInPrewhere(
 /// When `direct_read_from_text_index` is true, also replaces text-search functions
 /// with virtual columns for direct index reads (both WHERE and PREWHERE clauses).
 ///
+/// Both rewrites bake node-local state (index metadata, per-step read tasks) into the plan, so this
+/// pass must run only on the plan instance that executes the read, after all plan-shipping decisions
+/// (see the call site in `optimizeTreeSecondPass`).
+///
+/// Returns true when the WHERE filter above the read was rewritten to use direct read: the added
+/// virtual column changes the PREWHERE viability calculus, so the caller should re-run the PREWHERE
+/// optimization on that filter.
+///
 /// See TextIndexDAGReplacer class for more details.
-void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes & /*nodes*/, bool direct_read_from_text_index)
+bool processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes & /*nodes*/, bool direct_read_from_text_index)
 {
     const auto & frame = stack.back();
     ReadFromMergeTree * read_from_merge_tree_step = typeid_cast<ReadFromMergeTree *>(frame.node->step.get());
     if (!read_from_merge_tree_step)
-        return;
+        return false;
 
     TextIndexReadInfos text_index_read_infos;
     collectTextIndexReadInfos(read_from_merge_tree_step, text_index_read_infos);
     if (text_index_read_infos.empty())
-        return;
+        return false;
 
     /// This step can be visited by the pass more than once, because a Merge child plan is optimized
     /// again after ReadFromMerge pushes a filter down into it (StorageMerge), and because the same
@@ -910,23 +965,27 @@ void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes 
     }
 
     if (stack.size() < 2)
-        return;
+        return false;
 
     QueryPlan::Node * filter_node = (stack.rbegin() + 1)->node;
     auto * filter_step = typeid_cast<FilterStep *>(filter_node->step.get());
 
     if (!filter_step)
-        return;
+        return false;
+
+    const bool filter_direct_read_allowed = direct_read_from_text_index && !optimized && !already_has_direct_read;
 
     ActionsDAG & filter_dag = filter_step->getExpression();
-    const auto * result_filter_node = processAndOptimizeTextIndexDAG(*read_from_merge_tree_step, filter_dag, text_index_read_infos, filter_step->getFilterColumnName(), direct_read_from_text_index && !optimized && !already_has_direct_read);
+    const auto * result_filter_node = processAndOptimizeTextIndexDAG(*read_from_merge_tree_step, filter_dag, text_index_read_infos, filter_step->getFilterColumnName(), filter_direct_read_allowed);
 
     if (!result_filter_node)
-        return;
+        return false;
 
     bool removes_filter_column = filter_step->removesFilterColumn();
     auto new_filter_column_name = result_filter_node->result_name;
     filter_node->step = std::make_unique<FilterStep>(read_from_merge_tree_step->getOutputHeader(), filter_dag.clone(), new_filter_column_name, removes_filter_column);
+
+    return filter_direct_read_allowed && !read_from_merge_tree_step->getIndexReadTasks().empty();
 }
 
 }

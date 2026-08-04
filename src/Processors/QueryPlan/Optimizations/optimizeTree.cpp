@@ -219,19 +219,6 @@ void optimizeTreeSecondPass(
         optimization_settings.make_distributed_plan,
     };
 
-    /// Direct read from a text index rewrites the predicate to a synthetic `__text_index_*` column
-    /// backed by per-step state (`index_read_tasks`, an augmented storage snapshot) that does not
-    /// survive `ReadFromMergeTree` serialization: a node receiving such a plan fragment cannot
-    /// resolve the column against the table. When this plan may still ship reads to another node
-    /// (make_distributed_plan stages, plan-based parallel replicas fragments), defer the rewrite:
-    /// every plan instance that finally executes a read is re-optimized with both features off
-    /// (worker task execution, the single-stage local re-run, the parallel-replicas local fragment,
-    /// a remote replica optimizing the deserialized fragment) and applies the rewrite to its own
-    /// parts there. Reads that stay in this plan under parallel replicas are rewritten by the
-    /// top-up pass after `applyParallelReplicas` below.
-    const bool defer_direct_read_from_text_index
-        = optimization_settings.make_distributed_plan || optimization_settings.enable_parallel_replicas;
-
     Stack stack;
     stack.push_back({.node = &root});
 
@@ -241,10 +228,6 @@ void optimizeTreeSecondPass(
             optimizePrimaryKeyConditionAndLimit(stack);
 
         updateQueryConditionCache(stack, optimization_settings);
-
-        /// Must be executed after index analysis and before PREWHERE optimization.
-        processAndOptimizeTextIndexFunctions(
-            stack, nodes, optimization_settings.direct_read_from_text_index && !defer_direct_read_from_text_index);
 
         auto & frame = stack.back();
 
@@ -380,20 +363,36 @@ void optimizeTreeSecondPass(
 
     applyParallelReplicas(query_plan, nodes, optimization_settings);
 
-    /// Top-up for the deferred direct read under plan-based parallel replicas: reads NOT captured
-    /// into fragments (the non-parallelized side of a JOIN, plans that stayed local because of
-    /// FINAL / subquery sets / an unusable cluster) execute in this plan instance, so rewrite them
-    /// now. Captured fragments are opaque source steps and are re-optimized separately. Running
-    /// after PREWHERE formation is fine: the rewrite lands inside the existing prewhere_info, and
-    /// revisiting an already-rewritten read is a no-op (its index read tasks are present).
-    /// No top-up for make_distributed_plan: its reads are re-optimized in their final stage, and
-    /// rewriting before the plan is split into stages would ship the synthetic column.
-    if (optimization_settings.enable_parallel_replicas && optimization_settings.direct_read_from_text_index)
+    /// Rewrite text-search functions on the reads this plan instance will execute itself: inject the
+    /// index tokenizer/preprocessor into the function arguments and, when enabled, replace the function
+    /// with a direct read from the text index (a synthetic `__text_index_*` column). Both rewrites are
+    /// node-local -- the synthetic column is backed by per-step state (`index_read_tasks`, an augmented
+    /// storage snapshot) that does not survive `ReadFromMergeTree` serialization, and the injected
+    /// tokenizer must come from the metadata of the node that reads. So this must run only after all
+    /// plan-shipping decisions, but before any optimization that can trigger range analysis
+    /// (projections, read-in-order):
+    ///   - under make_distributed_plan the reads become stage tasks, so skip the plan entirely; every
+    ///     task re-optimizes with the setting forced off and reaches this point there (the single-stage
+    ///     plan re-runs this pass locally the same way);
+    ///   - parallel-replicas fragments were already captured into opaque source steps by
+    ///     `applyParallelReplicas` above: remote fragments are re-optimized on each replica, the local
+    ///     fragment in its own optimization run at the end of this function -- both reach this point
+    ///     there. The reads still visible here (the non-parallelized side of a JOIN, plans that stayed
+    ///     local because of FINAL / subquery sets / an unusable cluster) execute in this plan instance.
+    /// Revisiting an already-rewritten read is a no-op (its index read tasks are present).
+    if (!optimization_settings.make_distributed_plan)
     {
         stack.push_back({.node = &root});
         while (!stack.empty())
         {
-            processAndOptimizeTextIndexFunctions(stack, nodes, /*direct_read_from_text_index=*/ true);
+            const bool filter_rewritten
+                = processAndOptimizeTextIndexFunctions(stack, nodes, optimization_settings.direct_read_from_text_index);
+
+            /// The direct read replaced the text predicate in the WHERE filter with a virtual column,
+            /// which changes the PREWHERE viability calculus (e.g. a lone text predicate over the only
+            /// queried column becomes movable), so re-run the PREWHERE optimization on that filter.
+            if (filter_rewritten && optimization_settings.optimize_prewhere && stack.size() >= 2)
+                optimizePrewhere(*(stack.rbegin() + 1)->node, optimization_settings.remove_unused_columns);
 
             auto & frame = stack.back();
             if (frame.next_child < frame.node->children.size())

@@ -1,0 +1,16 @@
+-- preprocessor: distributed plan matches single-node
+34
+34
+100000
+100000
+-- postprocessor: distributed plan matches single-node
+34
+34
+34
+34
+-- the rewrite fires on the worker tasks for the preprocessor index
+1
+-- pre/postprocessor: parallel replicas match single-node and read the index
+34
+34
+1
