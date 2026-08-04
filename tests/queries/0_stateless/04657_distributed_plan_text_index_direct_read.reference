@@ -1,5 +1,13 @@
-hasAnyTokens over a text index works under make_distributed_plan
+text search over a distributed plan matches single-node
 1
 1
+1
+1
+777
+777
 the query distributes
 distributes
+single stage still runs
+ok
+the rewrite fires on the worker tasks
+1
