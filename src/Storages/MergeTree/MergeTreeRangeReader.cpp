@@ -1468,7 +1468,7 @@ ColumnPtr MergeTreeRangeReader::createPartGranuleOffsetColumn(ReadResult & resul
     return column;
 }
 
-Columns MergeTreeRangeReader::continueReadingChain(ReadResult & result, size_t & num_rows)
+Columns MergeTreeRangeReader::continueReadingChain(ReadResult & result, size_t & num_rows, size_t task_last_mark)
 {
     Columns columns;
     num_rows = 0;
@@ -1490,7 +1490,15 @@ Columns MergeTreeRangeReader::continueReadingChain(ReadResult & result, size_t &
     const auto & rows_per_granule = result.rows_per_granule;
     const auto & started_ranges = result.started_ranges;
 
-    size_t current_task_last_mark = ReadResult::getLastMark(started_ranges);
+    /// Bound the streams by the last mark of the whole task rather than of the ranges started
+    /// by this read. The bound becomes the right offset of ranged read requests on remote disks,
+    /// and any change of it drops the buffer's in-flight read request. With a task-wide bound
+    /// it is set once per task, and gaps between fragmented ranges (e.g. produced by the ranges
+    /// refiner) are handled by seeks, where the read buffer decides per gap whether to read
+    /// through or to make a new request (based on `remote_read_min_bytes_for_seek`).
+    /// A bound narrowed to the started ranges would grow on every read, each time cancelling
+    /// the in-flight request and issuing a new one, which multiplies read requests.
+    size_t current_task_last_mark = std::max(task_last_mark, ReadResult::getLastMark(started_ranges));
     size_t next_range_to_start = 0;
 
     auto size = rows_per_granule.size();

@@ -291,6 +291,10 @@ MergeTreeReadersChain::ReadResult MergeTreeReadersChain::read(
 
     auto & first_reader = range_readers.front();
 
+    /// Last mark of the whole task, must be taken before `startReadingChain` consumes `ranges`.
+    /// Bounds the ranged read requests of all readers in the chain (see `continueReadingChain`).
+    const size_t task_last_mark = ranges.empty() ? 0 : getLastMark(ranges);
+
     try
     {
         read_result = first_reader.startReadingChain(max_rows, ranges);
@@ -324,7 +328,7 @@ MergeTreeReadersChain::ReadResult MergeTreeReadersChain::read(
     {
         const size_t num_bytes_read_so_far = read_result.num_bytes_read;
         size_t num_read_rows = 0;
-        auto columns = range_readers[i].continueReadingChain(read_result, num_read_rows);
+        auto columns = range_readers[i].continueReadingChain(read_result, num_read_rows, task_last_mark);
 
         /// Even if number of read rows is 0 we need to apply all steps to produce a block with correct structure.
         /// It's also needed to properly advancing streams in later steps.

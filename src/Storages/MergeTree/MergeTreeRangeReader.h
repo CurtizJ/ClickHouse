@@ -451,7 +451,7 @@ public:
     };
 
     ReadResult startReadingChain(size_t max_rows, MarkRanges & ranges);
-    Columns continueReadingChain(ReadResult & result, size_t & num_rows);
+    Columns continueReadingChain(ReadResult & result, size_t & num_rows, size_t task_last_mark);
 
     const Block & getSampleBlock() const { return result_sample_block; }
     const Block & getReadSampleBlock() const { return read_sample_block; }
