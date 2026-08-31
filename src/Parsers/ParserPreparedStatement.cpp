@@ -7,6 +7,7 @@
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
+#include <Common/FieldVisitorToString.h>
 
 
 namespace DB
@@ -97,7 +98,10 @@ bool ParserExecute::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
             expected.add(pos, "literal");
             return false;
         }
-        result->arguments.push_back(fieldToString(literal->value));
+        /// Serialize each literal as a properly-typed SQL literal (numbers unquoted, strings quoted
+        /// and escaped) so it substitutes back safely. `fieldToString` would drop the quotes and
+        /// turn a string argument into a bare identifier, and splice its contents into the query.
+        result->arguments.push_back(applyVisitor(FieldVisitorToString(), literal->value));
     }
     if (!close_bracket.ignore(pos, expected))
         return false;

@@ -341,6 +341,60 @@ def test_prepared_query_parameter_is_not_injected(started_cluster):
     ch.close()
 
 
+def test_prepared_query_numeric_parameters_stay_typed(started_cluster):
+    node = cluster.instances["node"]
+
+    ch = psycopg.connect(
+        host=node.ip_address,
+        port=server_port,
+        user="default",
+        password="123",
+        dbname="default",
+    )
+    cur = ch.cursor()
+
+    # A numeric bound parameter is substituted as a number, not a quoted string, so it works in
+    # positions that require a numeric type (arithmetic, LIMIT) — not just value comparisons.
+    cur.execute("SELECT %s + %s", (40, 2), prepare=True)
+    assert int(cur.fetchone()[0]) == 42
+
+    cur.execute("SELECT number FROM numbers(100) LIMIT %s", (3,), prepare=True)
+    assert cur.fetchall() == [(0,), (1,), (2,)]
+
+    cur.execute("SELECT %s * 2", (2.5,), prepare=True)
+    assert float(cur.fetchone()[0]) == 5.0
+
+    ch.close()
+
+
+def test_prepared_statement_execute_argument_types(started_cluster):
+    node = cluster.instances["node"]
+
+    ch = psycopg.connect(
+        host=node.ip_address,
+        port=server_port,
+        user="default",
+        password="123",
+        dbname="default",
+    )
+    cur = ch.cursor()
+
+    # A string argument to the SQL-level EXECUTE must be a quoted literal, not spliced as an
+    # identifier or as SQL. Before the fix it was substituted unquoted.
+    cur.execute("PREPARE echo AS SELECT $1;")
+    cur.execute("EXECUTE echo('1 UNION ALL SELECT 2');")
+    assert cur.fetchall() == [("1 UNION ALL SELECT 2",)]
+    cur.execute("DEALLOCATE echo;")
+
+    # A numeric argument stays numeric.
+    cur.execute("PREPARE add_one AS SELECT $1 + 1;")
+    cur.execute("EXECUTE add_one(41);")
+    assert int(cur.fetchone()[0]) == 42
+    cur.execute("DEALLOCATE add_one;")
+
+    ch.close()
+
+
 def test_psql_client_secure(started_cluster):
     node = cluster.instances["node_secure"]
 

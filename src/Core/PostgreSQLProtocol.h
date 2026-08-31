@@ -20,7 +20,9 @@
 #include <Poco/SHA1Engine.h>
 #include <Access/Credentials.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -732,6 +734,9 @@ public:
     String function_name;
     String sql_query;
     Int16 num_params{};
+    /// The declared PostgreSQL type OID of each `$N` placeholder. Used to substitute a bound value
+    /// as a typed literal (an unquoted number vs a quoted string) instead of blindly quoting.
+    VectorWithMemoryTracking<Int32> parameter_types;
 
     void deserialize(ReadBuffer & in) override
     {
@@ -742,7 +747,10 @@ public:
         readBinaryBigEndian(num_params, in);
         Int32 oid_param = 0;
         for (int i = 0; i < num_params; ++i)
+        {
             readBinaryBigEndian(oid_param, in);
+            parameter_types.push_back(oid_param);
+        }
     }
 
     MessageType getMessageType() const override
@@ -779,6 +787,12 @@ public:
     String portal_name;
     String function_name;
     VectorWithMemoryTracking<String> parameters;
+    /// `parameter_is_null[i]` distinguishes a real NULL (protocol length -1) from a value whose
+    /// bytes happen to be "NULL"; the corresponding `parameters[i]` is empty for a NULL.
+    VectorWithMemoryTracking<UInt8> parameter_is_null;
+    /// Raw per-parameter format codes (0 = text, 1 = binary). Empty means "all text"; a single
+    /// entry applies to every parameter; otherwise there is one entry per parameter.
+    VectorWithMemoryTracking<Int16> parameter_formats;
     Int16 num_params{};
 
     void deserialize(ReadBuffer & in) override
@@ -794,6 +808,7 @@ public:
         for (Int16 i = 0; i < num_format_params; ++i)
         {
             readBinaryBigEndian(format_param, in);
+            parameter_formats.push_back(format_param);
         }
         readBinaryBigEndian(num_params, in);
         for (int i = 0; i < num_params; ++i)
@@ -807,12 +822,14 @@ public:
                                 "Wrong parameter length {} in Bind message, it must not be less than -1", sz_param);
             if (sz_param == -1)
             {
-                parameters.emplace_back("NULL");
+                parameters.emplace_back();
+                parameter_is_null.push_back(1);
                 continue;
             }
             String current_param(sz_param, 0);
             in.readStrict(current_param.data(), sz_param);
             parameters.push_back(current_param);
+            parameter_is_null.push_back(0);
         }
 
         Int16 num_format_params_result = 0;
@@ -820,6 +837,16 @@ public:
         Int16 format_param_result = 0;
         for (Int16 i = 0; i < num_format_params_result; ++i)
             readBinaryBigEndian(format_param_result, in);
+    }
+
+    /// Whether parameter `i` was sent in binary format, applying the protocol's format-code rules.
+    bool parameterIsBinary(size_t i) const
+    {
+        if (parameter_formats.empty())
+            return false;
+        if (parameter_formats.size() == 1)
+            return parameter_formats[0] != 0;
+        return i < parameter_formats.size() && parameter_formats[i] != 0;
     }
 
     MessageType getMessageType() const override
@@ -1892,12 +1919,18 @@ public:
         if (limit_statements && statements.size() + 1 >= limit_statements.value())
             throw Exception(ErrorCodes::LIMIT_EXCEEDED, "Statements limit exceeded");
 
-        statements[statement->function_name] = statement->function_body;
+        statements[statement->function_name] = {statement->function_body, statement->parameter_types};
     }
 
     String getStatement(ASTExecute * execute)
     {
-        return getStatement(execute->function_name, execute->arguments);
+        auto it = statements.find(execute->function_name);
+        if (it == statements.end())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown statement");
+
+        /// `EXECUTE` arguments are already serialized as safe SQL literals by the parser
+        /// (`FieldVisitorToString`), so they are substituted verbatim.
+        return substituteParameters(it->second.body, execute->arguments);
     }
 
     void deleteStatement(const String & function_name)
@@ -1941,9 +1974,19 @@ public:
         if (!bind_query)
             throw Exception(ErrorCodes::UNEXPECTED_PACKET_FROM_CLIENT, "Execute without prior Bind");
 
-        auto result = getStatement(bind_query->function_name, bind_query->parameters);
+        auto it = statements.find(bind_query->function_name);
+        if (it == statements.end())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown statement");
 
-        return result;
+        /// `Bind` parameters arrive as raw bytes from the wire. Convert each to a safe SQL literal
+        /// using its declared type before substitution, so a parameter value can never become part
+        /// of the query text.
+        std::vector<String> literals;
+        literals.reserve(bind_query->parameters.size());
+        for (size_t i = 0; i < bind_query->parameters.size(); ++i)
+            literals.push_back(formatBoundParameter(i, it->second.parameter_types));
+
+        return substituteParameters(it->second.body, literals);
     }
 
     void resetBindQuery()
@@ -1957,36 +2000,253 @@ public:
     }
 
 private:
-    UnorderedMapWithMemoryTracking<String, String> statements;
+    /// PostgreSQL type OIDs (from `pg_type.h`) whose values can be substituted as unquoted literals.
+    enum PostgreSQLTypeOID : Int32
+    {
+        BOOL_OID = 16,
+        INT8_OID = 20,
+        INT2_OID = 21,
+        INT4_OID = 23,
+        OID_OID = 26,
+        FLOAT4_OID = 700,
+        FLOAT8_OID = 701,
+        NUMERIC_OID = 1700,
+    };
+
+    struct PreparedStatement
+    {
+        String body;
+        VectorWithMemoryTracking<Int32> parameter_types;
+    };
+
+    UnorderedMapWithMemoryTracking<String, PreparedStatement> statements;
     std::optional<size_t> limit_statements;
     std::unique_ptr<PostgreSQLProtocol::Messaging::BindQuery> bind_query;
 
-    String getStatement(const String & function_name, const VectorWithMemoryTracking<String> & arguments)
+    /// Replace every `$N` placeholder in `body` with `literals[N-1]` in a single left-to-right pass.
+    /// A single pass (rather than repeated `find`/`replace`) makes `$1` not match the `$1` prefix of
+    /// `$10`, keeps placeholders inside an already-substituted value from being re-substituted, and
+    /// is order-independent. A `$N` with no corresponding literal is left untouched.
+    template <typename Container>
+    static String substituteParameters(const String & body, const Container & literals)
     {
-        auto it = statements.find(function_name);
-        if (it == statements.end())
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown statement");
-
-        auto body = it->second;
-        for (size_t i = 0; i < arguments.size(); ++i)
+        String result;
+        result.reserve(body.size());
+        for (size_t pos = 0; pos < body.size();)
         {
-            auto templ = "$" + std::to_string(i + 1);
-            auto pos = body.find(templ);
-            if (pos != std::string::npos)
+            if (body[pos] == '$' && pos + 1 < body.size() && body[pos + 1] >= '0' && body[pos + 1] <= '9')
             {
-                /// Parameter values arrive as raw bytes (from the wire in a `Bind` message, or
-                /// unquoted from `fieldToString` in an `EXECUTE` statement). Substituting them
-                /// verbatim lets any SQL syntax in a parameter become part of the query text,
-                /// so quote every value as a string literal. The spliced query is parsed by
-                /// ClickHouse, so use `quoteString` (which escapes both `'` and `\`) rather than
-                /// `quoteStringPostgreSQL` (which leaves `\` unescaped, so a trailing backslash
-                /// would escape the closing quote). `NULL` is the sentinel a missing parameter is
-                /// stored as, and must stay an unquoted SQL keyword.
-                String quoted = (arguments[i] == "NULL") ? "NULL" : quoteString(arguments[i]);
-                body.replace(pos, templ.size(), quoted);
+                size_t end = pos + 1;
+                size_t index = 0;
+                while (end < body.size() && body[end] >= '0' && body[end] <= '9')
+                {
+                    index = index * 10 + static_cast<size_t>(body[end] - '0');
+                    ++end;
+                }
+                if (index >= 1 && index <= literals.size())
+                    result += literals[index - 1];
+                else
+                    result.append(body, pos, end - pos);
+                pos = end;
+            }
+            else
+            {
+                result += body[pos];
+                ++pos;
             }
         }
-        return body;
+        return result;
+    }
+
+    /// Convert bound parameter `i` to a safe SQL literal, using its declared type OID.
+    String formatBoundParameter(size_t i, const VectorWithMemoryTracking<Int32> & parameter_types) const
+    {
+        if (bind_query->parameter_is_null[i])
+            return "NULL";
+
+        const Int32 type_oid = i < parameter_types.size() ? parameter_types[i] : 0;
+        return formatBoundValue(type_oid, bind_query->parameterIsBinary(i), bind_query->parameters[i]);
+    }
+
+    static String formatBoundValue(Int32 type_oid, bool is_binary, const String & value)
+    {
+        switch (type_oid)
+        {
+            case INT2_OID:
+            case INT4_OID:
+            case INT8_OID:
+            case OID_OID:
+                if (is_binary)
+                    return decodeBinaryInteger(type_oid, value);
+                if (isUnquotableInteger(value))
+                    return value;
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Invalid integer value for a bound parameter");
+            case FLOAT4_OID:
+            case FLOAT8_OID:
+                if (is_binary)
+                    return decodeBinaryFloat(type_oid, value);
+                if (isUnquotableNumber(value))
+                    return value;
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Invalid floating-point value for a bound parameter");
+            case NUMERIC_OID:
+                /// The binary `numeric` wire format is non-trivial and rarely used; only the text
+                /// form is supported. The value is emitted verbatim to preserve full precision.
+                if (is_binary)
+                    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Binary-format numeric bound parameters are not supported");
+                if (isUnquotableNumber(value))
+                    return value;
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Invalid numeric value for a bound parameter");
+            case BOOL_OID:
+                return formatBool(is_binary, value);
+            case 0:
+                /// Unspecified type (`Parse` sent no OID): standard PostgreSQL clients leave the
+                /// type for the server to infer. A text value that is strictly a numeric literal is
+                /// emitted unquoted so numeric parameters keep working (`LIMIT $1`, `$1 + 1`); the
+                /// strict grammar guarantees only `[-+0-9.eE]`, so this cannot inject. Everything
+                /// else is quoted as a string.
+                if (!is_binary && isUnquotableNumber(value))
+                    return value;
+                return quoteString(value);
+            default:
+                /// Every other type: the raw bytes are the value (for string-like types the binary
+                /// and text formats coincide), so quote them. Use `quoteString`, not
+                /// `quoteStringPostgreSQL`: the spliced query is parsed by ClickHouse, whose lexer
+                /// interprets `\` inside `'...'`, so a trailing backslash would otherwise escape the
+                /// closing quote. `quoteString` escapes both `'` and `\`.
+                return quoteString(value);
+        }
+    }
+
+    /// A strict integer grammar: optional leading sign then one or more digits. Matching the whole
+    /// string guarantees it contains only `[-+0-9]`, so it is safe to emit unquoted (no way to
+    /// escape the query context, and in particular no way to form a `--` comment).
+    static bool isUnquotableInteger(std::string_view s)
+    {
+        size_t i = 0;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-'))
+            ++i;
+        const size_t digits_begin = i;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+            ++i;
+        return i == s.size() && i > digits_begin;
+    }
+
+    /// A strict decimal grammar (optional sign, integer/fraction digits with at most one dot, and an
+    /// optional exponent). Matching the whole string guarantees only `[-+0-9.eE]`, so it is safe to
+    /// emit unquoted.
+    static bool isUnquotableNumber(std::string_view s)
+    {
+        size_t i = 0;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-'))
+            ++i;
+        size_t digits = 0;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+        {
+            ++i;
+            ++digits;
+        }
+        if (i < s.size() && s[i] == '.')
+        {
+            ++i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+            {
+                ++i;
+                ++digits;
+            }
+        }
+        if (digits == 0)
+            return false;
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E'))
+        {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-'))
+                ++i;
+            const size_t exp_begin = i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+                ++i;
+            if (i == exp_begin)
+                return false;
+        }
+        return i == s.size();
+    }
+
+    static void requireConsumed(ReadBuffer & buf)
+    {
+        if (!buf.eof())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Wrong length of a binary-format bound parameter");
+    }
+
+    static String decodeBinaryInteger(Int32 type_oid, const String & bytes)
+    {
+        ReadBufferFromMemory buf(bytes.data(), bytes.size());
+        switch (type_oid)
+        {
+            case INT2_OID:
+            {
+                Int16 v = 0;
+                readBinaryBigEndian(v, buf);
+                requireConsumed(buf);
+                return toString(v);
+            }
+            case INT4_OID:
+            {
+                Int32 v = 0;
+                readBinaryBigEndian(v, buf);
+                requireConsumed(buf);
+                return toString(v);
+            }
+            case OID_OID:
+            {
+                UInt32 v = 0;
+                readBinaryBigEndian(v, buf);
+                requireConsumed(buf);
+                return toString(v);
+            }
+            default: /// INT8_OID
+            {
+                Int64 v = 0;
+                readBinaryBigEndian(v, buf);
+                requireConsumed(buf);
+                return toString(v);
+            }
+        }
+    }
+
+    static String decodeBinaryFloat(Int32 type_oid, const String & bytes)
+    {
+        ReadBufferFromMemory buf(bytes.data(), bytes.size());
+        if (type_oid == FLOAT4_OID)
+        {
+            UInt32 bits = 0;
+            readBinaryBigEndian(bits, buf);
+            requireConsumed(buf);
+            const Float32 f = std::bit_cast<Float32>(bits);
+            if (!std::isfinite(f))
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Non-finite floating-point bound parameter");
+            return toString(f);
+        }
+        UInt64 bits = 0;
+        readBinaryBigEndian(bits, buf);
+        requireConsumed(buf);
+        const Float64 d = std::bit_cast<Float64>(bits);
+        if (!std::isfinite(d))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Non-finite floating-point bound parameter");
+        return toString(d);
+    }
+
+    static String formatBool(bool is_binary, const String & value)
+    {
+        if (is_binary)
+        {
+            if (value.size() != 1)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Wrong length of a binary-format boolean bound parameter");
+            return value[0] != 0 ? "true" : "false";
+        }
+        if (value == "t" || value == "true" || value == "1" || value == "y" || value == "yes" || value == "on")
+            return "true";
+        if (value == "f" || value == "false" || value == "0" || value == "n" || value == "no" || value == "off")
+            return "false";
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Invalid boolean value for a bound parameter");
     }
 
 };

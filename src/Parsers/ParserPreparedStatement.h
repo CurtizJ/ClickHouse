@@ -14,6 +14,9 @@ public:
 
     String function_name;
     String function_body;
+    /// PostgreSQL type OIDs of the `$N` placeholders, from the wire `Parse` message. Empty for the
+    /// SQL-level `PREPARE`, which carries no type information.
+    VectorWithMemoryTracking<Int32> parameter_types;
 
     String getID(char) const override { return "PreparedStatement"; }
 
