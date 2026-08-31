@@ -187,6 +187,7 @@ StorageKafka2::StorageKafka2(
 {
     auto component_guard = Coordination::setCurrentComponent("StorageKafka2::StorageKafka2");
     kafka_settings->sanityCheck(getContext());
+    StorageKafkaUtils::checkBrokerListHostAndPort(getContext(), brokers);
     parsePartitionAffinitySettings();
 
     if ((*kafka_settings)[KafkaSetting::kafka_num_consumers] > 1 && !thread_per_consumer)

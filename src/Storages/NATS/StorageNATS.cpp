@@ -36,8 +36,10 @@
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Common/Exception.h>
 #include <Common/Macros.h>
+#include <Common/RemoteHostFilter.h>
 #include <Common/ThreadPool.h>
 #include <Common/logger_useful.h>
+#include <Common/parseAddress.h>
 #include <Common/setThreadName.h>
 
 namespace DB
@@ -153,6 +155,25 @@ StorageNATS::StorageNATS(
            .max_connect_tries = static_cast<UInt64>((*nats_settings)[NATSSetting::nats_startup_connect_tries].value),
            .reconnect_wait = static_cast<int>((*nats_settings)[NATSSetting::nats_reconnect_wait].value),
            .secure = (*nats_settings)[NATSSetting::nats_secure].value};
+
+    /// Validate every broker destination against `remote_url_allow_hosts` before connecting, so a
+    /// query-supplied `nats_url` / `nats_server_list` cannot make the server open outbound
+    /// connections to hosts the operator did not allow. Both are checked whenever set: `nats_url`
+    /// shadows `nats_server_list` in `NATSConnection`, so validating only the effective one would
+    /// let the other smuggle a disallowed host past the filter. The NATS default port is 4222.
+    const auto & remote_host_filter = getContext()->getRemoteHostFilter();
+    if (!configuration.url.empty())
+    {
+        const auto [host, port] = parseAddressFromURL(configuration.url, 4222);
+        remote_host_filter.checkHostAndPort(host, std::to_string(port));
+    }
+    for (const auto & server : configuration.servers)
+    {
+        if (server.empty())
+            continue;
+        const auto [host, port] = parseAddressFromURL(server, 4222);
+        remote_host_filter.checkHostAndPort(host, std::to_string(port));
+    }
 
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(columns_);

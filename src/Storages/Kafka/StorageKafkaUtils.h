@@ -68,6 +68,10 @@ struct ConsumerStatistics // system.kafka_consumers data
 Names parseTopics(String topic_list);
 String getDefaultClientId(const StorageID & table_id);
 
+/// Validate every broker in a comma-separated `kafka_broker_list` against `remote_url_allow_hosts`,
+/// so a query-supplied broker list cannot make the server connect to hosts the operator did not allow.
+void checkBrokerListHostAndPort(const ContextPtr & context, const String & broker_list);
+
 using ErrorHandler = std::function<void(const cppkafka::Error &)>;
 
 void consumerGracefulStop(

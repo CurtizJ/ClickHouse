@@ -19,4 +19,12 @@ namespace DB
   */
 std::pair<std::string, UInt16> parseAddress(const std::string & str, UInt16 default_port);
 
+/** Extract host and port from a broker connection string that may carry a URI scheme, userinfo and
+  * path, as accepted by message-broker engines (for example `nats://user:pass@host:4222/`), or be a
+  * bare `host:port` / `host`. The scheme, userinfo and path are stripped and the remaining authority
+  * is passed to parseAddress with default_port. An empty authority (for example `nats://`) resolves
+  * to `localhost`, matching the client library default. Intended for RemoteHostFilter checks.
+  */
+std::pair<std::string, UInt16> parseAddressFromURL(const std::string & url, UInt16 default_port);
+
 }

@@ -29,7 +29,9 @@
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Common/CurrentMetrics.h>
 #include <Common/NamedCollections/NamedCollectionsFactory.h>
+#include <Common/RemoteHostFilter.h>
 #include <Common/ThreadPool.h>
+#include <Common/parseAddress.h>
 #include <Common/ThreadStatus.h>
 #include <Common/config_version.h>
 #include <Common/getNumberOfCPUCoresToUse.h>
@@ -922,6 +924,24 @@ Names parseTopics(String topic_list)
     for (String & topic : result)
         boost::trim(topic);
     return result;
+}
+
+void checkBrokerListHostAndPort(const ContextPtr & context, const String & broker_list)
+{
+    /// Validate every broker against `remote_url_allow_hosts` before librdkafka connects, so a
+    /// query-supplied `kafka_broker_list` cannot make the server open outbound connections to hosts
+    /// the operator did not allow. The Kafka default port is 9092.
+    const auto & remote_host_filter = context->getRemoteHostFilter();
+    Names brokers;
+    boost::split(brokers, broker_list, [](char c) { return c == ','; });
+    for (String & broker : brokers)
+    {
+        boost::trim(broker);
+        if (broker.empty())
+            continue;
+        const auto [host, port] = parseAddressFromURL(broker, 9092);
+        remote_host_filter.checkHostAndPort(host, std::to_string(port));
+    }
 }
 
 String getDefaultClientId(const StorageID & table_id)

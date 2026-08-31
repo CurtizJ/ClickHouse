@@ -196,6 +196,7 @@ StorageKafka::StorageKafka(
     , collection_name(collection_name_)
 {
     kafka_settings->sanityCheck(getContext());
+    StorageKafkaUtils::checkBrokerListHostAndPort(getContext(), brokers);
 
     if (auto mode = getStreamingHandleErrorMode();
         mode == StreamingHandleErrorMode::STREAM || mode == StreamingHandleErrorMode::DEAD_LETTER_QUEUE)
