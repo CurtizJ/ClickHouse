@@ -20,6 +20,7 @@
 #include <DataTypes/IDataType.h>
 #include <DataTypes/Serializations/SerializationNumber.h>
 #include <DataTypes/Serializations/SerializationString.h>
+#include <IO/VarUIntReader.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
 #include <Interpreters/TokenizerFactory.h>
@@ -43,6 +44,7 @@
 #include <base/arithmeticOverflow.h>
 #include <base/range.h>
 #include <base/types.h>
+#include <base/unit.h>
 #include <fmt/ranges.h>
 
 #include <numeric>
@@ -1153,11 +1155,40 @@ void TextIndexSerialization::serializeTokens(const ColumnString & tokens, WriteB
         /*block_end=*/ tokens.size());
 }
 
-void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info)
+void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info, std::span<const UInt32> embedded_postings)
 {
     using enum PostingsSerialization::Flags;
     chassert(token_info.offsets.size() == token_info.ranges.size());
+    chassert((token_info.header & EmbeddedPostings) || embedded_postings.empty());
 
+    /// The token info is prefixed with its serialized size (including embedded postings),
+    /// so readers can skip a whole token info at once and decode a token info
+    /// without per-value buffer bounds checks.
+    size_t num_bytes = getLengthOfVarUInt(token_info.header) + getLengthOfVarUInt(token_info.cardinality);
+
+    if (token_info.header & HasPositions)
+        num_bytes += getLengthOfVarUInt(token_info.position_offset) + getLengthOfVarUInt(token_info.position_cardinality);
+
+    if (token_info.header & EmbeddedPostings)
+    {
+        chassert(embedded_postings.size() == token_info.cardinality);
+        for (UInt32 value : embedded_postings)
+            num_bytes += getLengthOfVarUInt(value);
+    }
+    else
+    {
+        if (!(token_info.header & SingleBlock))
+            num_bytes += getLengthOfVarUInt(token_info.offsets.size());
+
+        for (size_t i = 0; i < token_info.offsets.size(); ++i)
+        {
+            num_bytes += getLengthOfVarUInt(token_info.offsets[i])
+                + getLengthOfVarUInt(token_info.ranges[i].begin)
+                + getLengthOfVarUInt(token_info.ranges[i].end);
+        }
+    }
+
+    writeVarUInt(num_bytes, ostr);
     writeVarUInt(token_info.header, ostr);
     writeVarUInt(token_info.cardinality, ostr);
 
@@ -1168,9 +1199,11 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
         writeVarUInt(token_info.position_cardinality, ostr);
     }
 
-    /// Embedded postings will be serialized later into the dictionary block.
     if (token_info.header & EmbeddedPostings)
+    {
+        PostingsSerialization::serializeRaw(embedded_postings, ostr);
         return;
+    }
 
     if (!(token_info.header & SingleBlock))
         writeVarUInt(token_info.offsets.size(), ostr);
@@ -1265,39 +1298,74 @@ TextIndexHeader TextIndexSerialization::deserializeHeader(ReadBuffer & istr)
     return header;
 }
 
-TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr, bool skip_postings)
+/// Deserializes the body of a token info (everything after the size prefix).
+/// The unchecked instantiation reads VarUInts without buffer bounds checks; the caller
+/// must guarantee enough available bytes for the worst case even against corrupted data.
+/// The bounds on cardinality and the number of posting blocks below are part of that
+/// guarantee: they cap the number of decoded VarUInts by num_bytes.
+template <bool checked>
+static void deserializeTokenInfoBody(VarUIntReader & reader, TokenPostingsInfo & info, bool skip_postings, size_t num_bytes)
 {
     using enum PostingsSerialization::Flags;
-    TokenPostingsInfo info;
 
-    readVarUInt(info.header, istr);
-    readVarUInt(info.cardinality, istr);
+    [[maybe_unused]] size_t available_at_start = reader.available();
+
+    auto read_value = [&]
+    {
+        if constexpr (checked)
+            return reader.read();
+        else
+            return reader.readUnchecked();
+    };
+
+    info.header = read_value();
+    info.cardinality = static_cast<UInt32>(read_value());
 
     /// Position metadata is always right after (header, cardinality),
     /// before any posting data, to keep the layout consistent for all token types.
     if (info.header & HasPositions)
     {
-        readVarUInt(info.position_offset, istr);
-        UInt64 position_cardinality = 0;
-        readVarUInt(position_cardinality, istr);
-        info.position_cardinality = static_cast<UInt32>(position_cardinality);
+        info.position_offset = read_value();
+        info.position_cardinality = static_cast<UInt32>(read_value());
     }
 
     if (info.header & EmbeddedPostings)
     {
         chassert(info.header & RawPostings);
 
+        /// Each embedded posting takes at least one byte.
+        if (info.cardinality > num_bytes)
+        {
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "Corrupted data in text index: cardinality of embedded postings ({}) exceeds the token info size in bytes ({})",
+                info.cardinality, num_bytes);
+        }
+
         if (skip_postings)
         {
-            for (size_t i = 0; i < info.cardinality; ++i)
-                ignoreVarUInt(istr);
+            if constexpr (checked)
+            {
+                for (size_t i = 0; i < info.cardinality; ++i)
+                    reader.ignore();
+            }
+            else
+            {
+                /// The total size of the remaining postings is known from the size prefix.
+                size_t consumed = available_at_start - reader.available();
+                if (consumed > num_bytes)
+                {
+                    throw Exception(ErrorCodes::CORRUPTED_DATA,
+                        "Corrupted data in text index: token info takes more bytes than its size prefix ({})", num_bytes);
+                }
+                reader.skipBytes(num_bytes - consumed);
+            }
         }
         else if (info.cardinality != 0)
         {
             info.embedded_postings.resize(info.cardinality);
 
             for (UInt32 & value : info.embedded_postings)
-                readVarUInt(value, istr);
+                value = static_cast<UInt32>(read_value());
 
             info.offsets.emplace_back(0);
             info.ranges.emplace_back(info.embedded_postings.front(), info.embedded_postings.back());
@@ -1308,16 +1376,22 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
         UInt64 num_postings_blocks = 1;
 
         if (!(info.header & SingleBlock))
-            readVarUInt(num_postings_blocks, istr);
+            num_postings_blocks = read_value();
+
+        /// Each posting block takes at least three bytes.
+        if (num_postings_blocks * 3 > num_bytes)
+        {
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "Corrupted data in text index: number of posting blocks ({}) exceeds the token info size in bytes ({})",
+                num_postings_blocks, num_bytes);
+        }
 
         for (size_t j = 0; j < num_postings_blocks; ++j)
         {
-            UInt64 offset_in_file = 0;
+            UInt64 offset_in_file = read_value();
             RowsRange rows_range{};
-
-            readVarUInt(offset_in_file, istr);
-            readVarUInt(rows_range.begin, istr);
-            readVarUInt(rows_range.end, istr);
+            rows_range.begin = read_value();
+            rows_range.end = read_value();
 
             if (rows_range.begin > std::numeric_limits<UInt32>::max() || rows_range.end > std::numeric_limits<UInt32>::max())
             {
@@ -1330,46 +1404,57 @@ TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr
             info.ranges.emplace_back(std::move(rows_range));
         }
     }
+}
+
+/// Fills the passed info instead of returning it: the caller constructs it in its final
+/// location (vector slot or shared_ptr), avoiding a move of the three inlined vectors per token.
+static void deserializeTokenInfoImpl(VarUIntReader & reader, TokenPostingsInfo & info, bool skip_postings)
+{
+    size_t num_bytes = reader.read();
+
+    /// Sane token infos are at most a few KiB (bounded by the number of posting blocks).
+    static constexpr size_t max_sane_token_info_size = 1_MiB;
+
+    /// Decode without per-value buffer bounds checks when even corrupted data cannot
+    /// advance past the working buffer: the body decodes at most (num_bytes + a few)
+    /// VarUInts of at most max_varuint_size bytes each.
+    if (num_bytes <= max_sane_token_info_size
+        && reader.available() >= (num_bytes + VarUIntReader::max_varuint_size) * VarUIntReader::max_varuint_size) [[likely]]
+    {
+        size_t available_before = reader.available();
+        deserializeTokenInfoBody</*checked=*/ false>(reader, info, skip_postings, num_bytes);
+
+        if (available_before - reader.available() != num_bytes)
+        {
+            throw Exception(ErrorCodes::CORRUPTED_DATA,
+                "Corrupted data in text index: token info takes {} bytes, expected {} from its size prefix",
+                available_before - reader.available(), num_bytes);
+        }
+    }
+    else
+    {
+        deserializeTokenInfoBody</*checked=*/ true>(reader, info, skip_postings, num_bytes);
+    }
+}
+
+static void skipTokenInfoImpl(VarUIntReader & reader)
+{
+    size_t num_bytes = reader.read();
+    reader.skipBytes(num_bytes);
+}
+
+TokenPostingsInfo TextIndexSerialization::deserializeTokenInfo(ReadBuffer & istr, bool skip_postings)
+{
+    TokenPostingsInfo info;
+    VarUIntReader reader(istr);
+    deserializeTokenInfoImpl(reader, info, skip_postings);
     return info;
 }
 
 void TextIndexSerialization::skipTokenInfo(ReadBuffer & istr)
 {
-    using enum PostingsSerialization::Flags;
-
-    UInt64 header = 0;
-    UInt64 cardinality = 0;
-
-    readVarUInt(header, istr);
-    readVarUInt(cardinality, istr);
-
-    /// Position metadata is right after (header, cardinality), before posting data.
-    if (header & HasPositions)
-    {
-        ignoreVarUInt(istr);
-        ignoreVarUInt(istr);
-    }
-
-    if (header & EmbeddedPostings)
-    {
-        chassert(header & RawPostings);
-        for (size_t i = 0; i < cardinality; ++i)
-            ignoreVarUInt(istr);
-    }
-    else
-    {
-        UInt64 num_postings_blocks = 1;
-
-        if (!(header & SingleBlock))
-            readVarUInt(num_postings_blocks, istr);
-
-        for (size_t j = 0; j < num_postings_blocks; ++j)
-        {
-            ignoreVarUInt(istr);
-            ignoreVarUInt(istr);
-            ignoreVarUInt(istr);
-        }
-    }
+    VarUIntReader reader(istr);
+    skipTokenInfoImpl(reader);
 }
 
 std::pair<ColumnPtr, UInt64> TextIndexSerialization::deserializeTokens(ReadBuffer & istr)
@@ -1402,16 +1487,19 @@ std::vector<TokenPostingsInfoPtr> TextIndexSerialization::deserializeTokenInfos(
     chassert(matched_indices.back() < num_tokens);
     chassert(std::is_sorted(matched_indices.begin(), matched_indices.end()));
 
+    VarUIntReader reader(istr);
+
     for (size_t i = 0, j = 0; i < num_tokens && j < matched_indices.size(); ++i)
     {
         if (matched_indices[j] != i)
         {
-            skipTokenInfo(istr);
+            skipTokenInfoImpl(reader);
             continue;
         }
 
-        auto info = deserializeTokenInfo(istr);
-        result.emplace_back(std::make_shared<TokenPostingsInfo>(std::move(info)));
+        auto info = std::make_shared<TokenPostingsInfo>();
+        deserializeTokenInfoImpl(reader, *info, /*skip_postings=*/ false);
+        result.emplace_back(std::move(info));
         ++j;
     }
 
@@ -1428,8 +1516,10 @@ DictionaryBlock TextIndexSerialization::deserializeDictionaryBlock(ReadBuffer & 
     std::vector<TokenPostingsInfo> token_infos;
     token_infos.reserve(num_tokens);
 
+    VarUIntReader reader(istr);
+
     for (size_t i = 0; i < num_tokens; ++i)
-        token_infos.emplace_back(deserializeTokenInfo(istr, skip_postings));
+        deserializeTokenInfoImpl(reader, token_infos.emplace_back(), skip_postings);
 
     return DictionaryBlock{std::move(tokens_column), std::move(token_infos), std::move(tokens_format)};
 }
@@ -1502,13 +1592,11 @@ DictionarySparseIndex serializeTokensAndPostings(
                 TextIndexPositionCodec::encode(position_entries, positions_stream->plain_hashing);
             }
 
-            TextIndexSerialization::serializeTokenInfo(dictionary_stream.compressed_hashing, token_info);
-
+            std::span<const UInt32> embedded_postings;
             if (token_info.header & PostingsSerialization::Flags::EmbeddedPostings)
-            {
-                auto raw_postings = postings_serialization.toRawPostings(postings);
-                PostingsSerialization::serializeRaw(raw_postings, dictionary_stream.compressed_hashing);
-            }
+                embedded_postings = postings_serialization.toRawPostings(postings);
+
+            TextIndexSerialization::serializeTokenInfo(dictionary_stream.compressed_hashing, token_info, embedded_postings);
         }
     }
 

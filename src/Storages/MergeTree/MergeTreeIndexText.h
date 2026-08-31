@@ -67,9 +67,11 @@ namespace DB
   * - Number of tokens (VarUInt) in block.
   * - A binary serialized ColumnString with tokens.
   * - Information about posting lists for each token:
-  *    1. Header of posting list (VarUInt) (see PostingsSerialization::Flags).
-  *    2. Cardinality of token (VarUInt).
-  *    3. a) If EmbeddedPostings flag is set, posting list embedded into the dictionary block.
+  *    1. Total size of the token info in bytes (VarUInt), excluding this prefix.
+  *       It allows to skip a token info at once and to decode it without buffer bounds checks.
+  *    2. Header of posting list (VarUInt) (see PostingsSerialization::Flags).
+  *    3. Cardinality of token (VarUInt).
+  *    4. a) If EmbeddedPostings flag is set, posting list embedded into the dictionary block.
   *       b) Otherwise, number of blocks of the posting list (VarUInt), if SingleBlock flag is not set.
   *       c) For each posting list block, offset in file to the block and min-max range of the block. All numbers are encoded as VarUInt.
   *
@@ -352,7 +354,10 @@ struct TextIndexSerialization
         PostingsSerialization & postings_serialization);
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
-    static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
+    /// Serializes a token info prefixed with its total serialized size in bytes.
+    /// Embedded postings are part of the token info and must be passed here
+    /// (empty span for tokens without the EmbeddedPostings flag).
+    static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info, std::span<const UInt32> embedded_postings);
     /// Reject a token the reader would refuse (throws `TOO_LARGE_STRING_SIZE`); call before copying a token elsewhere.
     static void checkTokenSize(size_t token_size);
     static void serializeHeader(MergeTreeTextIndexSerializationVersion version, const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, bool has_positions, WriteBuffer & ostr);

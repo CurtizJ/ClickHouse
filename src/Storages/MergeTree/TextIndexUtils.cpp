@@ -559,10 +559,7 @@ void MergeTextIndexesTask::flushDictionaryBlock()
 
     for (size_t i = 0; i < num_tokens; ++i)
     {
-        TextIndexSerialization::serializeTokenInfo(ostr, output_infos[i]);
-
-        if (output_infos[i].header & PostingsSerialization::Flags::EmbeddedPostings)
-            PostingsSerialization::serializeRaw(output_infos[i].embedded_postings, ostr);
+        TextIndexSerialization::serializeTokenInfo(ostr, output_infos[i], output_infos[i].embedded_postings);
     }
 
     output_tokens = ColumnString::create();
