@@ -10,6 +10,7 @@
 #include <Common/Exception.h>
 #include <Common/logger_useful.h>
 #include <Common/Base64.h>
+#include <Common/quoteString.h>
 #include <Common/UnorderedMapWithMemoryTracking.h>
 #include <Common/VectorWithMemoryTracking.h>
 #include <Poco/RegularExpression.h>
@@ -1973,7 +1974,16 @@ private:
             auto pos = body.find(templ);
             if (pos != std::string::npos)
             {
-                body.replace(pos, templ.size(), arguments[i]);
+                /// Parameter values arrive as raw bytes (from the wire in a `Bind` message, or
+                /// unquoted from `fieldToString` in an `EXECUTE` statement). Substituting them
+                /// verbatim lets any SQL syntax in a parameter become part of the query text,
+                /// so quote every value as a string literal. The spliced query is parsed by
+                /// ClickHouse, so use `quoteString` (which escapes both `'` and `\`) rather than
+                /// `quoteStringPostgreSQL` (which leaves `\` unescaped, so a trailing backslash
+                /// would escape the closing quote). `NULL` is the sentinel a missing parameter is
+                /// stored as, and must stay an unquoted SQL keyword.
+                String quoted = (arguments[i] == "NULL") ? "NULL" : quoteString(arguments[i]);
+                body.replace(pos, templ.size(), quoted);
             }
         }
         return body;

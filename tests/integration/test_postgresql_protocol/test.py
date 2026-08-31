@@ -309,6 +309,38 @@ def test_prepared_query_error_after_output_closes_connection(started_cluster):
     ch.close()
 
 
+def test_prepared_query_parameter_is_not_injected(started_cluster):
+    node = cluster.instances["node"]
+
+    ch = psycopg.connect(
+        host=node.ip_address,
+        port=server_port,
+        user="default",
+        password="123",
+        dbname="default",
+    )
+    cur = ch.cursor()
+
+    # A bound parameter must be substituted as a literal string, never spliced
+    # into the query as SQL. Before the fix, `SELECT $1` with these values
+    # evaluated them as expressions (arithmetic, function calls, subqueries,
+    # union injection) instead of returning them verbatim.
+    for payload in [
+        "6*7",
+        "version()",
+        "(SELECT count() FROM system.tables)",
+        "'x' UNION ALL SELECT name FROM system.databases",
+        "'; SELECT 1; --",
+        "\\",
+        "a\\' OR '1'='1",
+    ]:
+        cur.execute("SELECT %s", (payload,), prepare=True)
+        rows = cur.fetchall()
+        assert rows == [(payload,)], f"parameter {payload!r} was not treated as a literal"
+
+    ch.close()
+
+
 def test_psql_client_secure(started_cluster):
     node = cluster.instances["node_secure"]
 
