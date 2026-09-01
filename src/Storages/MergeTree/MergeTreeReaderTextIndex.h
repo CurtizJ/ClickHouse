@@ -19,6 +19,7 @@ namespace DB
 
 class TextIndexAnalyzer;
 class MergeTreeIndexConditionText;
+class ColumnSparse;
 
 using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<size_t, PostingListPtr>>;
 
@@ -98,6 +99,18 @@ private:
     /// Fills the `_bm25_score` column for rows [row_offset, row_offset + num_rows).
     void fillColumnScores(IColumn & column, size_t row_offset, size_t num_rows);
 
+    /// Same, for a score column in the sparse representation: appends (offset, score)
+    /// pairs for the matching rows only, the rest of the rows are implicit defaults (0).
+    void fillColumnScoresSparse(ColumnSparse & column, size_t row_offset, size_t num_rows);
+
+    /// Replaces empty score columns in `res_columns` with `ColumnSparse` when the
+    /// estimated fraction of scored rows (from the scoring tokens' cardinalities) is low.
+    /// Sparse score columns make the downstream prewhere filtering (the topK dynamic filter)
+    /// process only the scored rows instead of full dense masks. The decision is computed once
+    /// per reader (after the granule is read) but applied on every `readRows` call, because the
+    /// caller passes fresh empty columns for every read result.
+    void chooseScoreColumnRepresentation(MutableColumns & res_columns);
+
     /// Builds one scoring cursor per scoring token present in this part (see `score_cursors`).
     void initializeScoreCursors();
 
@@ -173,6 +186,8 @@ private:
     std::vector<ScoreCursor> score_cursors;
 
     bool score_cursors_initialized = false;
+    /// Cached decision of `chooseScoreColumnRepresentation`; computed once per reader.
+    std::optional<bool> use_sparse_score_columns;
     /// True when every scoring token is present in this part.
     bool score_all_tokens_present = false;
     /// The part's `.dl` doc-length cursor.

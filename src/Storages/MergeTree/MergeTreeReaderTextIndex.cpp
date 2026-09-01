@@ -17,6 +17,7 @@
 #include <Interpreters/inplaceBlockConversions.h>
 #include <Common/logger_useful.h>
 #include <Columns/ColumnsNumber.h>
+#include <Columns/ColumnSparse.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Core/Settings.h>
 
@@ -551,6 +552,12 @@ void MergeTreeReaderTextIndex::initializeScoreCursors()
 
 void MergeTreeReaderTextIndex::fillColumnScores(IColumn & column, size_t row_offset, size_t num_rows)
 {
+    if (auto * column_sparse = typeid_cast<ColumnSparse *>(&column))
+    {
+        fillColumnScoresSparse(*column_sparse, row_offset, num_rows);
+        return;
+    }
+
     auto & column_data = assert_cast<ColumnFloat32 &>(column).getData();
     size_t old_size = column_data.size();
     column_data.resize_fill(old_size + num_rows);
@@ -574,6 +581,89 @@ void MergeTreeReaderTextIndex::fillColumnScores(IColumn & column, size_t row_off
         scoreCursorsIntersection(data, score_cursors, row_offset, num_rows);
     else
         scoreCursorsUnion(data, score_cursors, row_offset, num_rows);
+}
+
+void MergeTreeReaderTextIndex::fillColumnScoresSparse(ColumnSparse & column, size_t row_offset, size_t num_rows)
+{
+    const size_t old_size = column.size();
+
+    if (!score_cursors_initialized)
+        initializeScoreCursors();
+
+    const bool intersect = condition_text->getGlobalSearchMode() == TextSearchMode::All;
+
+    if (score_cursors.empty() || (intersect && !score_all_tokens_present))
+    {
+        column.insertManyDefaults(num_rows);
+        return;
+    }
+
+    requireRowOffsetRepresentable(row_offset);
+    score_doc_lengths->ensureRange(row_offset, num_rows);
+
+    auto & offsets_data = assert_cast<ColumnUInt64 &>(column.getOffsetsColumn()).getData();
+    auto & scores_data = assert_cast<ColumnFloat32 &>(column.getValuesColumn()).getData();
+
+    if (intersect)
+        scoreCursorsIntersectionSparse(offsets_data, scores_data, old_size, score_cursors, row_offset, num_rows);
+    else
+        scoreCursorsUnionSparse(offsets_data, scores_data, old_size, score_cursors, row_offset, num_rows);
+
+    /// 'insertManyDefaults' just increases the size of the column,
+    /// extending it over the rows (both scored and not) appended above.
+    column.insertManyDefaults(num_rows);
+}
+
+void MergeTreeReaderTextIndex::chooseScoreColumnRepresentation(MutableColumns & res_columns)
+{
+    if (!bm25_score_state)
+        return;
+
+    if (!use_sparse_score_columns.has_value())
+    {
+        if (!score_cursors_initialized)
+            initializeScoreCursors();
+
+        /// With denser scores the sparse representation loses to the dense one: offsets alone
+        /// take 8 bytes per scored row and the downstream processing of the non-default values
+        /// is less cache-friendly than flat vectorized scans.
+        static constexpr double max_score_density_for_sparse = 0.1;
+
+        const bool intersect = condition_text->getGlobalSearchMode() == TextSearchMode::All;
+
+        /// Estimate an upper bound of the fraction of rows with a non-zero score
+        /// from the per-part cardinalities of the scoring tokens.
+        size_t max_scored_rows = 0;
+        if (intersect)
+        {
+            if (score_all_tokens_present && !score_cursors.empty())
+                max_scored_rows = std::ranges::min(score_cursors, {}, &ScoreCursor::cardinality).cardinality;
+        }
+        else
+        {
+            for (const auto & entry : score_cursors)
+                max_scored_rows += entry.cardinality;
+        }
+
+        const size_t total_rows = data_part_info_for_read->getRowCount();
+        use_sparse_score_columns = static_cast<double>(max_scored_rows) <= max_score_density_for_sparse * static_cast<double>(total_rows);
+    }
+
+    if (!*use_sparse_score_columns)
+        return;
+
+    for (size_t i = 0; i < res_columns.size(); ++i)
+    {
+        /// Score columns are the ones without a search query.
+        if (search_queries[i] || !res_columns[i])
+            continue;
+
+        /// A non-empty column is being continued from previous reads: keep its representation.
+        if (!res_columns[i]->empty() || typeid_cast<const ColumnSparse *>(res_columns[i].get()))
+            continue;
+
+        res_columns[i] = ColumnSparse::create(columns_to_read[i].type->createColumn());
+    }
 }
 
 void MergeTreeReaderTextIndex::initializePositionsStream()
@@ -652,6 +742,9 @@ size_t MergeTreeReaderTextIndex::readRows(
         initializePostingStreams();
         initializePositionsStream();
     }
+
+    if (is_initialized)
+        chooseScoreColumnRepresentation(res_columns);
 
     const bool any_use_fallback = !use_fallback.empty() && std::ranges::any_of(use_fallback, [](bool b) { return b; });
 

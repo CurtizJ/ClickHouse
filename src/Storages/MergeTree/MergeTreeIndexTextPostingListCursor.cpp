@@ -1475,4 +1475,109 @@ void scoreCursorsIntersection(
     ProfileEvents::increment(ProfileEvents::TextScoreRowsScored, rows_scored);
 }
 
+void scoreCursorsUnionSparse(
+    PaddedPODArray<UInt64> & offsets,
+    PaddedPODArray<Float32> & scores,
+    size_t column_offset,
+    std::vector<ScoreCursor> & cursors,
+    size_t row_offset,
+    size_t num_rows)
+{
+    const size_t window_end = row_offset + num_rows;
+    size_t rows_scored = 0;
+
+    for (auto & entry : cursors)
+        entry.cursor->advance(static_cast<UInt32>(row_offset));
+
+    while (true)
+    {
+        /// Document-at-a-time: the next scored row is the minimum row among the cursors.
+        size_t current = window_end;
+        for (const auto & entry : cursors)
+        {
+            const auto & cursor = *entry.cursor;
+            if (cursor.valid() && cursor.value() < current)
+                current = cursor.value();
+        }
+
+        if (current == window_end)
+            break;
+
+        /// Sum contributions in the cursors' vector order to match the dense variant bit-for-bit.
+        Float32 score = 0;
+        for (auto & entry : cursors)
+        {
+            auto & cursor = *entry.cursor;
+            if (cursor.valid() && cursor.value() == current)
+            {
+                score += entry.weight->contribution(cursor.termFrequency(), cursor.documentLengthByte());
+                ++rows_scored;
+                cursor.next();
+            }
+        }
+
+        offsets.push_back(column_offset + (current - row_offset));
+        scores.push_back(score);
+    }
+
+    ProfileEvents::increment(ProfileEvents::TextScoreRowsScored, rows_scored);
+}
+
+void scoreCursorsIntersectionSparse(
+    PaddedPODArray<UInt64> & offsets,
+    PaddedPODArray<Float32> & scores,
+    size_t column_offset,
+    std::vector<ScoreCursor> & cursors,
+    size_t row_offset,
+    size_t num_rows)
+{
+    const size_t window_end = row_offset + num_rows;
+    size_t rows_scored = 0;
+
+    size_t target = row_offset;
+    while (target < window_end)
+    {
+        /// Leapfrog: raise `agreed` until every cursor sits exactly on it (an intersection row) or some cursor is exhausted.
+        bool aligned = false;
+        size_t agreed = target;
+
+        while (!aligned)
+        {
+            aligned = true;
+
+            for (auto & entry : cursors)
+            {
+                auto & cursor = *entry.cursor;
+                cursor.advance(static_cast<UInt32>(agreed));
+
+                if (!cursor.valid())
+                {
+                    ProfileEvents::increment(ProfileEvents::TextScoreRowsScored, rows_scored);
+                    return;
+                }
+
+                if (cursor.value() > agreed)
+                {
+                    agreed = cursor.value();
+                    aligned = false;
+                }
+            }
+        }
+
+        if (agreed >= window_end)
+            break;
+
+        Float32 score = 0;
+        for (const auto & entry : cursors)
+            score += entry.weight->contribution(entry.cursor->termFrequency(), entry.cursor->documentLengthByte());
+
+        offsets.push_back(column_offset + (agreed - row_offset));
+        scores.push_back(score);
+        ++rows_scored;
+        target = agreed + 1;
+    }
+
+    ProfileEvents::increment(ProfileEvents::TextScoreRowsScored, rows_scored);
+}
+
 }

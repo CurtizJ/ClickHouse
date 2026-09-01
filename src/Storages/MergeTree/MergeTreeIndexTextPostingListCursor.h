@@ -343,4 +343,31 @@ void scoreCursorsIntersection(
     size_t row_offset,
     size_t num_rows);
 
+/// Sparse variant of `scoreCursorsUnion` for filling a `ColumnSparse` score column:
+/// instead of writing into a dense array of the window size, appends the pair
+/// (offset, score) for each matching row, in strictly increasing row order.
+/// Emitted offsets are absolute positions in the output column: `column_offset + (row - row_offset)`,
+/// where `column_offset` is the column size before this window.
+/// Uses a document-at-a-time merge over the cursors; per-row contributions are summed
+/// in the cursors' vector order, matching the accumulation order of the dense variant,
+/// so the resulting scores are bit-identical.
+void scoreCursorsUnionSparse(
+    PaddedPODArray<UInt64> & offsets,
+    PaddedPODArray<Float32> & scores,
+    size_t column_offset,
+    std::vector<ScoreCursor> & cursors,
+    size_t row_offset,
+    size_t num_rows);
+
+/// Sparse variant of `scoreCursorsIntersection`: the leapfrog visits intersection rows
+/// in increasing order, so it appends (offset, score) pairs directly.
+/// Valid only under the global `All` search mode.
+void scoreCursorsIntersectionSparse(
+    PaddedPODArray<UInt64> & offsets,
+    PaddedPODArray<Float32> & scores,
+    size_t column_offset,
+    std::vector<ScoreCursor> & cursors,
+    size_t row_offset,
+    size_t num_rows);
+
 }
