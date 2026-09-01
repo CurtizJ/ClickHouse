@@ -55,11 +55,14 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
 {
     bool all_equal = true;
     for (unsigned i = 1; i < cnt; ++i)
+    {
         if (r[i] != r[0])
         {
             all_equal = false;
             break;
         }
+    }
+
     if (all_equal)
     {
         const T c = r[0];
@@ -72,6 +75,7 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
     // Bit-width histogram; e(b) = #values needing > b bits is a suffix sum over it.
     unsigned hist[typeBits<T> + 1] = {0};
     unsigned maxw = 0;
+
     for (unsigned i = 0; i < cnt; ++i)
     {
         const unsigned w = bitWidth(r[i]);
@@ -83,11 +87,13 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
     size_t best_cost = 2 + packedBytes(cnt, maxw);
     unsigned best_b = maxw;
     unsigned e = 0;
+
     for (int b = static_cast<int>(maxw) - 1; b >= 0; --b)
     {
         e += hist[b + 1];
         const unsigned hb = maxw - static_cast<unsigned>(b);
         const size_t cost = 3 + packedBytes(cnt, static_cast<unsigned>(b)) + e + packedBytes(e, hb);
+
         if (cost < best_cost)
         {
             best_cost = cost;
@@ -97,6 +103,7 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
 
     const unsigned b = best_b;
     unsigned ecount = 0;
+
     // Exceptions exist only when b < maxw, so r[i] >> b is shift-safe (a full-width block has none).
     if (b < maxw)
         for (unsigned i = 0; i < cnt; ++i)
@@ -105,6 +112,7 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
 
     out[0] = static_cast<uint8_t>(b);
     out[1] = static_cast<uint8_t>(ecount);
+
     uint8_t * p = out + 2;
     unsigned hb = 0;
     if (ecount)
@@ -139,14 +147,14 @@ inline size_t blockEncode(const T * r, unsigned cnt, uint8_t * out) noexcept
 }
 
 // Reconstruct values from residuals in `out` (prefix sum + carry). SIMD for uint32, scalar for uint64; plus is 0 for d0, 1 for d1.
-template <typename T>
-inline ALWAYS_INLINE void deltaApply(T * out, unsigned cnt, T & prev, uint32_t plus) noexcept
+template <typename T, uint32_t plus>
+inline ALWAYS_INLINE void deltaApply(T * out, unsigned cnt, T & prev) noexcept
 {
 #if PFOR_HAS_VERTICAL
     if constexpr (sizeof(T) == 4)
     {
         uint32_t carry = static_cast<uint32_t>(prev);
-        deltaDecode32(reinterpret_cast<uint32_t *>(out), cnt, carry, plus);
+        deltaDecode32<plus>(reinterpret_cast<uint32_t *>(out), cnt, carry);
         prev = static_cast<T>(carry);
         return;
     }
@@ -160,45 +168,57 @@ inline ALWAYS_INLINE void deltaApply(T * out, unsigned cnt, T & prev, uint32_t p
     prev = acc;
 }
 
-// Decodes one block. With non-null `end` it is fail-closed: reads are bounded and every header field validated; returns 0 on any violation (a valid block is >= 1 byte) so the caller can report corruption. nullptr keeps the fast path (field validation still runs).
-template <typename T>
-inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, Delta mode, T & prev, const uint8_t * end = nullptr) noexcept
+// Decodes one block. The delta mode is a compile-time parameter so the d1 "+1" and the mode
+// checks fold to constants throughout the decode path (bulkDecode dispatches once per stream).
+// With non-null `end` it is fail-closed: reads are bounded and every header field validated; returns 0 on any violation (a valid block is >= 1 byte) so the caller can report corruption. nullptr keeps the fast path (field validation still runs).
+template <typename T, Delta mode>
+inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, T & prev, const uint8_t * end = nullptr) noexcept
 {
     const auto need = [end](const uint8_t * from, size_t bytes) noexcept
     {
         return !end || (from <= end && static_cast<size_t>(end - from) >= bytes);
     };
 
-    const uint32_t plus = (mode == Delta::d1) ? 1u : 0u;
+    constexpr uint32_t plus = (mode == Delta::d1) ? 1u : 0u;
     if (!need(in, 1))
         return 0;
+
     const uint8_t b0 = in[0];
+
     if (b0 & 0x80u)
     {
         const unsigned k = b0 & 0x7Fu;
         if (k > sizeof(T) || !need(in + 1, k)) // loadLE reads k bytes
             return 0;
+
         const T c = static_cast<T>(loadLE(in + 1, k));
         for (unsigned i = 0; i < cnt; ++i)
             out[i] = c;
-        if (mode != Delta::none)
-            deltaApply<T>(out, cnt, prev, plus);
+
+        if constexpr (mode != Delta::none)
+            deltaApply<T, plus>(out, cnt, prev);
+
         return 1u + k;
     }
 
     const unsigned b = b0;
     if (b > typeBits<T> || !need(in, 2))
         return 0;
+
     const unsigned e = in[1];
     if (e > cnt || (e && b >= typeBits<T>)) // e values must fit patches[BLOCK]; exceptions need b < typeBits (shift-safe)
         return 0;
+
     const uint8_t * p = in + 2;
     unsigned hb = 0;
+
     if (e)
     {
         if (!need(p, 1))
             return 0;
+
         hb = *p++;
+
         // Valid exceptions have hb in [1, typeBits<T> - b]; hb == 0 drops the patch, larger shifts bits out of T (b < typeBits<T> here, so no underflow).
         if (hb == 0 || hb > typeBits<T> - b)
             return 0;
@@ -210,11 +230,11 @@ inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, Delta mode,
 
     // Fused single pass: a full uint32 delta block with no exceptions unpacks and prefix-sums in one sweep.
 #if PFOR_HAS_VERTICAL
-    if constexpr (sizeof(T) == 4)
-        if (mode != Delta::none && e == 0 && cnt == BLOCK && b >= 1 && b <= 31)
+    if constexpr (sizeof(T) == 4 && mode != Delta::none)
+        if (e == 0 && cnt == BLOCK && b >= 1 && b <= 31)
         {
             uint32_t carry = static_cast<uint32_t>(prev);
-            unpackVertical32FusedDelta(p, b, reinterpret_cast<uint32_t *>(out), carry, plus);
+            unpackVertical32FusedDelta<plus>(p, b, reinterpret_cast<uint32_t *>(out), carry);
             prev = static_cast<T>(carry);
             return static_cast<size_t>((p + base_bytes) - in);
         }
@@ -227,24 +247,31 @@ inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, Delta mode,
     {
         if (!need(p, e))
             return 0;
+
         const uint8_t * pos = p;
         p += e;
+
         const size_t patch_bytes = packedBytes(e, hb);
         if (!need(p, patch_bytes))
             return 0;
+
         T patches[BLOCK];
         unpackBits<T>(p, e, hb, patches);
         p += patch_bytes;
+
         for (unsigned j = 0; j < e; ++j)
         {
             // blockEncode emits strictly increasing positions; a duplicate would OR two patches into one value.
             if ((pos[j] >= cnt) || ((j > 0) && (pos[j] <= pos[j - 1])))
                 return 0;
+
             out[pos[j]] |= patches[j] << b;
         }
     }
-    if (mode != Delta::none)
-        deltaApply<T>(out, cnt, prev, plus);
+
+    if constexpr (mode != Delta::none)
+        deltaApply<T, plus>(out, cnt, prev);
+
     return static_cast<size_t>(p - in);
 }
 

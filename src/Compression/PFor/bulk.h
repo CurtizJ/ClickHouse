@@ -68,11 +68,11 @@ inline size_t bulkEncode(const T * in, size_t n, Delta mode, uint8_t * out) noex
     for (size_t s = 0; s < n; s += BLOCK)
     {
         const unsigned cnt = static_cast<unsigned>((n - s < BLOCK) ? (n - s) : BLOCK);
+        const T * src = r;
         switch (mode)
         {
             case Delta::none:
-                for (unsigned i = 0; i < cnt; ++i)
-                    r[i] = in[s + i];
+                src = in + s;
                 break;
             case Delta::d0:
                 for (unsigned i = 0; i < cnt; ++i)
@@ -89,29 +89,44 @@ inline size_t bulkEncode(const T * in, size_t n, Delta mode, uint8_t * out) noex
                 }
                 break;
         }
-        p += blockEncode<T>(r, cnt, p);
+        p += blockEncode<T>(src, cnt, p);
     }
     return static_cast<size_t>(p - out);
 }
 
-// With non-null `end`, a corrupt block makes blockDecode return 0, propagated as a 0 return here so the caller can report CORRUPTED_DATA.
-template <typename T>
-inline size_t bulkDecode(const uint8_t * in, size_t count, Delta mode, T * out, const uint8_t * end = nullptr) noexcept
+template <typename T, Delta mode>
+inline size_t bulkDecodeImpl(const uint8_t * in, size_t count, T * out, const uint8_t * end) noexcept
 {
-    if (count == 0)
-        return 0;
     const uint8_t * p = in;
     T prev = 0;
     for (size_t s = 0; s < count; s += BLOCK)
     {
         const unsigned cnt = static_cast<unsigned>((count - s < BLOCK) ? (count - s) : BLOCK);
         // blockDecode reconstructs delta in-place, threading the running carry through `prev`.
-        const size_t bytes = blockDecode<T>(p, cnt, out + s, mode, prev, end);
+        const size_t bytes = blockDecode<T, mode>(p, cnt, out + s, prev, end);
         if (bytes == 0)
             return 0;
         p += bytes;
     }
     return static_cast<size_t>(p - in);
+}
+
+// With non-null `end`, a corrupt block makes blockDecode return 0, propagated as a 0 return here so the caller can report CORRUPTED_DATA.
+// The runtime mode is resolved to a compile-time parameter once per stream, not per block.
+template <typename T>
+inline size_t bulkDecode(const uint8_t * in, size_t count, Delta mode, T * out, const uint8_t * end = nullptr) noexcept
+{
+    if (count == 0)
+        return 0;
+    switch (mode)
+    {
+        case Delta::none:
+            return bulkDecodeImpl<T, Delta::none>(in, count, out, end);
+        case Delta::d0:
+            return bulkDecodeImpl<T, Delta::d0>(in, count, out, end);
+        case Delta::d1:
+            return bulkDecodeImpl<T, Delta::d1>(in, count, out, end);
+    }
 }
 
 }

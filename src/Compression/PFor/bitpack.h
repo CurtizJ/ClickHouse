@@ -13,15 +13,19 @@ inline ALWAYS_INLINE void packBits(const T * in, size_t n, unsigned b, uint8_t *
 {
     if (b == 0)
         return;
+
     using W = Wide<T>;
     const T mask = lowMask<T>(b);
+
     W acc = 0;
     unsigned bits = 0;
     uint8_t * p = out;
+
     for (size_t i = 0; i < n; ++i)
     {
         acc |= static_cast<W>(in[i] & mask) << bits;
         bits += b;
+
         while (bits >= 8)
         {
             *p++ = static_cast<uint8_t>(acc);
