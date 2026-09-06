@@ -1,0 +1,44 @@
+<test>
+    <settings>
+        <max_threads>1</max_threads>
+    </settings>
+
+    <create_query>
+        CREATE TABLE sparse_vectors
+        (
+            id UInt32,
+            m_str Map(String, Float32),
+            m_lc Map(LowCardinality(String), Float32),
+            m_int Map(UInt32, Float32)
+        ) ENGINE = Memory
+    </create_query>
+
+    <!-- Sparse vectors with 64 random dimensions out of a vocabulary of 30000, as produced by learned sparse embedding models -->
+    <fill_query>
+        INSERT INTO sparse_vectors
+        SELECT
+            number,
+            mapFromArrays(arrayMap(k -> concat('t', toString(k)), keys), weights) AS m,
+            m,
+            mapFromArrays(keys, weights)
+        FROM
+        (
+            SELECT
+                number,
+                arrayDistinct(arrayMap(i -> toUInt32(cityHash64(number, i) % 30000), range(64))) AS keys,
+                arrayMap(k -> toFloat32((cityHash64(number, k, 1) % 1000) / 100), keys) AS weights
+            FROM numbers(500000)
+        )
+    </fill_query>
+
+    <!-- A constant query vector with 40 dimensions against the column of document vectors -->
+    <query>WITH mapFromArrays(arrayMap(k -> concat('t', toString(k)), range(0, 30000, 750)), arrayMap(k -> toFloat32(k % 7 + 1), range(0, 30000, 750))) AS q SELECT sum(mapDotProduct(m_str, q)) FROM sparse_vectors</query>
+    <query>WITH mapFromArrays(arrayMap(k -> concat('t', toString(k)), range(0, 30000, 750)), arrayMap(k -> toFloat32(k % 7 + 1), range(0, 30000, 750))) AS q SELECT sum(mapDotProduct(m_lc, q)) FROM sparse_vectors</query>
+    <query>WITH mapFromArrays(arrayMap(k -> toUInt32(k), range(0, 30000, 750)), arrayMap(k -> toFloat32(k % 7 + 1), range(0, 30000, 750))) AS q SELECT sum(mapDotProduct(m_int, q)) FROM sparse_vectors</query>
+
+    <!-- Two columns of document vectors -->
+    <query>SELECT sum(mapDotProduct(m_str, m_str)) FROM sparse_vectors</query>
+    <query>SELECT sum(mapDotProduct(m_int, m_int)) FROM sparse_vectors</query>
+
+    <drop_query>DROP TABLE IF EXISTS sparse_vectors</drop_query>
+</test>
