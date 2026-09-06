@@ -113,7 +113,7 @@ struct Kernel
             table[keys[i]] += values[i];
     }
 
-    static NO_SANITIZE_UNDEFINED ResultType probe(const Table & table, const Keys & keys, const ResultType * values, size_t begin, size_t end)
+    static NO_SANITIZE_UNDEFINED ResultType apply(const Table & table, const Keys & keys, const ResultType * values, size_t begin, size_t end)
     {
         ResultType sum{};
         for (size_t i = begin; i < end; ++i)
@@ -124,9 +124,9 @@ struct Kernel
         return sum;
     }
 
-    /// The same as probe, but the keys are LowCardinality and the lookup results for the dictionary are precomputed.
+    /// The same as apply, but the keys are LowCardinality and the lookup results for the dictionary are precomputed.
     template <typename IndexType>
-    static NO_SANITIZE_UNDEFINED ResultType probeLowCardinality(
+    static NO_SANITIZE_UNDEFINED ResultType applyLowCardinality(
         const PaddedPODArray<IndexType> & indexes,
         const PaddedPODArray<UInt8> & dictionary_found,
         const PaddedPODArray<ResultType> & dictionary_weights,
@@ -166,9 +166,11 @@ public:
         const auto * right = checkAndGetDataType<DataTypeMap>(arguments[1].get());
 
         if (!left || !right)
+        {
             throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
                 "Arguments of function {} must be maps, got {} and {}",
                 getName(), arguments[0]->getName(), arguments[1]->getName());
+        }
 
         /// Validates the key types.
         getCommonKeyType(*left, *right);
@@ -177,6 +179,11 @@ public:
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override
     {
+        using ResultTypes = TypeList<
+            DataTypeUInt16, DataTypeUInt32, DataTypeUInt64,
+            DataTypeInt16, DataTypeInt32, DataTypeInt64,
+            DataTypeFloat32, DataTypeFloat64>;
+
         const auto & left_type = assert_cast<const DataTypeMap &>(*arguments[0].type);
         const auto & right_type = assert_cast<const DataTypeMap &>(*arguments[1].type);
         auto key_type = getCommonKeyType(left_type, right_type);
@@ -188,17 +195,14 @@ public:
         /// because only then the hash table is the same for all rows.
         auto left = prepareArgument(arguments[0], left_is_const, key_type, result_type, right_is_const && !left_is_const);
         auto right = prepareArgument(arguments[1], right_is_const, key_type, result_type, left_is_const && !right_is_const);
-
         ColumnPtr result;
-        bool valid = castTypeToEither<
-            DataTypeUInt16, DataTypeUInt32, DataTypeUInt64,
-            DataTypeInt16, DataTypeInt32, DataTypeInt64,
-            DataTypeFloat32, DataTypeFloat64>(result_type.get(), [&](const auto & type)
-            {
-                using ResultType = typename std::decay_t<decltype(type)>::FieldType;
-                result = executeWithResultType<ResultType>(key_type, left, right, input_rows_count);
-                return true;
-            });
+
+        bool valid = castTypeToEither(ResultTypes{}, result_type.get(), [&](const auto & type)
+        {
+            using ResultType = typename std::decay_t<decltype(type)>::FieldType;
+            result = executeWithResultType<ResultType>(key_type, left, right, input_rows_count);
+            return true;
+        });
 
         if (!valid)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected result type {} of function {}", result_type->getName(), getName());
@@ -216,46 +220,54 @@ private:
         bool both_integers = isNativeInteger(left_key_type) && isNativeInteger(right_key_type);
 
         if (!both_strings && !both_integers)
+        {
             throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
                 "Keys of the maps in function {} must be both strings or both integers, got {} and {}",
                 getName(), left.getKeyType()->getName(), right.getKeyType()->getName());
+        }
 
         return getLeastSupertype(DataTypes{left_key_type, right_key_type});
     }
 
     DataTypePtr getResultType(const DataTypeMap & left, const DataTypeMap & right) const
     {
-        using Types = TypeList<
+        using ValueTypes = TypeList<
             DataTypeBFloat16, DataTypeFloat32, DataTypeFloat64,
             DataTypeUInt8, DataTypeUInt16, DataTypeUInt32, DataTypeUInt64,
             DataTypeInt8, DataTypeInt16, DataTypeInt32, DataTypeInt64>;
 
         auto left_value_type = removeLowCardinality(left.getValueType());
         auto right_value_type = removeLowCardinality(right.getValueType());
-
         DataTypePtr result_type;
-        bool valid = castTypeToEither(Types{}, left_value_type.get(), [&](const auto & left_type)
+
+        bool valid = castTypeToEither(ValueTypes{}, left_value_type.get(), [&](const auto & left_type)
         {
-            return castTypeToEither(Types{}, right_value_type.get(), [&](const auto & right_type)
+            return castTypeToEither(ValueTypes{}, right_value_type.get(), [&](const auto & right_type)
             {
                 using LeftType = typename std::decay_t<decltype(left_type)>::FieldType;
                 using RightType = typename std::decay_t<decltype(right_type)>::FieldType;
 
-                /// The same rules as in arrayDotProduct: same-type Float32 and BFloat16 accumulate to Float32,
+                static constexpr bool both_float32 = std::is_same_v<LeftType, Float32> && std::is_same_v<RightType, Float32>;
+                static constexpr bool both_bfloat16 = std::is_same_v<LeftType, BFloat16> && std::is_same_v<RightType, BFloat16>;
+
+                /// The same rules as in arrayDotProduct.
+                /// Same-type Float32 and BFloat16 accumulate to Float32,
                 /// everything else uses the promoted arithmetic type.
-                if constexpr ((std::is_same_v<LeftType, Float32> && std::is_same_v<RightType, Float32>)
-                    || (std::is_same_v<LeftType, BFloat16> && std::is_same_v<RightType, BFloat16>))
+                if constexpr (both_float32 || both_bfloat16)
                     result_type = std::make_shared<DataTypeFloat32>();
                 else
                     result_type = std::make_shared<DataTypeNumber<typename NumberTraits::ResultOfAdditionMultiplication<LeftType, RightType>::Type>>();
+
                 return true;
             });
         });
 
         if (!valid)
+        {
             throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
                 "Values of the maps in function {} must be integers or floats, got {} and {}",
                 getName(), left.getValueType()->getName(), right.getValueType()->getName());
+        }
 
         return result_type;
     }
@@ -311,15 +323,17 @@ private:
         if (isFixedString(key_type))
             return executeWithKeys<ResultType, StringKeys<ColumnFixedString>>(left, right, input_rows_count);
 
-        ColumnPtr result;
-        bool valid = castTypeToEither<
+        using IntegerKeyTypes = TypeList<
             DataTypeUInt8, DataTypeUInt16, DataTypeUInt32, DataTypeUInt64,
-            DataTypeInt8, DataTypeInt16, DataTypeInt32, DataTypeInt64>(key_type.get(), [&](const auto & type)
-            {
-                using KeyType = typename std::decay_t<decltype(type)>::FieldType;
-                result = executeWithKeys<ResultType, IntegerKeys<KeyType>>(left, right, input_rows_count);
-                return true;
-            });
+            DataTypeInt8, DataTypeInt16, DataTypeInt32, DataTypeInt64>;
+
+        ColumnPtr result;
+        bool valid = castTypeToEither(IntegerKeyTypes{}, key_type.get(), [&](const auto & type)
+        {
+            using KeyType = typename std::decay_t<decltype(type)>::FieldType;
+            result = executeWithKeys<ResultType, IntegerKeys<KeyType>>(left, right, input_rows_count);
+            return true;
+        });
 
         if (!valid)
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected key type {} of function {}", key_type->getName(), getName());
@@ -364,21 +378,21 @@ private:
         typename KernelType::Table table;
         for (size_t row = 0; row < input_rows_count; ++row)
         {
+            table.clear();
             size_t left_begin = left.begin(row);
             size_t left_end = left.end(row);
             size_t right_begin = right.begin(row);
             size_t right_end = right.end(row);
 
-            table.clear();
             if (left_end - left_begin <= right_end - right_begin)
             {
                 KernelType::fill(table, left_keys, left_values, left_begin, left_end);
-                result[row] = KernelType::probe(table, right_keys, right_values, right_begin, right_end);
+                result[row] = KernelType::apply(table, right_keys, right_values, right_begin, right_end);
             }
             else
             {
                 KernelType::fill(table, right_keys, right_values, right_begin, right_end);
-                result[row] = KernelType::probe(table, left_keys, left_values, left_begin, left_end);
+                result[row] = KernelType::apply(table, left_keys, left_values, left_begin, left_end);
             }
         }
 
@@ -395,8 +409,10 @@ private:
         Keys constant_keys(*constant.keys);
         KernelType::fill(table, constant_keys, getValues<ResultType>(constant), 0, constant.end(0));
 
-        if (const auto * low_cardinality = typeid_cast<const ColumnLowCardinality *>(column.keys.get()))
-            return executeWithKeysConstLowCardinality<ResultType, Keys>(table, *low_cardinality, column, input_rows_count);
+        if (typeid_cast<const ColumnLowCardinality *>(column.keys.get()))
+        {
+            return executeWithKeysConstLowCardinality<ResultType, Keys>(table, column, input_rows_count);
+        }
 
         const auto * column_values = getValues<ResultType>(column);
         Keys column_keys(*column.keys);
@@ -405,23 +421,19 @@ private:
         auto & result = result_column->getData();
 
         for (size_t row = 0; row < input_rows_count; ++row)
-            result[row] = KernelType::probe(table, column_keys, column_values, column.begin(row), column.end(row));
+            result[row] = KernelType::apply(table, column_keys, column_values, column.begin(row), column.end(row));
 
         return result_column;
     }
 
     /// The same as executeWithKeysConst, but the keys of the column are LowCardinality: every entry
     /// of the dictionary is looked up in the hash table once, then the rows only index the lookup results.
-    template <typename ResultType, typename Keys>
-    static ColumnPtr executeWithKeysConstLowCardinality(
-        const typename Kernel<ResultType, Keys>::Table & table,
-        const ColumnLowCardinality & low_cardinality,
-        const MapArgument & column,
-        size_t input_rows_count)
+    template <typename ResultType, typename Keys, typename KernelType = Kernel<ResultType, Keys>>
+    static ColumnPtr executeWithKeysConstLowCardinality(const KernelType::Table & table, const MapArgument & column, size_t input_rows_count)
     {
-        using KernelType = Kernel<ResultType, Keys>;
-
+        const auto & low_cardinality = typeid_cast<const ColumnLowCardinality &>(*column.keys);
         const auto & dictionary = *low_cardinality.getDictionary().getNestedColumn();
+
         Keys dictionary_keys(dictionary);
         size_t dictionary_size = dictionary.size();
 
@@ -436,7 +448,6 @@ private:
         }
 
         const auto * column_values = getValues<ResultType>(column);
-
         auto result_column = ColumnVector<ResultType>::create(input_rows_count);
         auto & result = result_column->getData();
 
@@ -445,7 +456,7 @@ private:
         bool valid = castTypeToEither<ColumnUInt8, ColumnUInt16, ColumnUInt32, ColumnUInt64>(&indexes, [&](const auto & indexes_column)
         {
             for (size_t row = 0; row < input_rows_count; ++row)
-                result[row] = KernelType::probeLowCardinality(indexes_column.getData(), dictionary_found, dictionary_weights, column_values, column.begin(row), column.end(row));
+                result[row] = KernelType::applyLowCardinality(indexes_column.getData(), dictionary_found, dictionary_weights, column_values, column.begin(row), column.end(row));
             return true;
         });
 
