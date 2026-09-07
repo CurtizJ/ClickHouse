@@ -152,7 +152,7 @@ std::vector<uint32_t> intersectAndCollect(
     float effective_threshold = brute_force ? 0.0f : density_threshold;
     auto col = ColumnUInt8::create(num_rows, UInt8(0));
     auto cursors = resolveTokenCursors(postings, tokens);
-    lazyIntersectPostingLists(*col, cursors, 0, row_offset, num_rows, effective_threshold);
+    lazyIntersectPostingLists(col->getData().data(), cursors, row_offset, num_rows, effective_threshold);
     const auto & data = col->getData();
     std::vector<uint32_t> result;
     for (size_t i = 0; i < num_rows; ++i)
@@ -170,7 +170,7 @@ std::vector<uint32_t> unionAndCollect(
 {
     auto col = ColumnUInt8::create(num_rows, UInt8(0));
     auto cursors = resolveTokenCursors(postings, tokens);
-    lazyUnionPostingLists(*col, cursors, 0, row_offset, num_rows);
+    lazyUnionPostingLists(col->getData().data(), cursors, row_offset, num_rows);
     const auto & data = col->getData();
     std::vector<uint32_t> result;
     for (size_t i = 0; i < num_rows; ++i)
@@ -3830,7 +3830,7 @@ TEST(PostingListCursorTest, LazyUnionRowOffsetAboveUInt32MaxThrows)
     const size_t huge_offset = static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
     auto col = ColumnUInt8::create(64, UInt8(0));
     EXPECT_THROW(
-        lazyUnionPostingLists(*col, cursors, 0, huge_offset, 64),
+        lazyUnionPostingLists(col->getData().data(), cursors, huge_offset, 64),
         Exception);
 }
 
@@ -3846,7 +3846,7 @@ TEST(PostingListCursorTest, LazyIntersectRowOffsetAboveUInt32MaxThrows)
     {
         auto col = ColumnUInt8::create(64, UInt8(0));
         EXPECT_THROW(
-            lazyIntersectPostingLists(*col, cursors, 0, huge_offset, 64, /*density_threshold=*/1.0f),
+            lazyIntersectPostingLists(col->getData().data(), cursors, huge_offset, 64, /*density_threshold=*/1.0f),
             Exception);
     }
 
@@ -3854,7 +3854,7 @@ TEST(PostingListCursorTest, LazyIntersectRowOffsetAboveUInt32MaxThrows)
     {
         auto col = ColumnUInt8::create(64, UInt8(0));
         EXPECT_THROW(
-            lazyIntersectPostingLists(*col, cursors, 0, huge_offset, 64, /*density_threshold=*/0.0f),
+            lazyIntersectPostingLists(col->getData().data(), cursors, huge_offset, 64, /*density_threshold=*/0.0f),
             Exception);
     }
 }
@@ -3910,7 +3910,7 @@ TEST(PostingListCursorTest, LazyIntersectIncludesRowAtUInt32Max)
     {
         std::vector<PostingListCursorPtr> cursors{makeEmbeddedCursor(info_a), makeEmbeddedCursor(info_b)};
         auto col = ColumnUInt8::create(4, UInt8(0));
-        lazyIntersectPostingLists(*col, cursors, 0, static_cast<size_t>(m) - 3, 4, /*density_threshold=*/0.0f);
+        lazyIntersectPostingLists(col->getData().data(), cursors, static_cast<size_t>(m) - 3, 4, /*density_threshold=*/0.0f);
         const auto & data = col->getData();
         EXPECT_EQ(data[0], 0u);  // m - 3: only in a
         EXPECT_EQ(data[1], 0u);  // m - 2: only in b
@@ -3923,11 +3923,145 @@ TEST(PostingListCursorTest, LazyIntersectIncludesRowAtUInt32Max)
     {
         std::vector<PostingListCursorPtr> cursors{makeEmbeddedCursor(info_a), makeEmbeddedCursor(info_b)};
         auto col = ColumnUInt8::create(4, UInt8(0));
-        lazyIntersectPostingLists(*col, cursors, 0, static_cast<size_t>(m) - 3, 4, /*density_threshold=*/1.0f);
+        lazyIntersectPostingLists(col->getData().data(), cursors, static_cast<size_t>(m) - 3, 4, /*density_threshold=*/1.0f);
         const auto & data = col->getData();
         EXPECT_EQ(data[0], 0u);
         EXPECT_EQ(data[1], 0u);
         EXPECT_EQ(data[2], 0u);
         EXPECT_EQ(data[3], 1u);
     }
+}
+
+
+// ===========================================================================================
+// Section: sparse output (lazyUnionPostingListsSparse / lazyIntersectPostingListsSparse)
+// ===========================================================================================
+
+namespace
+{
+
+/// Helper: the sparse kernels over consecutive windows of `window_rows` rows in [0, total_rows), as doc IDs.
+/// Every window appends to the same offsets array with the base of the rows read so far, exactly as the
+/// reader does for a `ColumnSparse`, so the offsets are the doc IDs themselves.
+std::vector<uint32_t> sparseDocIdsOverWindows(
+    const std::vector<PostingListCursorPtr> & cursors, size_t total_rows, size_t window_rows, bool intersect)
+{
+    PaddedPODArray<UInt64> offsets;
+    for (size_t row_offset = 0; row_offset < total_rows; row_offset += window_rows)
+    {
+        size_t num_rows = std::min(window_rows, total_rows - row_offset);
+        if (intersect)
+            lazyIntersectPostingListsSparse(offsets, row_offset, cursors, row_offset, num_rows);
+        else
+            lazyUnionPostingListsSparse(offsets, row_offset, cursors, row_offset, num_rows);
+    }
+
+    std::vector<uint32_t> result;
+    for (auto offset : offsets)
+        result.push_back(static_cast<uint32_t>(offset));
+    return result;
+}
+
+/// Helper: the dense kernels over the same windows, as doc IDs. Leapfrog is forced for the intersection.
+std::vector<uint32_t> denseDocIdsOverWindows(
+    const std::vector<PostingListCursorPtr> & cursors, size_t total_rows, size_t window_rows, bool intersect)
+{
+    std::vector<uint32_t> result;
+    for (size_t row_offset = 0; row_offset < total_rows; row_offset += window_rows)
+    {
+        size_t num_rows = std::min(window_rows, total_rows - row_offset);
+        std::vector<UInt8> buf(num_rows, 0);
+        if (intersect)
+            lazyIntersectPostingLists(buf.data(), cursors, row_offset, num_rows, /*density_threshold=*/1.0f);
+        else
+            lazyUnionPostingLists(buf.data(), cursors, row_offset, num_rows);
+
+        for (size_t i = 0; i < num_rows; ++i)
+            if (buf[i])
+                result.push_back(static_cast<uint32_t>(row_offset + i));
+    }
+    return result;
+}
+
+std::vector<PostingListCursorPtr> makeEmbeddedCursors(const std::vector<TokenPostingsInfo> & infos)
+{
+    std::vector<PostingListCursorPtr> cursors;
+    for (const auto & info : infos)
+        cursors.push_back(makeEmbeddedCursor(info));
+    return cursors;
+}
+
+}
+
+TEST(PostingListCursorTest, SparseUnionMatchesDenseAcrossWindows)
+{
+    std::vector<TokenPostingsInfo> infos = {
+        makeEmbeddedInfo(generateRange(3, 40, 7)),
+        makeEmbeddedInfo(generateRange(10, 25, 11)),
+        makeEmbeddedInfo({64, 65, 127, 128, 129, 255, 256}),
+    };
+
+    /// Cursors are forward-only, so each variant walks its own set.
+    auto dense = denseDocIdsOverWindows(makeEmbeddedCursors(infos), 320, 64, /*intersect=*/false);
+    auto sparse = sparseDocIdsOverWindows(makeEmbeddedCursors(infos), 320, 64, /*intersect=*/false);
+
+    EXPECT_FALSE(dense.empty());
+    EXPECT_EQ(sparse, dense);
+    EXPECT_TRUE(std::ranges::is_sorted(sparse));
+    EXPECT_EQ(std::ranges::adjacent_find(sparse), sparse.end()) << "a row shared by several cursors must be emitted once";
+}
+
+TEST(PostingListCursorTest, SparseIntersectMatchesDenseAcrossWindows)
+{
+    /// 2, 3 and 5 cursors take the dedicated two/three-way and the linear leapfrog variants.
+    std::vector<TokenPostingsInfo> infos = {
+        makeEmbeddedInfo(generateRange(0, 200, 2)),
+        makeEmbeddedInfo(generateRange(0, 134, 3)),
+        makeEmbeddedInfo(generateRange(0, 80, 5)),
+        makeEmbeddedInfo(generateRange(0, 400, 1)),
+        makeEmbeddedInfo(generateRange(30, 60, 6)),
+    };
+
+    for (size_t num_cursors : {2, 3, 5})
+    {
+        std::vector<TokenPostingsInfo> subset(infos.begin(), infos.begin() + num_cursors);
+        auto dense = denseDocIdsOverWindows(makeEmbeddedCursors(subset), 400, 64, /*intersect=*/true);
+        auto sparse = sparseDocIdsOverWindows(makeEmbeddedCursors(subset), 400, 64, /*intersect=*/true);
+
+        EXPECT_FALSE(dense.empty()) << num_cursors;
+        EXPECT_EQ(sparse, dense) << num_cursors;
+    }
+}
+
+TEST(PostingListCursorTest, SparseSingleCursorWindowsAndBase)
+{
+    auto info = makeEmbeddedInfo({5, 63, 64, 100, 199, 200});
+    auto cursor = makeEmbeddedCursor(info);
+
+    /// A window that starts past the first rows and an offsets base unrelated to the row numbers.
+    PaddedPODArray<UInt64> offsets;
+    lazyUnionPostingListsSparse(offsets, /*offsets_base=*/1000, {cursor}, /*row_offset=*/60, /*num_rows=*/64);
+    ASSERT_EQ(offsets.size(), 3u);
+    EXPECT_EQ(offsets[0], 1000u + (63 - 60));
+    EXPECT_EQ(offsets[1], 1000u + (64 - 60));
+    EXPECT_EQ(offsets[2], 1000u + (100 - 60));
+
+    /// The next window continues from where the previous one stopped.
+    lazyIntersectPostingListsSparse(offsets, /*offsets_base=*/1064, {cursor}, /*row_offset=*/124, /*num_rows=*/76);
+    ASSERT_EQ(offsets.size(), 4u);
+    EXPECT_EQ(offsets[3], 1064u + (199 - 124));
+}
+
+TEST(PostingListCursorTest, SparseUnionMultiBlockCursor)
+{
+    /// Compressed multi-segment postings go through `prepareSegment` / `decodeBlock` while iterating.
+    std::vector<std::vector<uint32_t>> blocks;
+    for (uint32_t segment = 0; segment < 3; ++segment)
+        blocks.push_back(generateRange(segment * 1000, 300, 3));
+
+    auto data = makeMultiBlockData(blocks);
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto sparse = sparseDocIdsOverWindows({cursor}, 3000, 256, /*intersect=*/false);
+    EXPECT_EQ(sparse, data.all_docs);
 }

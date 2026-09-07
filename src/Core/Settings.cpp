@@ -8986,6 +8986,11 @@ The query must filter by `hasToken`, `hasAnyTokens` or `hasAllTokens` on the ind
     DECLARE(Bool, text_index_bm25_pruning, true, R"(
 For `ORDER BY bm25() DESC LIMIT n` queries with the dynamic top-k filtering (`use_top_k_dynamic_filtering`), lets the text index reader skip the decoding and scoring of the marks and posting-list blocks whose block-max score bound stays below the current top-k threshold.
 )", 0) \
+    DECLARE(Float, text_index_ratio_of_defaults_for_sparse_columns, 0.9f, R"(
+Minimal estimated ratio of non-matching rows at which a virtual column filled by direct reading from the text index is produced as a sparse column instead of a full one.
+The ratio is estimated per data part from the cardinalities of the posting lists: the smallest posting list bounds the matches of `hasAllTokens`, the sum of posting lists bounds the matches of `hasAnyTokens`.
+A sparse filter column makes the subsequent filtering steps cheaper when only a few rows match. A value of 1.0 or greater disables sparse columns.
+)", 0) \
     DECLARE(Bool, stop_refreshable_materialized_views_on_startup, false, R"(
 On server startup, prevent scheduling of refreshable materialized views, as if with SYSTEM STOP VIEWS. You can manually start them with `SYSTEM START VIEWS` or `SYSTEM START VIEW <name>` afterwards. Also applies to newly created views. Has no effect on non-refreshable materialized views.
 )", EXPERIMENTAL) \

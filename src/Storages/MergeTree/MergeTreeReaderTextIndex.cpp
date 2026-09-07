@@ -1,4 +1,5 @@
 #include <Columns/ColumnsCommon.h>
+#include <Columns/ColumnSparse.h>
 #include <IO/ReadHelpers.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
@@ -21,6 +22,7 @@
 #include <Core/Settings.h>
 
 #include <algorithm>
+#include <span>
 
 namespace ProfileEvents
 {
@@ -35,6 +37,7 @@ namespace ProfileEvents
     extern const Event TextIndexPhraseFallbacks;
     extern const Event TextScoreMarksPruned;
     extern const Event TextScoreWindowsPruned;
+    extern const Event TextIndexSparseVirtualColumns;
 }
 
 namespace DB
@@ -53,6 +56,92 @@ namespace ErrorCodes
     extern const int CORRUPTED_DATA;
     extern const int LOGICAL_ERROR;
     extern const int NOT_IMPLEMENTED;
+}
+
+namespace
+{
+
+/// Upper bound on the number of rows of the part a token query can match: an intersection (`All`, `Phrase`)
+/// is bounded by its smallest posting list, a union (`Any`) by the sum of its posting lists. Tokens whose
+/// postings the analyzer has already folded into `query_builder.postings` are counted through that folded list.
+size_t estimateMaxMatchingRows(
+    const TextIndexAnalyzer & analyzer,
+    const TextIndexAnalyzer::QueryBuilder & query_builder,
+    const TextSearchQuery & query)
+{
+    const bool is_union = query.getSearchMode() == TextSearchMode::Any;
+
+    std::optional<size_t> result;
+    if (query_builder.postings)
+        result = query_builder.postings->cardinality();
+
+    for (const auto & [token, token_info] : query_builder.tokens)
+    {
+        if (analyzer.hasReadPostings(token))
+            continue;
+
+        const size_t cardinality = token_info->cardinality;
+        if (!result)
+            result = cardinality;
+        else if (is_union)
+            *result += cardinality;
+        else
+            *result = std::min(*result, cardinality);
+    }
+
+    return result.value_or(0);
+}
+
+/// Completes an append of `num_rows` rows to a sparse virtual column after `num_matches` offsets
+/// were pushed for it: adds the ones they refer to and grows the column.
+void finishSparseRows(ColumnSparse & column, size_t num_matches, size_t num_rows)
+{
+    auto & values = assert_cast<ColumnUInt8 &>(column.getValuesColumn()).getData();
+    values.resize_fill(values.size() + num_matches, 1);
+    /// `insertManyDefaults` only grows the size of a sparse column.
+    column.insertManyDefaults(num_rows);
+}
+
+/// Appends `num_rows` rows to the sparse column with ones at the sorted absolute row numbers `matches`,
+/// which must lie in [row_offset, row_offset + num_rows).
+void appendSparseRows(ColumnSparse & column, std::span<const UInt32> matches, size_t row_offset, size_t num_rows)
+{
+    const size_t old_size = column.size();
+    auto & offsets = column.getOffsetsData();
+    offsets.reserve(offsets.size() + matches.size());
+
+    for (UInt32 row : matches)
+    {
+        const size_t relative_row_number = row - row_offset;
+        chassert(relative_row_number < num_rows);
+        offsets.push_back(old_size + relative_row_number);
+    }
+
+    finishSparseRows(column, matches.size(), num_rows);
+}
+
+/// Appends `num_rows` rows to a full or sparse virtual column with ones at the sorted absolute
+/// row numbers `matches`, which must lie in [row_offset, row_offset + num_rows).
+void appendMatchingRows(IColumn & column, std::span<const UInt32> matches, size_t row_offset, size_t num_rows)
+{
+    if (auto * sparse_column = typeid_cast<ColumnSparse *>(&column))
+    {
+        appendSparseRows(*sparse_column, matches, row_offset, num_rows);
+        return;
+    }
+
+    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
+    const size_t old_size = column_data.size();
+    column_data.resize_fill(old_size + num_rows, 0);
+
+    for (UInt32 row : matches)
+    {
+        const size_t relative_row_number = row - row_offset;
+        chassert(relative_row_number < num_rows);
+        column_data[old_size + relative_row_number] = 1;
+    }
+}
+
 }
 
 MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
@@ -111,6 +200,7 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     lazy_cursors.resize(columns_.size());
     prebuilt_cursors.resize(columns_.size());
     score_leaves.resize(columns_.size());
+    use_sparse.resize(columns_.size(), false);
 
     auto data_part = getDataPart();
     auto index_format = index.index->getDeserializedFormat(*data_part, index.index->getFileName());
@@ -399,6 +489,35 @@ void MergeTreeReaderTextIndex::classifyVirtualColumns()
                 }
             }
         }
+    }
+}
+
+void MergeTreeReaderTextIndex::chooseSparseVirtualColumns()
+{
+    const auto & analyzer = granule->getAnalyzer();
+    /// Cardinalities (granule) and the row count (part) share scale - a text index has whole-part granularity.
+    const size_t num_rows_in_part = data_part_info_for_read->getRowCount();
+    const double ratio_of_defaults = static_cast<double>(settings.text_index_ratio_of_defaults_for_sparse_columns);
+    /// A threshold of 1.0 or above disables sparse columns: no bound is below zero.
+    const double max_matching_rows_for_sparse = (1.0 - ratio_of_defaults) * static_cast<double>(num_rows_in_part);
+
+    for (size_t i = 0; i < columns_to_read.size(); ++i)
+    {
+        /// Always-true columns are all ones; the fallback evaluates an arbitrary expression into a full column.
+        /// Score columns are filled by `fillColumnScores`, which writes a full `Float32` column.
+        if (is_always_true[i] || use_fallback[i] || is_score_column[i])
+            continue;
+
+        const auto & search_query = search_queries[i];
+        const auto & query_builder = analyzer.getQueryBuilder(*search_query);
+
+        /// Queries that never match give an all-zero column; the rest are bounded by their posting lists.
+        const bool never_matches = query_builder.is_failed || (search_query->getTokens().empty() && search_query->getPatterns().empty());
+        const double max_matching_rows = never_matches ? 0.0 : static_cast<double>(estimateMaxMatchingRows(analyzer, query_builder, *search_query));
+
+        use_sparse[i] = max_matching_rows < max_matching_rows_for_sparse;
+        if (use_sparse[i])
+            ProfileEvents::increment(ProfileEvents::TextIndexSparseVirtualColumns);
     }
 }
 
@@ -744,7 +863,6 @@ size_t MergeTreeReaderTextIndex::readRows(
     }
 
     size_t read_rows = 0;
-    createEmptyColumns(res_columns, max_rows_to_read);
     size_t total_marks = data_part_info_for_read->getIndexGranularity().getMarksCountWithoutFinal();
 
     if (!is_initialized && max_rows_to_read > 0)
@@ -756,9 +874,13 @@ size_t MergeTreeReaderTextIndex::readRows(
 
         is_initialized = true;
         classifyVirtualColumns();
+        chooseSparseVirtualColumns();
         initializePostingStreams();
         initializePositionsStream();
     }
+
+    /// The columns are created after the analysis, which decides between full and sparse columns.
+    createEmptyColumns(res_columns, max_rows_to_read);
 
     const bool any_use_fallback = !use_fallback.empty() && std::ranges::any_of(use_fallback, [](bool b) { return b; });
 
@@ -848,7 +970,15 @@ void MergeTreeReaderTextIndex::createEmptyColumns(MutableColumns & columns, size
 {
     for (size_t i = 0; i < columns.size(); ++i)
     {
-        if (columns[i] == nullptr)
+        if (columns[i] != nullptr)
+            continue;
+
+        if (use_sparse[i])
+        {
+            /// A sparse column stores only the matching rows, so there is nothing worth reserving.
+            columns[i] = ColumnSparse::create(ColumnUInt8::create());
+        }
+        else
         {
             auto column = columns_to_read[i].type->createColumn(*serializations[i]);
             column->reserve(max_rows_to_read);
@@ -909,10 +1039,9 @@ void MergeTreeReaderTextIndex::fillZeroRows(MutableColumns & res_columns, size_t
 {
     for (size_t i = 0; i < res_columns.size(); ++i)
     {
-        if (is_score_column[i])
-            assert_cast<ColumnFloat32 &>(*res_columns[i]).getData().resize_fill(res_columns[i]->size() + num_rows);
-        else
-            assert_cast<ColumnUInt8 &>(*res_columns[i]).getData().resize_fill(res_columns[i]->size() + num_rows, 0);
+        /// Zero for a score column, no match for a filter column, no offsets for a sparse one:
+        /// in every representation the pruned rows are the default value.
+        res_columns[i]->insertManyDefaults(num_rows);
     }
 }
 
@@ -1092,30 +1221,20 @@ void MergeTreeReaderTextIndex::cleanupPostingsBlocks(const RowsRange & range)
 
 void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows)
 {
-    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    size_t old_size = column_data.size();
-    column_data.resize_fill(old_size + num_rows, 0);
-
     size_t cardinality = postings.cardinality();
     if (cardinality == 0)
+    {
+        column.insertManyDefaults(num_rows);
         return;
+    }
 
     indices_buffer.resize(cardinality);
     postings.toUint32Array(indices_buffer.data());
-
-    for (size_t i = 0; i < cardinality; ++i)
-    {
-        size_t relative_row_number = indices_buffer[i] - row_offset;
-        chassert(relative_row_number < num_rows);
-        column_data[old_size + relative_row_number] = 1;
-    }
+    appendMatchingRows(column, std::span<const UInt32>(indices_buffer.data(), cardinality), row_offset, num_rows);
 }
 
 void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting)
 {
-    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    size_t old_size = column_data.size();
-
     const auto & search_query = search_queries[column_idx];
     chassert(search_query->getPatterns().empty());
 
@@ -1123,7 +1242,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
     {
         /// hasAnyTokens / hasAllTokens whose needle tokens were all dropped (e.g. by a postprocessor): no
         /// match, so fill zeros for every row read, matching fillColumn and the row-scan path.
-        column_data.resize_fill(old_size + num_rows, 0);
+        column.insertManyDefaults(num_rows);
         return;
     }
 
@@ -1132,7 +1251,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
 
     if (query_builder.is_failed)
     {
-        column_data.resize_fill(old_size + num_rows, 0);
+        column.insertManyDefaults(num_rows);
         return;
     }
 
@@ -1198,17 +1317,40 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
         }
     }
 
-    column_data.resize_fill(old_size + num_rows, 0);
-
     if (cursors.empty())
+    {
+        column.insertManyDefaults(num_rows);
         return;
+    }
 
-    if (search_query->getSearchMode() == TextSearchMode::Any)
-        lazyUnionPostingLists(column, cursors, old_size, row_offset, num_rows);
-    else if (search_query->getSearchMode() == TextSearchMode::All)
-        lazyIntersectPostingLists(column, cursors, old_size, row_offset, num_rows, lazy_intersection_density_threshold);
+    const auto search_mode = search_query->getSearchMode();
+    if (search_mode != TextSearchMode::Any && search_mode != TextSearchMode::All)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid search mode: {}", search_mode);
+
+    if (auto * sparse_column = typeid_cast<ColumnSparse *>(&column))
+    {
+        /// The kernels append the offsets of the matching rows directly.
+        auto & offsets = sparse_column->getOffsetsData();
+        const size_t old_offsets_size = offsets.size();
+
+        if (search_mode == TextSearchMode::Any)
+            lazyUnionPostingListsSparse(offsets, sparse_column->size(), cursors, row_offset, num_rows);
+        else
+            lazyIntersectPostingListsSparse(offsets, sparse_column->size(), cursors, row_offset, num_rows);
+
+        finishSparseRows(*sparse_column, offsets.size() - old_offsets_size, num_rows);
+        return;
+    }
+
+    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
+    size_t old_size = column_data.size();
+    column_data.resize_fill(old_size + num_rows, 0);
+    UInt8 * out = column_data.data() + old_size;
+
+    if (search_mode == TextSearchMode::Any)
+        lazyUnionPostingLists(out, cursors, row_offset, num_rows);
     else
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid search mode: {}", search_query->getSearchMode());
+        lazyIntersectPostingLists(out, cursors, row_offset, num_rows, lazy_intersection_density_threshold);
 }
 
 PostingList MergeTreeReaderTextIndex::readAllPostingsForToken(std::string_view token, const TokenPostingsInfo & token_info)
@@ -1448,12 +1590,11 @@ void MergeTreeReaderTextIndex::applyPostingsPhrase(
     size_t row_offset,
     size_t num_rows)
 {
-    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    size_t column_offset = column_data.size();
-    column_data.resize_fill(column_offset + num_rows, 0);
-
     if (!positions_stream || search_query->getPhraseTokens().empty())
+    {
+        column.insertManyDefaults(num_rows);
         return;
+    }
 
     auto cache_key = search_query->getHash();
     auto doc_ids_it = phrase_search_doc_ids.find(cache_key);
@@ -1479,13 +1620,9 @@ void MergeTreeReaderTextIndex::applyPostingsPhrase(
 
     const auto & matching_doc_ids = *doc_ids_it->second;
     const size_t window_end = row_offset + num_rows;
-    for (const auto * it = std::ranges::lower_bound(matching_doc_ids, row_offset);
-         it != matching_doc_ids.end() && *it < window_end;
-         ++it)
-    {
-        size_t relative_row_number = *it - row_offset;
-        column_data[column_offset + relative_row_number] = 1;
-    }
+    const auto * window_begin = std::ranges::lower_bound(matching_doc_ids, row_offset);
+    const auto * window_last = std::lower_bound(window_begin, matching_doc_ids.end(), window_end);
+    appendMatchingRows(column, std::span<const UInt32>(window_begin, window_last), row_offset, num_rows);
 }
 
 void MergeTreeReaderTextIndex::fillColumnFallback(

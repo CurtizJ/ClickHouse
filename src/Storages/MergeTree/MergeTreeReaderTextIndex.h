@@ -88,6 +88,9 @@ private:
     /// Sets per-column flags from the analyzer's verdict and collects tokens to materialize.
     void classifyVirtualColumns();
     void initializePostingStreams();
+    /// Decides per virtual column whether to produce `ColumnSparse` instead of a full `ColumnUInt8`:
+    /// the upper bound on the matching rows must leave at least the configured ratio of non-matching rows.
+    void chooseSparseVirtualColumns();
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
     void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
 
@@ -178,6 +181,9 @@ private:
     bool is_initialized = false;
     /// Virtual columns that are always true.
     std::vector<bool> is_always_true;
+    /// Virtual columns produced as `ColumnSparse` because few rows are expected to match.
+    /// Sized in the constructor: `createEmptyColumns` may run before the granule is analyzed.
+    std::vector<bool> use_sparse;
     std::unique_ptr<MergeTreeIndexDeserializationState> deserialization_state;
     std::optional<PostingsSerialization> postings_serialization;
 

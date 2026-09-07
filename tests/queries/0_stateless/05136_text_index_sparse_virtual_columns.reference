@@ -1,0 +1,48 @@
+-- materialize
+200	1991400
+20000	199990000
+200	1991400
+20000	199990000
+200	1991400
+67	663769
+200	1991400
+67	663769
+67	663769
+200	1991400
+-- lazy
+200	1991400
+20000	199990000
+200	1991400
+20000	199990000
+200	1991400
+67	663769
+200	1991400
+67	663769
+67	663769
+200	1991400
+-- reference without the index
+200	1991400
+200	1991400
+67	663769
+67	663769
+-- sparse virtual columns per query
+materialize	hasToken(s, \'rare\')	1
+materialize	hasToken(s, \'common\')	0
+materialize	hasAllTokens(s, [\'common\', \'rare\'])	1
+materialize	hasAnyTokens(s, [\'common\', \'rare\'])	0
+materialize	hasAnyTokens(s, [\'rare\', \'scarce\'])	1
+materialize	hasPhrase(s, \'rare scarce\')	1
+materialize	hasToken(s, \'rare\') OR hasToken(s, \'scarce\')	1
+materialize	hasToken(s, \'scarce\') AND id % 2 = 1	1
+materialize	s LIKE \'%scarce%\'	1
+materialize	hasToken(s, \'rare\') SETTINGS text_index_ratio_of_defaults_for_sparse_columns = 1.0	0
+lazy	hasToken(s, \'rare\')	1
+lazy	hasToken(s, \'common\')	0
+lazy	hasAllTokens(s, [\'common\', \'rare\'])	1
+lazy	hasAnyTokens(s, [\'common\', \'rare\'])	0
+lazy	hasAnyTokens(s, [\'rare\', \'scarce\'])	1
+lazy	hasPhrase(s, \'rare scarce\')	1
+lazy	hasToken(s, \'rare\') OR hasToken(s, \'scarce\')	1
+lazy	hasToken(s, \'scarce\') AND id % 2 = 1	1
+lazy	s LIKE \'%scarce%\'	1
+lazy	hasToken(s, \'rare\') SETTINGS text_index_ratio_of_defaults_for_sparse_columns = 1.0	0

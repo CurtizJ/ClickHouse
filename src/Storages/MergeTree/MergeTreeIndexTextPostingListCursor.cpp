@@ -9,7 +9,6 @@
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Columns/ColumnsCommon.h>
-#include <Columns/ColumnsNumber.h>
 #include <IO/ReadHelpers.h>
 #include <Common/TargetSpecific.h>
 #include <config.h>
@@ -1123,8 +1122,86 @@ void PostingListCursor::linearEmbedded(UInt8 * data, size_t row_offset, size_t n
 namespace
 {
 
+/// Dense output of the lazy kernels: a bitmap of the rows [row_offset, row_offset + num_rows).
+struct DenseRowsSink
+{
+    UInt8 * out;
+    size_t row_offset;
+
+    void ALWAYS_INLINE add(uint32_t row) const { out[row - row_offset] = 1; }
+};
+
+/// Sparse output of the lazy kernels: offsets of a `ColumnSparse` whose size before the append is `offsets_base`.
+struct SparseRowsSink
+{
+    PaddedPODArray<UInt64> & offsets;
+    size_t offsets_base;
+    size_t row_offset;
+
+    void ALWAYS_INLINE add(uint32_t row) const { offsets.push_back(offsets_base + (row - row_offset)); }
+};
+
+/// Rows of a single posting list within [row_offset, effective_end), in ascending order.
+template <typename Sink>
+void collectRows(Sink & sink, PostingListCursor & cursor, size_t row_offset, size_t effective_end)
+{
+    cursor.advance(static_cast<uint32_t>(row_offset));
+
+    while (cursor.valid())
+    {
+        uint32_t value = cursor.value();
+        if (value >= effective_end)
+            return;
+
+        sink.add(value);
+        cursor.next();
+    }
+}
+
+/// K-way merge: every row of [row_offset, effective_end) that appears in ANY cursor, once, in ascending order.
+/// Cursors are dropped as soon as they leave the window, so they stay positioned for the next window.
+template <typename Sink>
+void unionMerge(Sink & sink, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
+{
+    std::vector<PostingListCursor *> active;
+    active.reserve(cursors.size());
+
+    for (const auto & cursor : cursors)
+    {
+        cursor->advance(static_cast<uint32_t>(row_offset));
+        if (cursor->valid() && cursor->value() < effective_end)
+            active.push_back(cursor.get());
+    }
+
+    while (!active.empty())
+    {
+        uint32_t min_value = active.front()->value();
+        for (size_t i = 1; i < active.size(); ++i)
+            min_value = std::min(min_value, active[i]->value());
+
+        sink.add(min_value);
+
+        for (size_t i = 0; i < active.size();)
+        {
+            auto * cursor = active[i];
+            if (cursor->value() == min_value)
+            {
+                cursor->next();
+                if (!cursor->valid() || cursor->value() >= effective_end)
+                {
+                    active[i] = active.back();
+                    active.pop_back();
+                    continue;
+                }
+            }
+            ++i;
+        }
+    }
+}
+
 /// Two-cursor intersection. The lagging cursor advances to the leading cursor's doc_id.
-void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectTwo(Sink & sink, PostingListCursorPtr c0, PostingListCursorPtr c1, size_t effective_end)
 {
     while (c0->valid() && c1->valid())
     {
@@ -1135,7 +1212,7 @@ void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1,
 
         if (v0 == v1)
         {
-            out[v0 - row_offset] = 1;
+            sink.add(v0);
             c0->next();
             c1->next();
         }
@@ -1151,7 +1228,8 @@ void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1,
 }
 
 /// Three-cursor intersection. All cursors behind the maximum advance forward.
-void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectThree(Sink & sink, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, size_t effective_end)
 {
     while (c0->valid() && c1->valid() && c2->valid())
     {
@@ -1165,7 +1243,7 @@ void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c
 
         if (v0 == v1 && v1 == v2)
         {
-            out[v0 - row_offset] = 1;
+            sink.add(v0);
             c0->next();
             c1->next();
             c2->next();
@@ -1180,7 +1258,8 @@ void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c
 }
 
 /// Four-cursor intersection.
-void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, PostingListCursorPtr c3, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectFour(Sink & sink, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, PostingListCursorPtr c3, size_t effective_end)
 {
     while (c0->valid() && c1->valid() && c2->valid() && c3->valid())
     {
@@ -1195,7 +1274,7 @@ void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1
 
         if (v0 == v1 && v1 == v2 && v2 == v3)
         {
-            out[v0 - row_offset] = 1;
+            sink.add(v0);
             c0->next();
             c1->next();
             c2->next();
@@ -1212,7 +1291,8 @@ void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1
 }
 
 /// N-way leapfrog intersection (N <= 8): linear scan for min/max.
-void intersectLeapfrogLinear(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectLeapfrogLinear(Sink & sink, const std::vector<PostingListCursorPtr> & cursors, size_t effective_end)
 {
     const size_t n = cursors.size();
     std::vector<uint32_t> vals(n);
@@ -1237,7 +1317,7 @@ void intersectLeapfrogLinear(UInt8 * out, const std::vector<PostingListCursorPtr
 
         if (min_val == max_val)
         {
-            out[min_val - row_offset] = 1;
+            sink.add(min_val);
             for (size_t i = 0; i < n; ++i)
             {
                 cursors[i]->next();
@@ -1276,7 +1356,8 @@ struct HeapItem
 };
 
 /// N-way leapfrog intersection (N > 8): min-heap.
-void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectLeapfrogHeap(Sink & sink, const std::vector<PostingListCursorPtr> & cursors, size_t effective_end)
 {
     const size_t n = cursors.size();
 
@@ -1300,7 +1381,7 @@ void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> 
 
         if (min_val == max_val)
         {
-            out[min_val - row_offset] = 1;
+            sink.add(min_val);
             max_val = 0;
 
             for (size_t i = 0; i < n; ++i)
@@ -1340,33 +1421,53 @@ void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> 
 }
 
 /// Dispatch to the best leapfrog variant based on cursor count.
-void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
+template <typename Sink>
+void intersectLeapfrog(Sink & sink, const std::vector<PostingListCursorPtr> & cursors, size_t effective_end)
 {
     if (cursors.size() == 2)
     {
-        intersectTwo(out, cursors[0], cursors[1], row_offset, effective_end);
+        intersectTwo(sink, cursors[0], cursors[1], effective_end);
         return;
     }
 
     if (cursors.size() == 3)
     {
-        intersectThree(out, cursors[0], cursors[1], cursors[2], row_offset, effective_end);
+        intersectThree(sink, cursors[0], cursors[1], cursors[2], effective_end);
         return;
     }
 
     if (cursors.size() == 4)
     {
-        intersectFour(out, cursors[0], cursors[1], cursors[2], cursors[3], row_offset, effective_end);
+        intersectFour(sink, cursors[0], cursors[1], cursors[2], cursors[3], effective_end);
         return;
     }
 
     if (cursors.size() <= 8)
     {
-        intersectLeapfrogLinear(out, cursors, row_offset, effective_end);
+        intersectLeapfrogLinear(sink, cursors, effective_end);
         return;
     }
 
-    intersectLeapfrogHeap(out, cursors, row_offset, effective_end);
+    intersectLeapfrogHeap(sink, cursors, effective_end);
+}
+
+/// Sorts the cursors by ascending cardinality so the sparsest one leads the leapfrog, and positions them at
+/// the window start. Returns an empty vector when some cursor has no rows in the window (empty intersection).
+std::vector<PostingListCursorPtr> prepareLeapfrogCursors(const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
+{
+    auto sorted_cursors = cursors;
+    std::ranges::sort(sorted_cursors,
+        [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
+        { return a->cardinality() < b->cardinality(); });
+
+    for (const auto & cursor : sorted_cursors)
+    {
+        cursor->advance(static_cast<uint32_t>(row_offset));
+        if (!cursor->valid() || cursor->value() >= effective_end)
+            return {};
+    }
+
+    return sorted_cursors;
 }
 
 /// Brute-force intersection via bitmap counting.
@@ -1425,16 +1526,12 @@ void intersectBruteForce(UInt8 * out, const std::vector<PostingListCursorPtr> & 
 } // anonymous namespace
 
 void lazyUnionPostingLists(
-    IColumn & column,
+    UInt8 * out,
     const std::vector<PostingListCursorPtr> & cursors,
-    size_t column_offset,
     size_t row_offset,
     size_t num_rows)
 {
     requireRowOffsetRepresentable(row_offset);
-
-    auto & data = assert_cast<DB::ColumnUInt8 &>(column).getData();
-    UInt8 * out = data.data() + column_offset;
 
     /// Sort by descending density so the densest cursor fills the output buffer first.
     auto sorted_cursors = cursors;
@@ -1446,18 +1543,32 @@ void lazyUnionPostingLists(
         cursor->linearOr(out, row_offset, num_rows);
 }
 
-void lazyIntersectPostingLists(
-    IColumn & column,
+void lazyUnionPostingListsSparse(
+    PaddedPODArray<UInt64> & offsets,
+    size_t offsets_base,
     const std::vector<PostingListCursorPtr> & cursors,
-    size_t column_offset,
+    size_t row_offset,
+    size_t num_rows)
+{
+    requireRowOffsetRepresentable(row_offset);
+
+    SparseRowsSink sink{offsets, offsets_base, row_offset};
+    const size_t end = row_offset + num_rows;
+
+    if (cursors.size() == 1)
+        collectRows(sink, *cursors.front(), row_offset, end);
+    else if (!cursors.empty())
+        unionMerge(sink, cursors, row_offset, end);
+}
+
+void lazyIntersectPostingLists(
+    UInt8 * __restrict out,
+    const std::vector<PostingListCursorPtr> & cursors,
     size_t row_offset,
     size_t num_rows,
     float density_threshold)
 {
     requireRowOffsetRepresentable(row_offset);
-
-    auto & data = assert_cast<DB::ColumnUInt8 &>(column).getData();
-    UInt8 * __restrict out = data.data() + column_offset;
 
     const size_t n = cursors.size();
     const size_t end = row_offset + num_rows;
@@ -1484,21 +1595,42 @@ void lazyIntersectPostingLists(
         return;
     }
 
-    /// Sort cursors by ascending cardinality so the sparsest cursor leads the leapfrog.
-    auto sorted_cursors = cursors;
-    std::ranges::sort(sorted_cursors,
-        [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
-        { return a->cardinality() < b->cardinality(); });
-
-    for (size_t i = 0; i < n; ++i)
-    {
-        sorted_cursors[i]->advance(static_cast<uint32_t>(row_offset));
-        if (!sorted_cursors[i]->valid() || sorted_cursors[i]->value() >= end)
-            return;
-    }
+    auto sorted_cursors = prepareLeapfrogCursors(cursors, row_offset, end);
+    if (sorted_cursors.empty())
+        return;
 
     ProfileEvents::increment(ProfileEvents::TextIndexLazyLeapfrogIntersections);
-    intersectLeapfrog(out, sorted_cursors, row_offset, end);
+    DenseRowsSink sink{out, row_offset};
+    intersectLeapfrog(sink, sorted_cursors, end);
+}
+
+void lazyIntersectPostingListsSparse(
+    PaddedPODArray<UInt64> & offsets,
+    size_t offsets_base,
+    const std::vector<PostingListCursorPtr> & cursors,
+    size_t row_offset,
+    size_t num_rows)
+{
+    requireRowOffsetRepresentable(row_offset);
+
+    SparseRowsSink sink{offsets, offsets_base, row_offset};
+    const size_t end = row_offset + num_rows;
+
+    if (cursors.empty())
+        return;
+
+    if (cursors.size() == 1)
+    {
+        collectRows(sink, *cursors.front(), row_offset, end);
+        return;
+    }
+
+    auto sorted_cursors = prepareLeapfrogCursors(cursors, row_offset, end);
+    if (sorted_cursors.empty())
+        return;
+
+    ProfileEvents::increment(ProfileEvents::TextIndexLazyLeapfrogIntersections);
+    intersectLeapfrog(sink, sorted_cursors, end);
 }
 
 void scoreCursorsUnion(

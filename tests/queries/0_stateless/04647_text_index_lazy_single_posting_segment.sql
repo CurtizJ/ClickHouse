@@ -64,11 +64,13 @@ SETTINGS text_index_posting_list_apply_mode = 'lazy',
          log_comment = 'test_04647_leapfrog_0';
 
 -- CONTROL: brute-force intersection takes the dense-segment shortcut and never decodes the
--- one-posting block, so it must be correct on every build, fixed or not.
+-- one-posting block, so it must be correct on every build, fixed or not. Brute force needs a full
+-- virtual column: a sparse one is always intersected by leapfrog.
 SELECT 'lazy brute force (control)', count(), sum(id) FROM t_lazy_single_posting_segment
 WHERE hasAllTokens(s, ['aaa', 'bbb'])
 SETTINGS text_index_posting_list_apply_mode = 'lazy',
          text_index_lazy_intersection_density_threshold = 0.0,
+         text_index_ratio_of_defaults_for_sparse_columns = 1.0,
          query_plan_direct_read_from_text_index = 1,
          use_skip_indexes = 1,
          use_skip_indexes_on_data_read = 1,

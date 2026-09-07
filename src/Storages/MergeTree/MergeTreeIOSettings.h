@@ -73,6 +73,8 @@ struct MergeTreeReaderSettings
     UInt64 merge_tree_min_rows_for_seek = 0;
     UInt64 merge_tree_coarse_index_granularity = 8;
     UInt64 merge_tree_generic_exclusion_search_max_steps = 0;
+    /// Text index virtual columns are filled as sparse columns when the estimated ratio of non-matching rows is at least this value.
+    float text_index_ratio_of_defaults_for_sparse_columns = 0.9f;
     size_t filesystem_prefetches_limit = 0;
     bool enable_analyzer = false;
     bool load_marks_asynchronously = false;

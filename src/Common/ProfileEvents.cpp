@@ -154,6 +154,7 @@
     M(TextIndexUsedEmbeddedPostings, "Number of times a posting list embedded in the dictionary has been used.", ValueType::Number) \
     M(TextIndexUseHint, "Number of index granules where a direct reading from the text index was added as hint and was used.", ValueType::Number) \
     M(TextIndexDiscardHint, "Number of index granules where a direct reading from the text index was added as hint and was discarded due to low selectivity.", ValueType::Number) \
+    M(TextIndexSparseVirtualColumns, "Number of virtual columns filled by direct reading from the text index as sparse columns, because the estimated ratio of non-matching rows was at least 'text_index_ratio_of_defaults_for_sparse_columns'.", ValueType::Number) \
     M(TextIndexTemporarySegmentsWritten, "Number of temporary segments written while building text indexes.", ValueType::Number) \
     M(TextScoreStatsBuilt, "Number of BM25 collection-statistics were built.", ValueType::Number) \
     M(TextScoreStatsBuildMicroseconds, "Total time spent building the global BM25 statistics (collection statistics and token weights) over all parts of a query.", ValueType::Microseconds) \

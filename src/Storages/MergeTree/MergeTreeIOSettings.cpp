@@ -38,6 +38,7 @@ namespace Setting
     extern const SettingsUInt64 merge_tree_min_rows_for_seek;
     extern const SettingsUInt64 merge_tree_coarse_index_granularity;
     extern const SettingsUInt64 merge_tree_generic_exclusion_search_max_steps;
+    extern const SettingsFloat text_index_ratio_of_defaults_for_sparse_columns;
     extern const SettingsUInt64 predicate_statistics_sample_rate;
 }
 
@@ -142,6 +143,7 @@ MergeTreeReaderSettings MergeTreeReaderSettings::createFromContext(const Context
     result.merge_tree_min_rows_for_seek = settings[Setting::merge_tree_min_rows_for_seek];
     result.merge_tree_coarse_index_granularity = settings[Setting::merge_tree_coarse_index_granularity];
     result.merge_tree_generic_exclusion_search_max_steps = settings[Setting::merge_tree_generic_exclusion_search_max_steps];
+    result.text_index_ratio_of_defaults_for_sparse_columns = settings[Setting::text_index_ratio_of_defaults_for_sparse_columns];
     result.filesystem_prefetches_limit = settings[Setting::filesystem_prefetches_limit];
     result.enable_analyzer = settings[Setting::allow_experimental_analyzer];
     result.load_marks_asynchronously = settings[Setting::load_marks_asynchronously];
