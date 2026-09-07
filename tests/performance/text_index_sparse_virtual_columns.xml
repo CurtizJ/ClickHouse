@@ -1,0 +1,27 @@
+<test>
+  <settings>
+      <use_skip_indexes_on_data_read>1</use_skip_indexes_on_data_read>
+      <query_plan_direct_read_from_text_index>1</query_plan_direct_read_from_text_index>
+      <query_plan_optimize_count_from_text_index>0</query_plan_optimize_count_from_text_index>
+      <force_data_skipping_indices>idx_sp_sparse</force_data_skipping_indices>
+      <mutations_sync>2</mutations_sync>
+  </settings>
+
+  <fill_query>ALTER TABLE hits_10m_single ADD INDEX idx_sp_sparse(SearchPhrase) TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'bitpacking')</fill_query>
+  <fill_query>ALTER TABLE hits_10m_single MATERIALIZE INDEX idx_sp_sparse</fill_query>
+
+  <!-- Selective filters: the virtual column is filled as a sparse column (default) or as a full column (ratio 1.0 disables it). -->
+  <query tag="single_token_full">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasToken(SearchPhrase, 'market') SETTINGS text_index_ratio_of_defaults_for_sparse_columns = 1.0</query>
+  <query tag="single_token_sparse">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasToken(SearchPhrase, 'market')</query>
+
+  <query tag="all_tokens_full">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasAllTokens(SearchPhrase, ['the', 'market']) SETTINGS text_index_ratio_of_defaults_for_sparse_columns = 1.0</query>
+  <query tag="all_tokens_sparse">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasAllTokens(SearchPhrase, ['the', 'market'])</query>
+
+  <query tag="any_tokens_full">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasAnyTokens(SearchPhrase, ['market', 'world']) SETTINGS text_index_ratio_of_defaults_for_sparse_columns = 1.0</query>
+  <query tag="any_tokens_sparse">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasAnyTokens(SearchPhrase, ['market', 'world'])</query>
+
+  <query tag="materialize_single_token_full">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasToken(SearchPhrase, 'market') SETTINGS text_index_posting_list_apply_mode = 'materialize', text_index_ratio_of_defaults_for_sparse_columns = 1.0</query>
+  <query tag="materialize_single_token_sparse">SELECT count(), sum(WatchID) FROM hits_10m_single WHERE hasToken(SearchPhrase, 'market') SETTINGS text_index_posting_list_apply_mode = 'materialize'</query>
+
+  <drop_query>ALTER TABLE hits_10m_single DROP INDEX idx_sp_sparse</drop_query>
+</test>

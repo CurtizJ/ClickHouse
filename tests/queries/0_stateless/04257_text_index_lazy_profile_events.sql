@@ -11,6 +11,9 @@
 
 SET enable_full_text_index = 1;
 SET text_index_posting_list_apply_mode = 'lazy';
+-- The skip counters and the brute-force intersection belong to the dense kernels; a sparse virtual
+-- column is filled by the cursor iterators instead, so keep the columns full.
+SET text_index_ratio_of_defaults_for_sparse_columns = 1.0;
 SET merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability = 0;
 SET use_query_condition_cache = 0;
 SET query_plan_direct_read_from_text_index = 1;

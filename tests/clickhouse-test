@@ -1874,6 +1874,7 @@ class SettingsRandomizer:
         "use_streaming_marks_compression": lambda: random.randint(0, 1),
         "text_index_posting_list_apply_mode": lambda: random.choice(["materialize", "lazy"]),
         "text_index_lazy_intersection_density_threshold": threshold_generator(0.2, 0.2, 0.0, 1.0),
+        "text_index_ratio_of_defaults_for_sparse_columns": threshold_generator(0.2, 0.2, 0.0, 1.0),
         # Independent DISTINCT per MergeTree partition
         "allow_distinct_partitions_independently": lambda: random.random() > 0.05,
         "force_distinct_partitions_independently": lambda: random.random() < 0.3,

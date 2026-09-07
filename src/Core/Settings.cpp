@@ -9018,6 +9018,11 @@ Controls how posting lists are applied during text index queries.
 Posting list density threshold that selects the intersection algorithm in lazy posting list apply mode (`text_index_posting_list_apply_mode = 'lazy'`).
 Below the threshold: leapfrog intersection (favors sparse posting lists). At or above: brute-force bitmap intersection (favors dense posting lists).
 )", 0, text_index_density_threshold) \
+    DECLARE(Float, text_index_ratio_of_defaults_for_sparse_columns, 0.9f, R"(
+Minimal estimated ratio of non-matching rows at which a virtual column filled by direct reading from the text index is produced as a sparse column instead of a full one.
+The ratio is estimated per data part from the cardinalities of the posting lists: the smallest posting list bounds the matches of `hasAllTokens`, the sum of posting lists bounds the matches of `hasAnyTokens`.
+A sparse filter column makes the subsequent filtering steps cheaper when only a few rows match. A value of 1.0 or greater disables sparse columns.
+)", 0) \
     DECLARE(Bool, stop_refreshable_materialized_views_on_startup, false, R"(
 On server startup, prevent scheduling of refreshable materialized views, as if with SYSTEM STOP VIEWS. You can manually start them with `SYSTEM START VIEWS` or `SYSTEM START VIEW <name>` afterwards. Also applies to newly created views. Has no effect on non-refreshable materialized views.
 )", EXPERIMENTAL) \

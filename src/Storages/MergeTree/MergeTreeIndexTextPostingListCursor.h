@@ -3,6 +3,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <base/defines.h>
 #include <base/types.h>
+#include <Common/PODArray_fwd.h>
 #include <Storages/MergeTree/BitpackingBlockCodec.h>
 #include <Storages/MergeTree/PostingListBlockCodec.h>
 #include <Storages/MergeTree/PostingListSegment.h>
@@ -14,7 +15,6 @@ namespace DB
 
 struct TokenPostingsInfo;
 class TextIndexPostingsCache;
-class IColumn;
 class MergeTreeReaderStream;
 
 /// Operation type for padding the column with the posting list.
@@ -171,19 +171,29 @@ using PostingListCursorMap = absl::flat_hash_map<std::string_view, PostingListCu
 /// Throw a `LOGICAL_ERROR` rather than wrap the offset and corrupt the output column.
 void requireRowOffsetRepresentable(size_t row_offset);
 
-/// Union (OR) of posting lists: set output[row] = 1 if the row appears in ANY posting list.
-/// The caller is responsible for preparing the cursor vector (resolving search tokens
-/// to cursors and deduplicating if necessary).
+/// The lazy kernels below combine posting lists over the rows [row_offset, row_offset + num_rows)
+/// into one of two outputs. The caller is responsible for preparing the cursor vector
+/// (resolving search tokens to cursors and deduplicating if necessary).
+///   - dense:  `out` holds `num_rows` zero-initialized bytes, out[row - row_offset] = 1 marks a match;
+///   - sparse: `offsets_base + (row - row_offset)` is appended to `offsets` for every match, in ascending
+///             order — the offsets of a `ColumnSparse` whose size before the append is `offsets_base`.
+
+/// Union (OR) of posting lists into a dense bitmap: a row matches if it appears in ANY posting list.
 void lazyUnionPostingLists(
-    IColumn & column,
+    UInt8 * out,
     const std::vector<PostingListCursorPtr> & cursors,
-    size_t column_offset,
     size_t row_offset,
     size_t num_rows);
 
-/// Intersection (AND) of posting lists: set output[row] = 1 only if the row appears in ALL posting lists.
-/// The caller is responsible for preparing the cursor vector (resolving search tokens
-/// to cursors and deduplicating if necessary).
+/// Union (OR) of posting lists into sparse offsets: a k-way merge of the cursors.
+void lazyUnionPostingListsSparse(
+    PaddedPODArray<UInt64> & offsets,
+    size_t offsets_base,
+    const std::vector<PostingListCursorPtr> & cursors,
+    size_t row_offset,
+    size_t num_rows);
+
+/// Intersection (AND) of posting lists into a dense bitmap: a row matches only if it appears in ALL posting lists.
 ///
 /// Adaptive algorithm selection based on posting list density:
 ///   - n == 1:  direct linear scan (degenerate case, same as union).
@@ -193,11 +203,19 @@ void lazyUnionPostingLists(
 ///   - Sparse:  leapfrog intersection — cursors sorted by ascending cardinality, the sparsest
 ///     cursor leads and others advance forward.
 void lazyIntersectPostingLists(
-    IColumn & column,
+    UInt8 * out,
     const std::vector<PostingListCursorPtr> & cursors,
-    size_t column_offset,
     size_t row_offset,
     size_t num_rows,
     float density_threshold);
+
+/// Intersection (AND) of posting lists into sparse offsets: always the leapfrog intersection,
+/// the brute-force counting needs a dense output.
+void lazyIntersectPostingListsSparse(
+    PaddedPODArray<UInt64> & offsets,
+    size_t offsets_base,
+    const std::vector<PostingListCursorPtr> & cursors,
+    size_t row_offset,
+    size_t num_rows);
 
 }
