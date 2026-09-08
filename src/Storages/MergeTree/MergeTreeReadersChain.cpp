@@ -702,11 +702,14 @@ void MergeTreeReadersChain::readPatches(const Block & result_header, std::vector
         /// Remove patches that are not needed for current block anymore.
         while (!patch_results.empty() && !patch_readers[i]->needOldPatch(read_result, *patch_results.front(), main_block))
         {
+            patch_apply_state.reset();
             patch_results.pop_front();
         }
 
         const auto * last_read_patch = patch_results.empty() ? nullptr : patch_results.back().get();
         auto new_patches = patch_readers[i]->readPatches(patch_ranges[i], read_result, main_block, last_read_patch);
+        if (!new_patches.empty())
+            patch_apply_state.reset();
         patch_results.insert(patch_results.end(), new_patches.begin(), new_patches.end());
     }
 }
@@ -862,7 +865,7 @@ void MergeTreeReadersChain::applyPatches(
     if (min_version.has_value())
         source_data_version = std::max(source_data_version, *min_version);
 
-    applyPatchesToBlock(result_block, versions_block, patch_read_results, source_data_version);
+    applyPatchesToBlock(result_block, versions_block, patch_read_results, source_data_version, patch_apply_state);
 
     result_columns = result_block.getColumns();
     result_columns.resize(result_header.columns());

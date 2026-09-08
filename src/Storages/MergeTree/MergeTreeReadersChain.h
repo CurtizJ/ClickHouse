@@ -102,6 +102,7 @@ private:
     RangeReaders range_readers;
     MergeTreePatchReaders patch_readers;
     std::vector<std::deque<PatchReadResultPtr>> patches_results;
+    mutable std::shared_ptr<ApplyPatchesState> patch_apply_state;
 
     /// Storage names of overwritten columns that an on-fly MUTATION step genuinely consumes
     /// as a function input before any step overwrites them. They must still be converted to

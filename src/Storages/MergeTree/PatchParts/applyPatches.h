@@ -9,6 +9,7 @@ namespace DB
 {
 
 struct KeyDescription;
+struct ApplyPatchesState;
 
 /// Represents a patch that can be applied to the result block to update the data.
 struct PatchIndices
@@ -78,11 +79,13 @@ struct PatchReadResultToApply
 
 /// Builds patches of all modes from patch read results and applies them to result_block.
 /// Patches updating the same set of columns are combined and applied together.
+/// The caller must reset `state` when the resident patch read results change.
 void applyPatchesToBlock(
     Block & result_block,
     Block & versions_block,
     const std::vector<PatchReadResultToApply> & patch_read_results,
-    UInt64 source_data_version);
+    UInt64 source_data_version,
+    std::shared_ptr<ApplyPatchesState> & state);
 
 /// Helpers defined in applyPatches.cpp, shared with the legacy formats (applyPatchesLegacy.cpp).
 const PaddedPODArray<UInt64> & getColumnUInt64Data(const Block & block, const String & column_name);

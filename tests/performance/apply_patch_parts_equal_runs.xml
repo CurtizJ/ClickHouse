@@ -1,0 +1,35 @@
+<test>
+    <settings>
+        <enable_lightweight_update>1</enable_lightweight_update>
+        <apply_patch_parts>1</apply_patch_parts>
+        <max_threads>1</max_threads>
+        <merge_tree_min_read_task_size>1000000</merge_tree_min_read_task_size>
+    </settings>
+
+    <substitutions>
+        <substitution>
+            <name>block_size</name>
+            <values>
+                <value>1024</value>
+                <value>8192</value>
+                <value>65536</value>
+            </values>
+        </substitution>
+    </substitutions>
+
+    <create_query>
+        CREATE TABLE lwu_equal_runs (k UInt64, u UInt64, v UInt64)
+        ENGINE = MergeTree PRIMARY KEY k ORDER BY (k, u)
+        SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1,
+            patch_parts_version = 'v2', index_granularity = 1024
+    </create_query>
+    <fill_query>SYSTEM STOP MERGES lwu_equal_runs</fill_query>
+    <fill_query>INSERT INTO lwu_equal_runs SELECT 0, number, 0 FROM numbers(500000)</fill_query>
+    <fill_query>UPDATE lwu_equal_runs SET v = u + 1 WHERE 1</fill_query>
+    <fill_query>ALTER TABLE lwu_equal_runs MODIFY ORDER BY k</fill_query>
+
+    <query>SELECT sum(v) FROM lwu_equal_runs SETTINGS max_block_size = {block_size}</query>
+    <query>SELECT sum(v) FROM lwu_equal_runs PREWHERE u % 3 = 0 SETTINGS max_block_size = {block_size}</query>
+
+    <drop_query>DROP TABLE lwu_equal_runs</drop_query>
+</test>

@@ -313,6 +313,9 @@
     M(BuildPatchesMergeMicroseconds, "Total time spent building indexes for applying patch parts with Merge mode", ValueType::Number) \
     M(BuildPatchesJoinMicroseconds, "Total time spent building indexes and hash tables for applying patch parts with Join mode", ValueType::Number) \
     M(ApplyPatchMergeOnKeyMicroseconds, "Total time spent inside applyPatchesMergeOnKey sort-key merge loops", ValueType::Number) \
+    M(PatchesMergeOnKeyRunMapBuilds, "Number of identity maps built for equal sorting-key runs while applying patch parts", ValueType::Number) \
+    M(PatchesMergeOnKeyRunMapReuses, "Number of result blocks matched against a previously built equal sorting-key run map", ValueType::Number) \
+    M(PatchesMergeOnKeyRunMapRows, "Number of patch rows processed while building equal sorting-key run maps", ValueType::Number) \
     M(AnalyzePatchRangesMicroseconds, "Total time spent analyzing index of patch parts", ValueType::Number) \
     M(ReadTasksWithAppliedMutationsOnFly, "Total number of read tasks for which there was any mutation applied on fly", ValueType::Number) \
     M(MutationsAppliedOnFlyInAllReadTasks, "Total number of applied mutations on-fly among all read tasks", ValueType::Number) \
