@@ -6,7 +6,7 @@ DROP TABLE IF EXISTS t_lwu_equal_run;
 CREATE TABLE t_lwu_equal_run (k UInt64, u UInt64, v UInt64, w UInt64)
 ENGINE = MergeTree PRIMARY KEY k ORDER BY (k, u)
 SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1,
-    patch_parts_version = 'v2', index_granularity = 1024, index_granularity_bytes = 0;
+    patch_parts_version = 'v2', index_granularity = 1024, index_granularity_bytes = 1048576;
 
 -- Merge interleaved keys to ensure identities are not ordered within the shortened key.
 INSERT INTO t_lwu_equal_run SELECT 0, number * 2, number * 2, 0 FROM numbers(25000);

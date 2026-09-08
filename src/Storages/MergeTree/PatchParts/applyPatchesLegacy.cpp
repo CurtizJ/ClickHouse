@@ -508,14 +508,17 @@ void applyPatchesIndicesCombined(
 void applyPatchesToBlockLegacy(
     Block & result_block,
     Block & versions_block,
-    const std::vector<PatchReadResultToApply> & patch_read_results,
+    const PatchReadResultsToApply & patch_read_results,
     UInt64 source_data_version)
 {
     /// Combine patches that update the same set of columns, keyed by the hash of the set.
     std::unordered_map<UInt128, PatchesIndices, UInt128TrivialHash> patches_indices;
 
-    for (const auto & [patch, read_result, updated_columns] : patch_read_results)
+    for (const auto * patch_result : patch_read_results)
     {
+        const auto & patch = patch_result->patch;
+        const auto & read_result = patch_result->read_result;
+        const auto & updated_columns = patch_result->updated_columns;
         switch (patch.mode)
         {
             case PatchMode::Merge:

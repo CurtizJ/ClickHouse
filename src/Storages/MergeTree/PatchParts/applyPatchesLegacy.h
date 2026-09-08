@@ -12,7 +12,7 @@ namespace DB
 void applyPatchesToBlockLegacy(
     Block & result_block,
     Block & versions_block,
-    const std::vector<PatchReadResultToApply> & patch_read_results,
+    const PatchReadResultsToApply & patch_read_results,
     UInt64 source_data_version);
 
 }

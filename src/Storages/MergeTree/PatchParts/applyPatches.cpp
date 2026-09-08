@@ -151,7 +151,7 @@ Block getUpdatedHeader(const PatchesIndices & patches)
 }
 
 /// Applies each patch as-is, without combining row indices across patches.
-/// Patches may have multiple source blocks (e.g. built by applyPatchesMergeOnKey).
+/// Patches may have multiple source blocks, as in `MergeOnKey`.
 void applyPatchesIndices(
     Block & result_block,
     Block & versions_block,
@@ -212,9 +212,181 @@ void applyPatchesIndices(
 namespace
 {
 
-/// Compares sort-key tuples at two (block, row) positions, honouring DESC flags.
+/// Read results of `MergeOnKey` patches that share one sorting key and are applied in one merge pass.
+/// `updated_columns[i]` is the set of result columns updated from `blocks[i]`.
+struct MergeOnKeyGroup
+{
+    const KeyDescription * sorting_key = nullptr;
+    std::vector<const Names *> updated_columns;
+    std::vector<const Block *> blocks;
+    PatchReadResultToApply * cache_owner = nullptr;
+};
+
+/// Applies patches sharing a sorting key and a set of resident patch blocks.
+/// Owns the prepared sources and equal-key run cache across result blocks. The readers
+/// chain discards the algorithm when the resident patch read results change.
+class MergeOnKeyAlgorithm
+{
+public:
+    explicit MergeOnKeyAlgorithm(const MergeOnKeyGroup & group);
+
+    bool matches(const MergeOnKeyGroup & group) const;
+    void apply(Block & result_block, Block & versions_block, UInt64 source_data_version);
+
+private:
+    /// Cursor over one block (a patch block or the result block) in the merge.
+    /// `row` and `run_end` delimit the current run of equal sort keys.
+    struct BlockCursor
+    {
+        size_t num_rows = 0;
+        ColumnRawPtrs sorting_key_columns;
+        const PaddedPODArray<UInt64> * block_number = nullptr;
+        const PaddedPODArray<UInt64> * block_offset = nullptr;
+        const PaddedPODArray<UInt64> * versions = nullptr;
+
+        /// Group of patch blocks with the same set of updated columns.
+        size_t group_idx = 0;
+        /// Index of the block in the group's `patch_blocks`.
+        UInt32 block_idx_in_group = 0;
+        /// Current row in the block.
+        size_t row = 0;
+        /// End of the current run of equal sort keys.
+        size_t run_end = 0;
+
+        BlockCursor(const Block & block, const KeyDescription & sorting_key_)
+            : num_rows(block.rows())
+            , sorting_key_columns(extractRawColumns(block, sorting_key_.column_names))
+            , block_number(&getColumnUInt64Data(block, BlockNumberColumn::name))
+            , block_offset(&getColumnUInt64Data(block, BlockOffsetColumn::name))
+            , versions(block.has(PartDataVersionColumn::name) ? &getColumnUInt64Data(block, PartDataVersionColumn::name) : nullptr)
+        {
+        }
+
+        ALWAYS_INLINE size_t blockNumber() const { return (*block_number)[row]; }
+        ALWAYS_INLINE size_t blockOffset() const { return (*block_offset)[row]; }
+        ALWAYS_INLINE size_t runLength() const { return run_end - row; }
+        ALWAYS_INLINE bool isFinished() const { return row >= num_rows; }
+
+        ALWAYS_INLINE int compare(const BlockCursor & other, const std::vector<bool> & reverse_flags) const
+        {
+            return compareSortKeyRows(sorting_key_columns, row, other.sorting_key_columns, other.row, reverse_flags);
+        }
+
+        void advanceRowToCursor(const BlockCursor & other, const std::vector<bool> & reverse_flags)
+        {
+            row = gallopingBinarySearch<true>(sorting_key_columns, row, num_rows, other.sorting_key_columns, other.row, reverse_flags);
+        }
+
+        void advanceRunEndGalloping(const BlockCursor & other, const std::vector<bool> & reverse_flags)
+        {
+            run_end = gallopingBinarySearch<false>(sorting_key_columns, row + 1, num_rows, other.sorting_key_columns, other.row, reverse_flags);
+        }
+
+        void advanceRunEndLinear(const BlockCursor & other, const std::vector<bool> & reverse_flags)
+        {
+            run_end = row + 1;
+            while (run_end < num_rows && compareSortKeyRows(sorting_key_columns, run_end, other.sorting_key_columns, other.row, reverse_flags) == 0)
+                ++run_end;
+        }
+    };
+
+    /// An entry of the per-run hash map in `MergeOnKeyAlgorithm`. For each row identity the map
+    /// keeps one entry per group - the matched patch row with the highest data version in that group.
+    struct RunEntry
+    {
+        static constexpr UInt32 EMPTY_BLOCK = std::numeric_limits<UInt32>::max();
+
+        UInt32 block_idx = EMPTY_BLOCK;
+        UInt32 row_idx = 0;
+        UInt64 version = 0;
+    };
+
+    /// Combined patches, one per distinct set of updated columns.
+    using PatchIndicesGroups = std::vector<std::shared_ptr<PatchIndices>>;
+
+    PatchesIndices buildPatchIndices(const Block & result_block);
+    void applyCursorsLinear(BlockCursor & result_cursor, std::vector<BlockCursor> & cursors);
+    void applyCursorsHeap(BlockCursor & result_cursor, std::vector<BlockCursor> & cursors);
+    void processEqualKeyCursors(
+        const BlockCursor & result_cursor,
+        size_t num_patch_rows_in_run,
+        const std::vector<size_t> & equal_cursors,
+        const std::vector<BlockCursor> & cursors);
+    void probeEqualKeyRun(const BlockCursor & result_cursor);
+
+    static ALWAYS_INLINE int compareSortKeyRows(
+        const ColumnRawPtrs & lhs_columns,
+        size_t lhs_row,
+        const ColumnRawPtrs & rhs_columns,
+        size_t rhs_row,
+        const std::vector<bool> & reverse_flags);
+
+    template <bool is_lower_bound>
+    static ALWAYS_INLINE size_t gallopingBinarySearch(
+        const ColumnRawPtrs & search_key,
+        size_t begin,
+        size_t end,
+        const ColumnRawPtrs & pivot_key,
+        size_t pivot_row,
+        const std::vector<bool> & reverse_flags);
+
+    static ALWAYS_INLINE UInt128 makeBlockIdentity(UInt64 block_number, UInt64 block_offset);
+    static ALWAYS_INLINE void addMatchedRow(PatchIndices & patch, UInt64 result_row, UInt32 block_idx, UInt64 patch_row);
+    static ColumnRawPtrs extractRawColumns(const Block & block, const Names & column_names);
+    static Block getBlockWithSortingKey(const Block & block, const KeyDescription & sorting_key);
+    static void updateHashWithColumn(SipHash & hash, const ColumnWithTypeAndName & column);
+
+    const KeyDescription * sorting_key;
+    std::vector<const Block *> blocks;
+    std::vector<Names> updated_columns;
+    PatchIndicesGroups indices_groups;
+
+    /// Scratch structures for one equal-key run, reused across runs and result blocks.
+    absl::flat_hash_map<UInt128, UInt32, UInt128TrivialHash> run_map;
+    PaddedPODArray<RunEntry> run_entries;
+    Columns cached_key_columns;
+    bool reusable_run = false;
+    size_t map_builds = 0;
+    size_t map_rows = 0;
+};
+
+MergeOnKeyAlgorithm::MergeOnKeyAlgorithm(const MergeOnKeyGroup & group)
+    : sorting_key(group.sorting_key)
+    , blocks(group.blocks)
+{
+    chassert(blocks.size() == group.updated_columns.size());
+    updated_columns.reserve(group.updated_columns.size());
+    for (const auto * names : group.updated_columns)
+        updated_columns.push_back(*names);
+}
+
+bool MergeOnKeyAlgorithm::matches(const MergeOnKeyGroup & group) const
+{
+    return sorting_key == group.sorting_key && blocks == group.blocks
+        && std::ranges::equal(updated_columns, group.updated_columns, [](const Names & lhs, const Names * rhs)
+        {
+            return lhs == *rhs;
+        });
+}
+
+void MergeOnKeyAlgorithm::apply(Block & result_block, Block & versions_block, UInt64 source_data_version)
+{
+    auto merge_on_key_patches = buildPatchIndices(result_block);
+
+    for (auto & patch_indices : merge_on_key_patches)
+    {
+        if (patch_indices->empty())
+            continue;
+
+        ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ApplyPatchesMicroseconds);
+        PatchesIndices patches{std::move(patch_indices)};
+        applyPatchesIndices(result_block, versions_block, patches, getUpdatedHeader(patches), source_data_version);
+    }
+}
+
+/// Compares sort-key tuples at two (block, row) positions, honouring `DESC` flags.
 /// Returns <0, =0, or >0 using the same convention as `IColumn::compareAt`.
-ALWAYS_INLINE int compareSortKeyRows(
+ALWAYS_INLINE int MergeOnKeyAlgorithm::compareSortKeyRows(
     const ColumnRawPtrs & lhs_columns,
     size_t lhs_row,
     const ColumnRawPtrs & rhs_columns,
@@ -254,7 +426,7 @@ ALWAYS_INLINE int compareSortKeyRows(
 /// When one side of the merge is much smaller, this collapses its complexity from `O(m + p)` to
 /// `O(min * log(max / min))` comparisons; with `gap = 1` it costs only 1-2 extra comparisons per step.
 template <bool is_lower_bound>
-ALWAYS_INLINE size_t gallopingBinarySearch(
+ALWAYS_INLINE size_t MergeOnKeyAlgorithm::gallopingBinarySearch(
     const ColumnRawPtrs & search_key,
     size_t begin,
     size_t end,
@@ -300,12 +472,12 @@ ALWAYS_INLINE size_t gallopingBinarySearch(
 /// Pack `(block_number, block_offset)` into a `UInt128`: `block_offset` in the low 64 bits,
 /// `block_number` in the high 64 bits. `UInt128TrivialHash` takes the low limb as the hash,
 /// so putting the per-row-unique `block_offset` there keeps buckets well spread.
-ALWAYS_INLINE UInt128 makeBlockIdentity(UInt64 block_number, UInt64 block_offset)
+ALWAYS_INLINE UInt128 MergeOnKeyAlgorithm::makeBlockIdentity(UInt64 block_number, UInt64 block_offset)
 {
     return (UInt128(block_number) << 64) | UInt128(block_offset);
 }
 
-ColumnRawPtrs extractRawColumns(const Block & block, const Names & column_names)
+ColumnRawPtrs MergeOnKeyAlgorithm::extractRawColumns(const Block & block, const Names & column_names)
 {
     ColumnRawPtrs out;
     out.reserve(column_names.size());
@@ -316,7 +488,7 @@ ColumnRawPtrs extractRawColumns(const Block & block, const Names & column_names)
     return out;
 }
 
-Block getBlockWithSortingKey(const Block & block, const KeyDescription & sorting_key)
+Block MergeOnKeyAlgorithm::getBlockWithSortingKey(const Block & block, const KeyDescription & sorting_key)
 {
     Block result;
     for (const auto & name : sorting_key.column_names)
@@ -335,109 +507,8 @@ Block getBlockWithSortingKey(const Block & block, const KeyDescription & sorting
     return result;
 }
 
-/// Read results of MergeOnKey patches that share one sorting key and are applied in one merge pass.
-/// `updated_columns[i]` is the set of result columns updated from `blocks[i]`.
-struct MergeOnKeyGroup
-{
-    const KeyDescription * sorting_key = nullptr;
-    std::vector<const Names *> updated_columns;
-    std::vector<const Block *> blocks;
-};
-
-/// Combined patches, one per distinct set of updated columns.
-using PatchIndicesGroups = std::vector<std::shared_ptr<PatchIndices>>;
-
-/// Cursor over one block (a patch block or the result block) in the merge of applyPatchesMergeOnKey.
-/// `row` and `run_end` delimit the current run of equal sort keys.
-struct BlockCursor
-{
-    size_t num_rows = 0;
-    ColumnRawPtrs sorting_key_columns;
-    const PaddedPODArray<UInt64> * block_number = nullptr;
-    const PaddedPODArray<UInt64> * block_offset = nullptr;
-    const PaddedPODArray<UInt64> * versions = nullptr;
-
-    /// Group of patch blocks with the same set of updated columns.
-    size_t group_idx = 0;
-    /// Index of the block in the group's patch_blocks.
-    UInt32 block_idx_in_group = 0;
-    /// Current row in the block.
-    size_t row = 0;
-    /// End of the current run of equal sort keys.
-    size_t run_end = 0;
-
-    BlockCursor(const Block & block, const KeyDescription & sorting_key)
-        : num_rows(block.rows())
-        , sorting_key_columns(extractRawColumns(block, sorting_key.column_names))
-        , block_number(&getColumnUInt64Data(block, BlockNumberColumn::name))
-        , block_offset(&getColumnUInt64Data(block, BlockOffsetColumn::name))
-        , versions(block.has(PartDataVersionColumn::name) ? &getColumnUInt64Data(block, PartDataVersionColumn::name) : nullptr)
-    {
-    }
-
-    ALWAYS_INLINE size_t blockNumber() const { return (*block_number)[row]; }
-    ALWAYS_INLINE size_t blockOffset() const { return (*block_offset)[row]; }
-    ALWAYS_INLINE size_t runLength() const { return run_end - row; }
-    ALWAYS_INLINE bool isFinished() const { return row >= num_rows; }
-
-    ALWAYS_INLINE int compare(const BlockCursor & other, const std::vector<bool> & reverse_flags) const
-    {
-        return compareSortKeyRows(sorting_key_columns, row, other.sorting_key_columns, other.row, reverse_flags);
-    }
-
-    void advanceRowToCursor(const BlockCursor & other, const std::vector<bool> & reverse_flags)
-    {
-        row = gallopingBinarySearch<true>(sorting_key_columns, row, num_rows, other.sorting_key_columns, other.row, reverse_flags);
-    }
-
-    void advanceRunEndGalloping(const BlockCursor & other, const std::vector<bool> & reverse_flags)
-    {
-        run_end = gallopingBinarySearch<false>(sorting_key_columns, row + 1, num_rows, other.sorting_key_columns, other.row, reverse_flags);
-    }
-
-    void advanceRunEndLinear(const BlockCursor & other, const std::vector<bool> & reverse_flags)
-    {
-        run_end = row + 1;
-        while (run_end < num_rows && compareSortKeyRows(sorting_key_columns, run_end, other.sorting_key_columns, other.row, reverse_flags) == 0)
-            ++run_end;
-    }
-};
-
-/// An entry of the per-run hash map in applyPatchesMergeOnKey. For each row identity the map
-/// keeps one entry per group - the matched patch row with the highest data version in that group.
-struct RunEntry
-{
-    static constexpr UInt32 EMPTY_BLOCK = std::numeric_limits<UInt32>::max();
-
-    UInt32 block_idx = EMPTY_BLOCK;
-    UInt32 row_idx = 0;
-    UInt64 version = 0;
-};
-
-/// Scratch structures for one equal-sort-key run, reused across runs.
-struct EqualRunScratch
-{
-    absl::flat_hash_map<UInt128, UInt32, UInt128TrivialHash> run_map;
-    PaddedPODArray<RunEntry> run_entries;
-    Columns key_columns;
-    bool reusable = false;
-    size_t map_builds = 0;
-    size_t map_rows = 0;
-};
-
-/// Prepared patch sources and the last equal-key run for one set of applicable columns.
-/// The readers chain discards this state whenever the resident patch blocks change.
-struct MergeOnKeyRunState
-{
-    const KeyDescription * sorting_key = nullptr;
-    std::vector<const Block *> blocks;
-    std::vector<Names> updated_columns;
-    PatchIndicesGroups indices_groups;
-    EqualRunScratch scratch;
-};
-
 /// Emits a matched pair of a result row and a patch row into `patch`.
-ALWAYS_INLINE void addMatchedRow(PatchIndices & patch, UInt64 result_row, UInt32 block_idx, UInt64 patch_row)
+ALWAYS_INLINE void MergeOnKeyAlgorithm::addMatchedRow(PatchIndices & patch, UInt64 result_row, UInt32 block_idx, UInt64 patch_row)
 {
     patch.result_row_indices.push_back(result_row);
     patch.patch_row_indices.push_back(patch_row);
@@ -447,38 +518,36 @@ ALWAYS_INLINE void addMatchedRow(PatchIndices & patch, UInt64 result_row, UInt32
         patch.patch_block_indices.push_back(block_idx);
 }
 
-void probeEqualKeyRun(const BlockCursor & result_cursor, PatchIndicesGroups & groups, const EqualRunScratch & scratch)
+void MergeOnKeyAlgorithm::probeEqualKeyRun(const BlockCursor & result_cursor)
 {
     /// Emit matches in main-row order, as required by `updateFrom` and `updateInplaceFrom`.
     for (size_t i = result_cursor.row; i < result_cursor.run_end; ++i)
     {
         auto identity = makeBlockIdentity((*result_cursor.block_number)[i], (*result_cursor.block_offset)[i]);
-        auto it = scratch.run_map.find(identity);
+        auto it = run_map.find(identity);
 
-        if (it == scratch.run_map.end())
+        if (it == run_map.end())
             continue;
 
-        for (size_t group_idx = 0; group_idx < groups.size(); ++group_idx)
+        for (size_t group_idx = 0; group_idx < indices_groups.size(); ++group_idx)
         {
-            const auto & entry = scratch.run_entries[it->second + group_idx];
+            const auto & entry = run_entries[it->second + group_idx];
             if (entry.block_idx == RunEntry::EMPTY_BLOCK)
                 continue;
 
-            addMatchedRow(*groups[group_idx], i, entry.block_idx, entry.row_idx);
+            addMatchedRow(*indices_groups[group_idx], i, entry.block_idx, entry.row_idx);
         }
     }
 }
 
-/// Processes one run of equal sort keys: matches result rows [result_cursor.row, result_cursor.run_end)
-/// with rows [cursor.row, cursor.run_end) of cursors in `equal_cursors` by the
-/// (block_number, block_offset) identity and emits matches into the groups' patches.
-void processEqualKeyCursors(
+/// Processes one run of equal sort keys: matches result rows `[result_cursor.row, result_cursor.run_end)`
+/// with rows `[cursor.row, cursor.run_end)` of cursors in `equal_cursors` by the
+/// `(block_number, block_offset)` identity and emits matches into the groups' patches.
+void MergeOnKeyAlgorithm::processEqualKeyCursors(
     const BlockCursor & result_cursor,
     size_t num_patch_rows_in_run,
     const std::vector<size_t> & equal_cursors,
-    const std::vector<BlockCursor> & cursors,
-    PatchIndicesGroups & groups,
-    EqualRunScratch & scratch)
+    const std::vector<BlockCursor> & cursors)
 {
     if (num_patch_rows_in_run == 1 && result_cursor.runLength() == 1)
     {
@@ -487,20 +556,18 @@ void processEqualKeyCursors(
         const auto & cursor = cursors[equal_cursors.front()];
 
         if (cursor.blockNumber() == result_cursor.blockNumber() && cursor.blockOffset() == result_cursor.blockOffset())
-            addMatchedRow(*groups[cursor.group_idx], result_cursor.row, cursor.block_idx_in_group, cursor.row);
+            addMatchedRow(*indices_groups[cursor.group_idx], result_cursor.row, cursor.block_idx_in_group, cursor.row);
 
         return;
     }
 
-    size_t num_groups = groups.size();
-    auto & run_map = scratch.run_map;
-    auto & run_entries = scratch.run_entries;
+    size_t num_groups = indices_groups.size();
 
     run_map.clear();
     run_entries.clear();
     run_map.reserve(num_patch_rows_in_run);
-    ++scratch.map_builds;
-    scratch.map_rows += num_patch_rows_in_run;
+    ++map_builds;
+    map_rows += num_patch_rows_in_run;
 
     for (size_t cursor_idx : equal_cursors)
     {
@@ -528,23 +595,19 @@ void processEqualKeyCursors(
     /// Save its key and map so subsequent blocks need neither a patch scan nor a rebuild.
     if (result_cursor.run_end == result_cursor.num_rows)
     {
-        scratch.key_columns.clear();
+        cached_key_columns.clear();
         for (const auto * column : result_cursor.sorting_key_columns)
-            scratch.key_columns.push_back(column->cut(result_cursor.row, 1));
-        scratch.reusable = true;
+            cached_key_columns.push_back(column->cut(result_cursor.row, 1));
+        reusable_run = true;
     }
 
-    probeEqualKeyRun(result_cursor, groups, scratch);
+    probeEqualKeyRun(result_cursor);
 }
 
 /// Drives the merge with a linear scan for the cursor with the minimal key.
-void applyCursorsLinear(
-    BlockCursor & result_cursor,
-    std::vector<BlockCursor> & cursors,
-    PatchIndicesGroups & groups,
-    const std::vector<bool> & reverse_flags,
-    EqualRunScratch & run_scratch)
+void MergeOnKeyAlgorithm::applyCursorsLinear(BlockCursor & result_cursor, std::vector<BlockCursor> & cursors)
 {
+    const auto & reverse_flags = sorting_key->reverse_flags;
     std::vector<size_t> equal_cursors;
 
     /// Indices of cursors with unprocessed rows.
@@ -609,7 +672,7 @@ void applyCursorsLinear(
             equal_cursors.push_back(live_cursors[i]);
         }
 
-        processEqualKeyCursors(result_cursor, num_patch_rows_in_run, equal_cursors, cursors, groups, run_scratch);
+        processEqualKeyCursors(result_cursor, num_patch_rows_in_run, equal_cursors, cursors);
 
         for (size_t cursor_idx : equal_cursors)
         {
@@ -634,13 +697,9 @@ void applyCursorsLinear(
 }
 
 /// Drives the merge with a heap of cursors ordered by the sort key of the current row.
-void applyCursorsHeap(
-    BlockCursor & result_cursor,
-    std::vector<BlockCursor> & cursors,
-    PatchIndicesGroups & groups,
-    const std::vector<bool> & reverse_flags,
-    EqualRunScratch & run_scratch)
+void MergeOnKeyAlgorithm::applyCursorsHeap(BlockCursor & result_cursor, std::vector<BlockCursor> & cursors)
 {
+    const auto & reverse_flags = sorting_key->reverse_flags;
     std::vector<size_t> equal_cursors;
 
     /// Heap of cursors ordered by the sort key of the current row, the smallest key at the top.
@@ -703,7 +762,7 @@ void applyCursorsHeap(
             heap.pop_back();
         }
 
-        processEqualKeyCursors(result_cursor, num_patch_rows_in_run, equal_cursors, cursors, groups, run_scratch);
+        processEqualKeyCursors(result_cursor, num_patch_rows_in_run, equal_cursors, cursors);
 
         for (size_t cursor_idx : equal_cursors)
         {
@@ -721,7 +780,7 @@ void applyCursorsHeap(
     }
 }
 
-void updateHashWithColumn(SipHash & hash, const ColumnWithTypeAndName & column)
+void MergeOnKeyAlgorithm::updateHashWithColumn(SipHash & hash, const ColumnWithTypeAndName & column)
 {
     auto type_name = column.type->getName();
 
@@ -731,31 +790,26 @@ void updateHashWithColumn(SipHash & hash, const ColumnWithTypeAndName & column)
     hash.update(type_name.data(), type_name.size());
 }
 
-std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
-    const Block & result_block, const MergeOnKeyGroup & group, MergeOnKeyRunState & state)
+PatchesIndices MergeOnKeyAlgorithm::buildPatchIndices(const Block & result_block)
 {
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ApplyPatchMergeOnKeyMicroseconds);
     size_t main_rows = result_block.rows();
 
-    if (main_rows == 0 || group.blocks.empty())
+    if (main_rows == 0 || blocks.empty())
         return {};
 
-    const auto & sorting_key = *group.sorting_key;
-    const auto & reverse_flags = sorting_key.reverse_flags;
-    auto sorting_key_block = getBlockWithSortingKey(result_block, sorting_key);
-    BlockCursor result_cursor(sorting_key_block, sorting_key);
+    const auto & reverse_flags = sorting_key->reverse_flags;
+    auto sorting_key_block = getBlockWithSortingKey(result_block, *sorting_key);
+    BlockCursor result_cursor(sorting_key_block, *sorting_key);
 
-    auto & indices_groups = state.indices_groups;
-    auto & scratch = state.scratch;
-
-    if (scratch.reusable)
+    if (reusable_run)
     {
-        ColumnRawPtrs cached_key_columns;
-        for (const auto & column : scratch.key_columns)
-            cached_key_columns.push_back(column.get());
+        ColumnRawPtrs cached_key;
+        for (const auto & column : cached_key_columns)
+            cached_key.push_back(column.get());
 
-        if (compareSortKeyRows(result_cursor.sorting_key_columns, 0, cached_key_columns, 0, reverse_flags) == 0
-            && compareSortKeyRows(result_cursor.sorting_key_columns, main_rows - 1, cached_key_columns, 0, reverse_flags) == 0)
+        if (compareSortKeyRows(result_cursor.sorting_key_columns, 0, cached_key, 0, reverse_flags) == 0
+            && compareSortKeyRows(result_cursor.sorting_key_columns, main_rows - 1, cached_key, 0, reverse_flags) == 0)
         {
             for (auto & indices : indices_groups)
             {
@@ -765,31 +819,31 @@ std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
             }
 
             result_cursor.run_end = main_rows;
-            probeEqualKeyRun(result_cursor, indices_groups, scratch);
+            probeEqualKeyRun(result_cursor);
             ProfileEvents::increment(ProfileEvents::PatchesMergeOnKeyRunMapReuses);
             return {indices_groups.begin(), indices_groups.end()};
         }
     }
 
-    scratch.reusable = false;
-    scratch.key_columns.clear();
-    scratch.map_builds = 0;
-    scratch.map_rows = 0;
+    reusable_run = false;
+    cached_key_columns.clear();
+    map_builds = 0;
+    map_rows = 0;
     indices_groups.clear();
     absl::flat_hash_map<UInt128, size_t, UInt128TrivialHash> group_index_by_columns;
     std::vector<Block> patch_blocks; // Keeps columns referenced by cursors alive.
     std::vector<BlockCursor> cursors;
 
-    patch_blocks.reserve(group.blocks.size());
-    cursors.reserve(group.blocks.size());
-    chassert(group.blocks.size() == group.updated_columns.size());
+    patch_blocks.reserve(blocks.size());
+    cursors.reserve(blocks.size());
+    chassert(blocks.size() == updated_columns.size());
 
-    for (size_t block_idx = 0; block_idx < group.blocks.size(); ++block_idx)
+    for (size_t block_idx = 0; block_idx < blocks.size(); ++block_idx)
     {
-        if (group.blocks[block_idx]->rows() == 0)
+        if (blocks[block_idx]->rows() == 0)
             continue;
 
-        Block patch_block = *group.blocks[block_idx];
+        Block patch_block = *blocks[block_idx];
         for (auto & column : patch_block)
             column.column = removeSpecialRepresentations(column.column);
 
@@ -797,7 +851,7 @@ std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
         SipHash hash;
         Block updated_block;
 
-        for (const auto & name : *group.updated_columns[block_idx])
+        for (const auto & name : updated_columns[block_idx])
         {
             const auto * column = patch_block.findByName(name);
 
@@ -818,7 +872,7 @@ std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
             indices_groups.push_back(std::make_shared<PatchIndices>());
 
         auto & columns_group = indices_groups[group_it->second];
-        auto & cursor = cursors.emplace_back(patch_block, sorting_key);
+        auto & cursor = cursors.emplace_back(patch_block, *sorting_key);
 
         cursor.group_idx = group_it->second;
         cursor.block_idx_in_group = static_cast<UInt32>(columns_group->patch_blocks.size());
@@ -831,14 +885,14 @@ std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
     static constexpr size_t max_cursors_for_linear_apply = 8;
 
     if (cursors.size() <= max_cursors_for_linear_apply)
-        applyCursorsLinear(result_cursor, cursors, indices_groups, reverse_flags, scratch);
+        applyCursorsLinear(result_cursor, cursors);
     else
-        applyCursorsHeap(result_cursor, cursors, indices_groups, reverse_flags, scratch);
+        applyCursorsHeap(result_cursor, cursors);
 
-    if (scratch.map_builds)
+    if (map_builds)
     {
-        ProfileEvents::increment(ProfileEvents::PatchesMergeOnKeyRunMapBuilds, scratch.map_builds);
-        ProfileEvents::increment(ProfileEvents::PatchesMergeOnKeyRunMapRows, scratch.map_rows);
+        ProfileEvents::increment(ProfileEvents::PatchesMergeOnKeyRunMapBuilds, map_builds);
+        ProfileEvents::increment(ProfileEvents::PatchesMergeOnKeyRunMapRows, map_rows);
     }
 
     return {indices_groups.begin(), indices_groups.end()};
@@ -848,25 +902,25 @@ std::vector<PatchIndicesPtr> applyPatchesMergeOnKey(
 
 struct ApplyPatchesState
 {
-    std::vector<MergeOnKeyRunState> groups;
+    std::vector<MergeOnKeyAlgorithm> merge_on_key_algorithms;
 };
 
 void applyPatchesToBlock(
     Block & result_block,
     Block & versions_block,
-    const std::vector<PatchReadResultToApply> & patch_read_results,
-    UInt64 source_data_version,
-    std::shared_ptr<ApplyPatchesState> & state)
+    const PatchReadResultsToApply & patch_read_results,
+    UInt64 source_data_version)
 {
     applyPatchesToBlockLegacy(result_block, versions_block, patch_read_results, source_data_version);
     std::vector<MergeOnKeyGroup> merge_on_key_groups;
 
-    for (const auto & [patch, read_result, updated_columns] : patch_read_results)
+    for (auto * patch_result : patch_read_results)
     {
+        const auto & patch = patch_result->patch;
         if (patch.mode != PatchMode::MergeOnKey)
             continue;
 
-        /// MergeTreeData::getPatchPartSortingKey returns one object per
+        /// `MergeTreeData::getPatchPartSortingKey` returns one object per
         /// effective key, so semantically equal keys are pointer-identical here.
         auto group_it = std::ranges::find_if(merge_on_key_groups, [&](const auto & group)
         {
@@ -877,49 +931,29 @@ void applyPatchesToBlock(
         {
             group_it = merge_on_key_groups.emplace(merge_on_key_groups.end());
             group_it->sorting_key = patch.sorting_key.get();
+            group_it->cache_owner = patch_result;
         }
 
-        const auto & patch_data = typeid_cast<const PatchMergeOnKeyReadResult &>(*read_result);
+        const auto & patch_data = typeid_cast<const PatchMergeOnKeyReadResult &>(*patch_result->read_result);
         group_it->blocks.emplace_back(&patch_data.block);
-        group_it->updated_columns.emplace_back(&updated_columns);
+        group_it->updated_columns.emplace_back(&patch_result->updated_columns);
     }
 
-    /// A combined MergeOnKey patch already has version-resolved row indices
-    /// and is applied directly, without combining with other patches.
     for (const auto & group : merge_on_key_groups)
     {
+        auto & state = group.cache_owner->apply_state;
         if (!state)
             state = std::make_shared<ApplyPatchesState>();
 
-        auto state_it = std::ranges::find_if(state->groups, [&](const auto & cached)
+        auto algorithm_it = std::ranges::find_if(state->merge_on_key_algorithms, [&](const auto & algorithm)
         {
-            return cached.sorting_key == group.sorting_key && cached.blocks == group.blocks
-                && std::ranges::equal(cached.updated_columns, group.updated_columns, [](const Names & lhs, const Names * rhs)
-                {
-                    return lhs == *rhs;
-                });
+            return algorithm.matches(group);
         });
 
-        if (state_it == state->groups.end())
-        {
-            state_it = state->groups.emplace(state->groups.end());
-            state_it->sorting_key = group.sorting_key;
-            state_it->blocks = group.blocks;
-            for (const auto * names : group.updated_columns)
-                state_it->updated_columns.push_back(*names);
-        }
+        if (algorithm_it == state->merge_on_key_algorithms.end())
+            algorithm_it = state->merge_on_key_algorithms.emplace(state->merge_on_key_algorithms.end(), group);
 
-        auto merge_on_key_patches = applyPatchesMergeOnKey(result_block, group, *state_it);
-
-        for (auto & patch_indices : merge_on_key_patches)
-        {
-            if (patch_indices->empty())
-                continue;
-
-            ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ApplyPatchesMicroseconds);
-            PatchesIndices patches{std::move(patch_indices)};
-            applyPatchesIndices(result_block, versions_block, patches, getUpdatedHeader(patches), source_data_version);
-        }
+        algorithm_it->apply(result_block, versions_block, source_data_version);
     }
 }
 

@@ -694,23 +694,35 @@ void MergeTreeReadersChain::readPatches(const Block & result_header, std::vector
         return;
 
     auto main_block = executeSortingKeyExpressions(result_header, read_result);
+    bool patch_results_changed = false;
 
     for (size_t i = 0; i < patches_results.size(); ++i)
     {
         auto & patch_results = patches_results[i];
 
         /// Remove patches that are not needed for current block anymore.
-        while (!patch_results.empty() && !patch_readers[i]->needOldPatch(read_result, *patch_results.front(), main_block))
+        while (!patch_results.empty() && !patch_readers[i]->needOldPatch(read_result, *patch_results.front().read_result, main_block))
         {
-            patch_apply_state.reset();
+            patch_results_changed = true;
             patch_results.pop_front();
         }
 
-        const auto * last_read_patch = patch_results.empty() ? nullptr : patch_results.back().get();
+        const auto * last_read_patch = patch_results.empty() ? nullptr : patch_results.back().read_result.get();
         auto new_patches = patch_readers[i]->readPatches(patch_ranges[i], read_result, main_block, last_read_patch);
         if (!new_patches.empty())
-            patch_apply_state.reset();
-        patch_results.insert(patch_results.end(), new_patches.begin(), new_patches.end());
+            patch_results_changed = true;
+
+        for (auto & patch_result : new_patches)
+            patch_results.push_back({patch_readers[i]->getPatchPart(), std::move(patch_result), {}, {}});
+    }
+
+    /// An algorithm may combine blocks from several readers. Invalidate all caches when any
+    /// resident block changes, including caches owned by read results that remain resident.
+    if (patch_results_changed)
+    {
+        for (auto & patch_results : patches_results)
+            for (auto & patch_result : patch_results)
+                patch_result.apply_state.reset();
     }
 }
 
@@ -825,12 +837,12 @@ void MergeTreeReadersChain::applyPatches(
     result_columns.clear();
 
     UInt64 source_data_version = patch_readers.front()->getPatchPart().source_data_version;
-    std::vector<PatchReadResultToApply> patch_read_results;
+    PatchReadResultsToApply patch_read_results;
 
     for (size_t i = 0; i < patch_readers.size(); ++i)
     {
         const auto & patch = patch_readers[i]->getPatchPart();
-        const auto & patch_results = patches_results[i];
+        auto & patch_results = patches_results[i];
 
         if (static_cast<UInt64>(patch.source_data_version) != source_data_version)
         {
@@ -856,8 +868,11 @@ void MergeTreeReadersChain::applyPatches(
         {
             std::sort(updated_columns.begin(), updated_columns.end());
 
-            for (const auto & patch_result : patch_results)
-                patch_read_results.push_back(PatchReadResultToApply{patch, patch_result, updated_columns});
+            for (auto & patch_result : patch_results)
+            {
+                patch_result.updated_columns = updated_columns;
+                patch_read_results.push_back(&patch_result);
+            }
         }
     }
 
@@ -865,7 +880,7 @@ void MergeTreeReadersChain::applyPatches(
     if (min_version.has_value())
         source_data_version = std::max(source_data_version, *min_version);
 
-    applyPatchesToBlock(result_block, versions_block, patch_read_results, source_data_version, patch_apply_state);
+    applyPatchesToBlock(result_block, versions_block, patch_read_results, source_data_version);
 
     result_columns = result_block.getColumns();
     result_columns.resize(result_header.columns());

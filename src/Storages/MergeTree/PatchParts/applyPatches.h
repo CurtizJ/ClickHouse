@@ -75,17 +75,21 @@ struct PatchReadResultToApply
     PatchPartInfoForReader patch;
     PatchReadResultPtr read_result;
     Names updated_columns;
+    /// Algorithms for groups whose first read result is this one, shared across application stages.
+    /// Reset when any resident patch read result changes.
+    std::shared_ptr<ApplyPatchesState> apply_state;
 };
+
+using PatchReadResultsToApply = std::vector<PatchReadResultToApply *>;
 
 /// Builds patches of all modes from patch read results and applies them to result_block.
 /// Patches updating the same set of columns are combined and applied together.
-/// The caller must reset `state` when the resident patch read results change.
+/// The caller retains the read results and their application state across result blocks.
 void applyPatchesToBlock(
     Block & result_block,
     Block & versions_block,
-    const std::vector<PatchReadResultToApply> & patch_read_results,
-    UInt64 source_data_version,
-    std::shared_ptr<ApplyPatchesState> & state);
+    const PatchReadResultsToApply & patch_read_results,
+    UInt64 source_data_version);
 
 /// Helpers defined in applyPatches.cpp, shared with the legacy formats (applyPatchesLegacy.cpp).
 const PaddedPODArray<UInt64> & getColumnUInt64Data(const Block & block, const String & column_name);
@@ -95,7 +99,7 @@ IColumn::Versions & addDataVersionForColumn(Block & block, const String & column
 Block getUpdatedHeader(const PatchesIndices & patches);
 
 /// Applies each patch as-is, without combining row indices across patches.
-/// Patches may have multiple source blocks (e.g. built by applyPatchesMergeOnKey).
+/// Patches may have multiple source blocks, as in `MergeOnKey`.
 void applyPatchesIndices(
     Block & result_block,
     Block & versions_block,
