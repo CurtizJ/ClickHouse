@@ -374,6 +374,9 @@ void scoreCursorsUnion(
 void scoreCursorsIntersection(
     Float32 * data,
     std::vector<ScoreCursor> & cursors,
+    size_t row_offset,
+    size_t num_rows);
+
 /// Intersection (AND) of posting lists into sparse offsets: always the leapfrog intersection,
 /// the brute-force counting needs a dense output.
 void lazyIntersectPostingListsSparse(
