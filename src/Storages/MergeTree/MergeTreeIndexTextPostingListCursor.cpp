@@ -549,8 +549,14 @@ void PostingListCursor::next()
     }
 }
 
-DocLengthsCursor::DocLengthsCursor(std::unique_ptr<MergeTreeReaderStream> stream_, const ScoringStats & scoring_stats)
+DocLengthsCursor::DocLengthsCursor(
+    std::unique_ptr<MergeTreeReaderStream> stream_,
+    const ScoringStats & scoring_stats,
+    TextIndexPostingsCache * postings_cache_,
+    const String & index_id_for_cache_)
     : stream(std::move(stream_))
+    , postings_cache(postings_cache_)
+    , index_id_for_cache(index_id_for_cache_)
     , num_docs(static_cast<UInt32>(scoring_stats.num_docs))
     , segment_size(scoring_stats.doc_lengths_segment_size)
     , segment_offsets(scoring_stats.doc_lengths_segment_offsets)
@@ -562,7 +568,9 @@ DocLengthsCursor::DocLengthsCursor(PaddedPODArray<UInt8> bytes_)
     : num_docs(static_cast<UInt32>(bytes_.size()))
     , segment_size(std::max<UInt64>(1, bytes_.size()))
 {
-    resident_segments.push_back(DocLengthsSegment{.index = 0, .bytes = std::move(bytes_)});
+    resident_segments.push_back(DocLengthsSegment{
+        .index = 0,
+        .bytes = std::make_shared<const PaddedPODArray<UInt8>>(std::move(bytes_))});
 }
 
 DocLengthsCursor::~DocLengthsCursor() = default;
@@ -597,25 +605,41 @@ void DocLengthsCursor::ensureRange(size_t row_offset, size_t num_rows)
     else
         std::erase_if(resident_segments, [&](const auto & segment) { return segment.index < first_segment; });
 
-    /// The missing segments are one suffix run: adjacent segments are contiguous in the decompressed stream.
+    /// The missing segments are one suffix run: adjacent segments are contiguous in the stream.
     const UInt64 first_missing_segment = resident_segments.empty() ? first_segment : resident_segments.back().index + 1;
     chassert(first_missing_segment <= last_segment);
 
-    /// Real filesystem seek is triggered only if the gap from the previous position is large enough.
-    stream->seekToMark(MarkInCompressedFile{.offset_in_compressed_file = segment_offsets[first_missing_segment], .offset_in_decompressed_block = 0});
-    auto * data_buffer = stream->getDataBuffer();
-
     for (UInt64 segment_idx = first_missing_segment; segment_idx <= last_segment; ++segment_idx)
-    {
-        auto & segment = resident_segments.emplace_back();
-        segment.index = segment_idx;
-        segment.bytes.resize(std::min<UInt64>(segment_size, num_docs - segment_idx * segment_size));
-        data_buffer->readStrict(reinterpret_cast<char *>(segment.bytes.data()), segment.bytes.size());
-    }
+        resident_segments.push_back(DocLengthsSegment{.index = segment_idx, .bytes = loadSegment(segment_idx)});
 
     first_resident_segment = resident_segments.front().index;
     cached_segment_begin = 0;
     cached_segment_end = 0;
+}
+
+DocLengthsSegmentPtr DocLengthsCursor::loadSegment(UInt64 segment_idx)
+{
+    const size_t segment_bytes = std::min<UInt64>(segment_size, num_docs - segment_idx * segment_size);
+
+    auto read_segment = [this, segment_idx, segment_bytes]
+    {
+        /// A real filesystem seek is triggered only if the gap from the previous position is large enough.
+        stream->seekToMark(MarkInCompressedFile{
+            .offset_in_compressed_file = segment_offsets[segment_idx], .offset_in_decompressed_block = 0});
+
+        auto bytes = std::make_shared<PaddedPODArray<UInt8>>(segment_bytes);
+        stream->getDataBuffer()->readStrict(reinterpret_cast<char *>(bytes->data()), segment_bytes);
+        return bytes;
+    };
+
+    if (!postings_cache)
+        return read_segment();
+
+    auto key = TextIndexPostingsCache::hash(
+        index_id_for_cache, segment_idx, static_cast<UInt8>(TextIndexPostingsCacheKind::DocLengths));
+
+    auto cell = postings_cache->getOrSet(key, [&] { return std::make_shared<TextIndexPostingsCacheCell>(DocLengthsSegmentPtr(read_segment())); });
+    return std::get<DocLengthsSegmentPtr>(cell->value);
 }
 
 UInt8 DocLengthsCursor::getByte(UInt32 doc_id) const
@@ -634,7 +658,7 @@ void DocLengthsCursor::updateCachedSegment(UInt32 doc_id) const
     const size_t segment_pos = segment_index - first_resident_segment;
     chassert(segment_pos < resident_segments.size());
 
-    const auto & bytes = resident_segments[segment_pos].bytes;
+    const auto & bytes = *resident_segments[segment_pos].bytes;
     chassert(doc_id - segment_index * segment_size < bytes.size());
 
     cached_segment_begin = static_cast<UInt32>(segment_index * segment_size);

@@ -22,6 +22,8 @@ using PostingList = roaring::Roaring;
 
 /// Shared immutable array of UInt32 values of one posting-list block, e.g. row ids or term frequencies.
 using PaddedPODArrayPtr = std::shared_ptr<const PaddedPODArray<UInt32>>;
+/// One `.dl` segment: `SmallFloat` document-length bytes, shared through the postings cache.
+using DocLengthsSegmentPtr = std::shared_ptr<const PaddedPODArray<UInt8>>;
 
 /// Incrementally encodes the posting list of a single token during the text index build.
 /// Sorted row ids arrive in batches via `append`, are split into fixed-size segments and

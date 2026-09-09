@@ -183,10 +183,18 @@ protected:
 
 /// Per-part cursor over doc-lengths norms of BM25 scoring.
 /// Lazily reads segmented .dl stream of the text index.
+///
+/// The decoded segments live in the postings cache, so the readers of one query (and, with
+/// `use_text_index_postings_cache`, of every query) share them instead of each re-reading the
+/// same 128K-row segments of the `.dl` stream.
 class DocLengthsCursor
 {
 public:
-    DocLengthsCursor(std::unique_ptr<MergeTreeReaderStream> stream_, const ScoringStats & scoring_stats);
+    DocLengthsCursor(
+        std::unique_ptr<MergeTreeReaderStream> stream_,
+        const ScoringStats & scoring_stats,
+        TextIndexPostingsCache * postings_cache_ = nullptr,
+        const String & index_id_for_cache_ = {});
 
     explicit DocLengthsCursor(PaddedPODArray<UInt8> bytes_);
     ~DocLengthsCursor();
@@ -202,16 +210,22 @@ public:
     UInt8 getByte(UInt32 doc_id) const;
 
 private:
-    /// One decompressed, resident segment of the `.dl` stream.
+    /// One resident segment of the `.dl` stream, owned by the postings cache (or by this cursor
+    /// for the in-memory variant). Holding the inner pointer keeps the bytes alive across eviction.
     struct DocLengthsSegment
     {
         UInt64 index = 0;
-        PaddedPODArray<UInt8> bytes;
+        DocLengthsSegmentPtr bytes;
     };
+
+    /// Reads one segment from the stream, or takes it from the postings cache.
+    DocLengthsSegmentPtr loadSegment(UInt64 segment_idx);
 
     void updateCachedSegment(UInt32 doc_id) const;
 
     std::unique_ptr<MergeTreeReaderStream> stream;
+    TextIndexPostingsCache * postings_cache = nullptr;
+    String index_id_for_cache;
     UInt32 num_docs;
     UInt64 segment_size;
     VectorWithMemoryTracking<UInt64> segment_offsets;

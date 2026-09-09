@@ -646,7 +646,13 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
                 index.index->index.name);
         }
 
-        score_doc_lengths = std::make_shared<DocLengthsCursor>(makeTextIndexStream(*doc_lengths_substream), scoring_stats);
+        /// The decoded `.dl` segments go to the postings cache, so all the readers of the query
+        /// share them instead of each reading the same segments of the stream.
+        score_doc_lengths = std::make_shared<DocLengthsCursor>(
+            makeTextIndexStream(*doc_lengths_substream),
+            scoring_stats,
+            condition_text->postingsCache().get(),
+            granule->getIndexIdForCaches());
     }
 
     const auto & token_infos = analyzer.getAllTokenInfos();

@@ -132,13 +132,16 @@ enum class TextIndexPostingsCacheKind : UInt8
     Phrase = 3,
     /// Flat postings of one posting-list block (sorted row ids and per-row term frequencies), decoded for BM25 scoring.
     ScoringPostings = 4,
+    /// One segment of `SmallFloat` document-length bytes of the `.dl` substream (BM25 scoring).
+    DocLengths = 5,
 };
 
 /// A single cell of TextIndexPostingsCache. It holds one of:
 ///   - PostingListPtr:        a decoded Roaring bitmap of one posting-list block;
 ///   - PaddedPODArrayPtr:     a plain array of UInt32 values: a flattened sorted array of postings (Flat, Phrase);
 ///   - ScoringPostingsPtr:    flat sorted row ids of one posting-list block with their term frequencies (BM25 scoring);
-///   - PostingListSegmentPtr: a decoded segment (payload + per-block index) of a compressed posting list (lazy cursor).
+///   - PostingListSegmentPtr: a decoded segment (payload + per-block index) of a compressed posting list (lazy cursor);
+///   - DocLengthsSegmentPtr:  one `.dl` segment of `SmallFloat` document-length bytes (BM25 scoring).
 /// Every payload is held by shared_ptr, so a consumer keeps its data alive by copying the inner pointer
 /// out of the cell — the data then outlives eviction of the (bounded) cache independently of the cell.
 struct TextIndexPostingsCacheCell
@@ -163,7 +166,12 @@ struct TextIndexPostingsCacheCell
     {
     }
 
-    std::variant<PostingListPtr, PaddedPODArrayPtr, ScoringPostingsPtr, PostingListSegmentPtr> value;
+    explicit TextIndexPostingsCacheCell(DocLengthsSegmentPtr doc_lengths_segment)
+        : value(std::move(doc_lengths_segment))
+    {
+    }
+
+    std::variant<PostingListPtr, PaddedPODArrayPtr, ScoringPostingsPtr, PostingListSegmentPtr, DocLengthsSegmentPtr> value;
 };
 
 /// Estimate of the memory usage (bytes) of a posting cache cell
@@ -186,6 +194,8 @@ struct TextIndexPostingsWeightFunction
                 return payload->row_ids.allocated_bytes() + payload->term_frequencies.allocated_bytes();
             else if constexpr (std::is_same_v<T, PostingListSegmentPtr>)
                 return payload->bytesAllocated();
+            else if constexpr (std::is_same_v<T, DocLengthsSegmentPtr>)
+                return payload->allocated_bytes();
             else
                 static_assert(false, "Unhandled variant type");
         }, cell.value);

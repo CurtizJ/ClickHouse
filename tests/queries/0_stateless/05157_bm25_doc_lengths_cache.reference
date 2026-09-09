@@ -1,0 +1,6 @@
+-- the same query twice; scores must not depend on where the segments come from
+541	1725.6674
+541	1725.6674
+-- the first query fills the cache, the second one hits it
+first	1	0
+second	0	1
