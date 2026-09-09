@@ -1116,6 +1116,7 @@ private:
 
         const ActionsDAG::Node * sum = scores.front();
         auto plus = FunctionFactory::instance().get("plus", context);
+
         for (size_t i = 1; i < scores.size(); ++i)
             sum = &actions_dag.addFunction(plus, {sum, scores[i]}, "");
 
