@@ -1014,13 +1014,11 @@ void MergeTextIndexesTask::finalize()
 
         for (size_t seg_start = 0; seg_start < num_doc_length_rows; seg_start += ScoringStats::DOC_LENGTHS_SEGMENT_SIZE)
         {
-            doc_lengths_stream->compressed_hashing.next();
-            auto mark = doc_lengths_stream->getCurrentMark();
-            chassert(mark.offset_in_decompressed_block == 0);
-            doc_lengths_segment_offsets.push_back(mark.offset_in_compressed_file);
+            /// The `.dl` stream is not compressed, so a segment offset is a plain byte offset.
+            doc_lengths_segment_offsets.push_back(doc_lengths_stream->plain_hashing.count());
 
             const size_t seg_len = std::min<size_t>(ScoringStats::DOC_LENGTHS_SEGMENT_SIZE, num_doc_length_rows - seg_start);
-            doc_lengths_stream->compressed_hashing.write(reinterpret_cast<const char *>(merged_doc_lengths.data() + seg_start), seg_len);
+            doc_lengths_stream->plain_hashing.write(reinterpret_cast<const char *>(merged_doc_lengths.data() + seg_start), seg_len);
         }
 
         scoring_stats = ScoringStats

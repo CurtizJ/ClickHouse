@@ -1614,13 +1614,11 @@ static VectorWithMemoryTracking<UInt64> serializeDocumentLengths(const PaddedPOD
 
     for (size_t seg_start = 0; seg_start < num_rows; seg_start += ScoringStats::DOC_LENGTHS_SEGMENT_SIZE)
     {
-        doc_lengths_stream->compressed_hashing.next();
-        auto mark = doc_lengths_stream->getCurrentMark();
-        chassert(mark.offset_in_decompressed_block == 0);
-        segment_offsets.push_back(mark.offset_in_compressed_file);
+        /// The `.dl` stream is not compressed, so a segment offset is a plain byte offset.
+        segment_offsets.push_back(doc_lengths_stream->plain_hashing.count());
 
         const size_t seg_len = std::min<size_t>(ScoringStats::DOC_LENGTHS_SEGMENT_SIZE, num_rows - seg_start);
-        doc_lengths_stream->compressed_hashing.write(reinterpret_cast<const char *>(doc_lengths.data() + seg_start), seg_len);
+        doc_lengths_stream->plain_hashing.write(reinterpret_cast<const char *>(doc_lengths.data() + seg_start), seg_len);
     }
 
     return segment_offsets;

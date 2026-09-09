@@ -54,7 +54,11 @@ struct MergeTreeIndexSubstream
     {
         /// Text index postings and positions are not compressed by write buffer,
         /// because the compression is implicitly applied during building them.
-        return type != Type::TextIndexPostings && type != Type::TextIndexPositions;
+        /// Document lengths are `SmallFloat` bytes, which LZ4 expands rather than compresses
+        /// (measured ratio 1.0039 on 24.1M rows), so they are written raw as well.
+        return type != Type::TextIndexPostings
+            && type != Type::TextIndexPositions
+            && type != Type::TextIndexDocLengths;
     }
 };
 
