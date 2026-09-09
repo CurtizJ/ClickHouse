@@ -21,6 +21,7 @@ namespace DB
 
 class TextIndexAnalyzer;
 class MergeTreeIndexConditionText;
+class ColumnSparse;
 
 using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<size_t, PostingListPtr>>;
 
@@ -114,6 +115,8 @@ private:
 
     /// Fills the score column `column_idx` for rows [row_offset, row_offset + num_rows).
     void fillColumnScores(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows);
+    /// The same for a sparse score column: appends (offset, score) pairs for the scored rows only.
+    void fillColumnScoresSparse(ColumnSparse & column, size_t column_idx, size_t row_offset, size_t num_rows);
 
     /// Builds the scoring cursors of every score column and the pruning cursors (see `score_leaves`, `bound_cursors`).
     void initializeScoreLeaves();

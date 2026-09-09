@@ -504,14 +504,15 @@ void MergeTreeReaderTextIndex::chooseSparseVirtualColumns()
     for (size_t i = 0; i < columns_to_read.size(); ++i)
     {
         /// Always-true columns are all ones; the fallback evaluates an arbitrary expression into a full column.
-        /// Score columns are filled by `fillColumnScores`, which writes a full `Float32` column.
-        if (is_always_true[i] || use_fallback[i] || is_score_column[i])
+        if (is_always_true[i] || use_fallback[i])
             continue;
 
         const auto & search_query = search_queries[i];
         const auto & query_builder = analyzer.getQueryBuilder(*search_query);
 
         /// Queries that never match give an all-zero column; the rest are bounded by their posting lists.
+        /// A score column shares the search query of its filter, and BM25 scores only the rows that
+        /// match it, so the same bound applies to the rows with a non-zero score.
         const bool never_matches = query_builder.is_failed || (search_query->getTokens().empty() && search_query->getPatterns().empty());
         const double max_matching_rows = never_matches ? 0.0 : static_cast<double>(estimateMaxMatchingRows(analyzer, query_builder, *search_query));
 
@@ -740,6 +741,12 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
 
 void MergeTreeReaderTextIndex::fillColumnScores(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows)
 {
+    if (auto * column_sparse = typeid_cast<ColumnSparse *>(&column))
+    {
+        fillColumnScoresSparse(*column_sparse, column_idx, row_offset, num_rows);
+        return;
+    }
+
     auto & column_data = assert_cast<ColumnFloat32 &>(column).getData();
     size_t old_size = column_data.size();
     column_data.resize_fill(old_size + num_rows);
@@ -759,6 +766,38 @@ void MergeTreeReaderTextIndex::fillColumnScores(IColumn & column, size_t column_
         scoreCursorsIntersection(data, leaf.cursors, row_offset, num_rows);
     else
         scoreCursorsUnion(data, leaf.cursors, row_offset, num_rows);
+}
+
+void MergeTreeReaderTextIndex::fillColumnScoresSparse(ColumnSparse & column, size_t column_idx, size_t row_offset, size_t num_rows)
+{
+    /// The offsets the scorers emit are absolute positions in the column, so they continue
+    /// from the rows appended by the previous windows of this read.
+    const size_t old_size = column.size();
+
+    if (!score_leaves_initialized)
+        initializeScoreLeaves();
+
+    auto & leaf = score_leaves[column_idx];
+    if (!leaf.can_match || leaf.cursors.empty())
+    {
+        column.insertManyDefaults(num_rows);
+        return;
+    }
+
+    requireRowOffsetRepresentable(row_offset);
+    score_doc_lengths->ensureRange(row_offset, num_rows);
+
+    auto & offsets_data = column.getOffsetsData();
+    auto & scores_data = assert_cast<ColumnFloat32 &>(column.getValuesColumn()).getData();
+
+    if (leaf.intersect)
+        scoreCursorsIntersectionSparse(offsets_data, scores_data, old_size, leaf.cursors, row_offset, num_rows);
+    else
+        scoreCursorsUnionSparse(offsets_data, scores_data, old_size, leaf.cursors, row_offset, num_rows);
+
+    /// `insertManyDefaults` only grows the size of a sparse column, extending it over
+    /// the rows appended above (both scored and not).
+    column.insertManyDefaults(num_rows);
 }
 
 std::optional<Float64> MergeTreeReaderTextIndex::getPruningThreshold() const
@@ -976,7 +1015,8 @@ void MergeTreeReaderTextIndex::createEmptyColumns(MutableColumns & columns, size
         if (use_sparse[i])
         {
             /// A sparse column stores only the matching rows, so there is nothing worth reserving.
-            columns[i] = ColumnSparse::create(ColumnUInt8::create());
+            /// The nested column follows the virtual column's own type: `UInt8` for a filter, `Float32` for a score.
+            columns[i] = ColumnSparse::create(columns_to_read[i].type->createColumn());
         }
         else
         {
