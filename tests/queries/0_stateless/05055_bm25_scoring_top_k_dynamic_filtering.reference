@@ -1,5 +1,7 @@
 top-K dynamic filter applied	1
 direct read applied	1
+reader pruning enabled for the descending score key	1
+reader pruning disabled for the ascending score key	1
 results desc
 1	1.9949
 7	1.8783

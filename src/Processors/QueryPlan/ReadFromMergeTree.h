@@ -434,8 +434,13 @@ public:
     /// Removes physical text columns that were eliminated by direct read from text index.
     void createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, const IndexReadColumns & added_columns, const Names & removed_columns, bool is_final);
 
-    /// Attaches the `_bm25_score` virtual column to the read task of the scoring text index.
-    void attachTextIndexScoreColumn(const String & index_name);
+    /// Marks the read task of the text index as computing `bm25()`: the score parameters, the per-token
+    /// coefficients of the reader's pruning bound, and the top-k threshold tracker when the reader may prune by it.
+    void attachTextIndexScoring(
+        const String & index_name,
+        const BM25Params & params,
+        std::unordered_map<String, UInt32> pruning_coefficients,
+        TopKThresholdTrackerPtr threshold_tracker);
 
     const std::optional<Indexes> & getIndexes() const { return indexes; }
     ConditionSelectivityEstimatorPtr getConditionSelectivityEstimator(const Names & required_columns) const;
@@ -448,7 +453,6 @@ public:
         const ActionsDAG * filter_actions_dag_,
         const MergeTreeData & data,
         const RangesInDataParts & parts,
-        const Names & columns_to_read,
         [[maybe_unused]] const std::optional<VectorSearchParameters> & vector_search_parameters,
         [[maybe_unused]] std::optional<TopKFilterInfo> top_k_filter_info,
         const ContextPtr & query_context,

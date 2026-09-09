@@ -1,7 +1,7 @@
 -- Tags: no-parallel-replicas
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 SET use_query_condition_cache = 0;
@@ -40,7 +40,7 @@ ORDER BY event_time_microseconds DESC
 LIMIT 1;
 
 SELECT '-- the collection statistics are built exactly once per query';
-SELECT sum(_bm25_score) > 0 FROM tab_bm25_events WHERE hasAnyTokens(body, ['token_1', 'raft'])
+SELECT sum(bm25()) > 0 FROM tab_bm25_events WHERE hasAnyTokens(body, ['token_1', 'raft'])
 SETTINGS log_comment = 'bm25_events_with_score';
 SYSTEM FLUSH LOGS query_log;
 SELECT stats_built, scored_rows FROM bm25_events_stats(comment = 'bm25_events_with_score');

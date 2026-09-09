@@ -20,6 +20,7 @@
 #include <roaring/roaring.hh>
 
 #include <algorithm>
+#include <random>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -455,4 +456,159 @@ TEST(BlockMaxScoreCodecTest, NoSourceEncodeHasNoUbAndRoundTrips)
     std::string enc_tf = encodeWith(docs, /*max_rowids_in_segment=*/count + BLOCK_SIZE, info_tf, &src);
     EXPECT_GT(enc_tf.size(), enc_no_tf.size())
         << "WITH-TF encode must be larger than the filter-only encode (UB arrays + per-block TF headers present)";
+}
+
+
+/// `upperBound(begin, end)` bounds the contribution of every posting of the range from above without moving
+/// the cursor, and is exactly 0 for a range outside every block; `nextBlockEnd(row)` is the end of the block
+/// covering `row`. Multi-segment layout with gaps, spiky term frequencies (one saturating block) and varying doc lengths.
+TEST(BlockMaxScoreCodecTest, UpperBoundIsSoundAndDoesNotMoveCursor)
+{
+    std::mt19937 rng(20260909);
+
+    /// ~1000 postings spread over ~4000 rows, so blocks span gaps of rows without postings.
+    std::vector<uint32_t> docs;
+    for (uint32_t row = 0; row < 4000; ++row)
+        if (rng() % 4 == 0)
+            docs.push_back(row);
+    const uint32_t num_rows = 4096;
+
+    absl::flat_hash_map<UInt32, UInt32> tf_overflow;
+    PaddedPODArray<UInt8> doc_length_bytes(num_rows, 0);
+    for (uint32_t row = 0; row < num_rows; ++row)
+        doc_length_bytes[row] = static_cast<UInt8>(20 + rng() % 100);
+    for (size_t i = 0; i < docs.size(); ++i)
+    {
+        if (rng() % 7 == 0)
+            tf_overflow[docs[i]] = 2 + rng() % 12;
+    }
+    /// One posting with tf >= 256 saturates its block's `max_tf_minus_one` to the 255 sentinel.
+    tf_overflow[docs[docs.size() / 2]] = 300;
+    TermFrequencies src{tf_overflow, doc_length_bytes};
+
+    TokenPostingsInfo info;
+    /// Several segments: about 3 blocks each.
+    std::string enc = encodeWith(docs, /*max_rowids_in_segment=*/3 * BLOCK_SIZE, info, &src);
+    ASSERT_GT(info.offsets.size(), 1u);
+
+    StreamHarness harness;
+    harness.buffer = enc;
+    harness.info = info;
+    harness.doc_lengths.assign(doc_length_bytes);
+    harness.writeAndBuildStream("upperbound");
+
+    const BM25Params params;
+    const BM25LengthNormCache lnc(60.0, params);
+    const BM25Weight w(1.7, params, &lnc);
+
+    auto contribution = [&](uint32_t row) { return w.contribution(src.tf(row), src.dlByte(row)); };
+
+    auto cursor = harness.makeScoringCursor();
+
+    /// Random ranges, before the cursor is positioned anywhere.
+    for (size_t iteration = 0; iteration < 300; ++iteration)
+    {
+        size_t begin = rng() % num_rows;
+        size_t end = std::min<size_t>(num_rows, begin + 1 + rng() % 600);
+
+        Float32 max_contribution = 0;
+        for (auto it = std::lower_bound(docs.begin(), docs.end(), begin); it != docs.end() && *it < end; ++it)
+            max_contribution = std::max(max_contribution, contribution(*it));
+
+        const Float32 bound = cursor->upperBound(begin, end, w);
+        EXPECT_GE(bound, max_contribution) << "range [" << begin << ", " << end << ")";
+    }
+
+    /// Ranges outside every posting are bounded by exactly 0.
+    EXPECT_FLOAT_EQ(cursor->upperBound(docs.back() + 1, num_rows, w), 0.0f);
+    EXPECT_FLOAT_EQ(cursor->upperBound(num_rows, num_rows + 100, w), 0.0f);
+    if (docs.front() > 0)
+        EXPECT_FLOAT_EQ(cursor->upperBound(0, docs.front(), w), 0.0f);
+
+    /// `nextBlockEnd` moves forward and never past the last posting.
+    for (size_t row = 0; row < num_rows; row += 37)
+    {
+        auto block_end = cursor->nextBlockEnd(row);
+        if (row > docs.back())
+        {
+            EXPECT_FALSE(block_end.has_value());
+            continue;
+        }
+
+        ASSERT_TRUE(block_end.has_value()) << "row " << row;
+        EXPECT_GT(*block_end, row);
+        EXPECT_LE(*block_end, static_cast<size_t>(docs.back()) + 1);
+        /// The block end is a posting followed by a block boundary: the bound over [row, end) covers exactly the
+        /// postings up to it, so extending the range by one row past it never lowers the bound.
+        EXPECT_GE(cursor->upperBound(row, *block_end + 1, w), cursor->upperBound(row, *block_end, w));
+    }
+
+    /// Bound queries interleaved with the iteration leave it untouched: the drained sequence is the posting list.
+    std::vector<uint32_t> drained;
+    cursor->advance(0);
+    while (cursor->valid())
+    {
+        drained.push_back(cursor->value());
+        if (drained.size() % 50 == 0)
+        {
+            /// Look far ahead and far behind, in other segments.
+            cursor->upperBound(0, 300, w);
+            cursor->upperBound(3000, 4000, w);
+            cursor->nextBlockEnd(3500);
+        }
+        cursor->next();
+    }
+    EXPECT_EQ(drained, docs);
+}
+
+
+/// The embedded cursor holds the decoded postings, so its bound is the exact maximum over the range.
+TEST(BlockMaxScoreCodecTest, EmbeddedUpperBoundIsExact)
+{
+    auto scoring_postings = std::make_shared<ScoringPostings>();
+    const std::vector<uint32_t> docs = {3, 10, 11, 40, 128, 129, 500};
+    const std::vector<uint32_t> tfs = {1, 5, 1, 2, 300, 1, 7};
+    scoring_postings->row_ids.assign(docs.begin(), docs.end());
+    scoring_postings->term_frequencies.assign(tfs.begin(), tfs.end());
+    scoring_postings->calculateMaxTermFrequency();
+
+    PaddedPODArray<UInt8> doc_length_bytes(600, 30);
+    doc_length_bytes[10] = 90;
+    doc_length_bytes[128] = 120;
+    PaddedPODArray<UInt8> doc_length_bytes_copy;
+    doc_length_bytes_copy.assign(doc_length_bytes);
+    auto doc_lengths = std::make_shared<DocLengthsCursor>(std::move(doc_length_bytes_copy));
+
+    const BM25Params params;
+    const BM25LengthNormCache lnc(60.0, params);
+    const BM25Weight w(1.7, params, &lnc);
+
+    PostingListScoringCursor cursor(scoring_postings, doc_lengths.get());
+
+    auto expected = [&](size_t begin, size_t end)
+    {
+        Float32 result = 0;
+        for (size_t i = 0; i < docs.size(); ++i)
+            if (docs[i] >= begin && docs[i] < end)
+                result = std::max(result, w.contribution(tfs[i], doc_length_bytes[docs[i]]));
+        return result;
+    };
+
+    EXPECT_FLOAT_EQ(cursor.upperBound(0, 3, w), 0.0f);
+    EXPECT_FLOAT_EQ(cursor.upperBound(12, 40, w), 0.0f);
+    EXPECT_FLOAT_EQ(cursor.upperBound(501, 600, w), 0.0f);
+    EXPECT_FLOAT_EQ(cursor.upperBound(0, 600, w), expected(0, 600));
+    EXPECT_FLOAT_EQ(cursor.upperBound(10, 12, w), expected(10, 12));
+    EXPECT_FLOAT_EQ(cursor.upperBound(128, 129, w), expected(128, 129));
+    EXPECT_FLOAT_EQ(cursor.upperBound(129, 501, w), expected(129, 501));
+    EXPECT_FALSE(cursor.nextBlockEnd(0).has_value());
+
+    /// The queries do not move the cursor.
+    cursor.advance(11);
+    ASSERT_TRUE(cursor.valid());
+    EXPECT_EQ(cursor.value(), 11u);
+    cursor.upperBound(0, 600, w);
+    EXPECT_EQ(cursor.value(), 11u);
+    cursor.next();
+    EXPECT_EQ(cursor.value(), 40u);
 }

@@ -1,7 +1,7 @@
 -- Tags: no-parallel-replicas
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 
@@ -41,7 +41,7 @@ SELECT '-- plain filtering on the old part still works';
 SELECT count() FROM tab_scoring_rebuild WHERE hasToken(body, 'raft');
 
 SELECT '-- before the merge, the old part has no scoring data';
-SELECT id, _bm25_score FROM tab_scoring_rebuild WHERE hasToken(body, 'raft'); -- { serverError BAD_ARGUMENTS }
+SELECT id, bm25() FROM tab_scoring_rebuild WHERE hasToken(body, 'raft'); -- { serverError BAD_ARGUMENTS }
 
 OPTIMIZE TABLE tab_scoring_rebuild FINAL;
 
@@ -64,12 +64,12 @@ SELECT
     if(abs(merged.score - ref.score) <= 1e-6, 'OK', format('MISMATCH {} vs {}', merged.score, ref.score))
 FROM
 (
-    SELECT id, _bm25_score AS score FROM tab_scoring_rebuild
+    SELECT id, bm25() AS score FROM tab_scoring_rebuild
     WHERE hasAnyTokens(body, ['consensus', 'raft'])
 ) AS merged
 INNER JOIN
 (
-    SELECT id, _bm25_score AS score FROM tab_scoring_ref
+    SELECT id, bm25() AS score FROM tab_scoring_ref
     WHERE hasAnyTokens(body, ['consensus', 'raft'])
 ) AS ref ON merged.id = ref.id
 ORDER BY merged.id;

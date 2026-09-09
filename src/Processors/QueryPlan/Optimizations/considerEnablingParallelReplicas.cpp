@@ -336,16 +336,13 @@ void considerEnablingParallelReplicas(
         return;
 
     /// Text index BM25 scoring is not supported with auto parallel replicas.
-    bool reads_score_column = std::ranges::any_of(
+    bool computes_bm25_score = std::ranges::any_of(
         source_reading_step->getIndexReadTasks(),
-        [](const auto & task) { return task.second.columns.contains(BM25ScoreColumn::name); });
+        [](const auto & task) { return task.second.bm25_params.has_value(); });
 
-    if (reads_score_column)
+    if (computes_bm25_score)
     {
-        LOG_DEBUG(
-            getLogger("optimizeTree"),
-            "The query reads the '{}' column filled by the direct read from a text index. Skipping optimization",
-            BM25ScoreColumn::name);
+        LOG_DEBUG(getLogger("optimizeTree"), "The query computes bm25() by the direct read from a text index. Skipping optimization");
         return;
     }
 

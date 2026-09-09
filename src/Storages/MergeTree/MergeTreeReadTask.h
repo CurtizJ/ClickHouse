@@ -1,9 +1,12 @@
 #pragma once
 
 #include <map>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
+#include <Storages/MergeTree/BM25Kernel.h>
 #include <Storages/MergeTree/IMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
@@ -48,6 +51,9 @@ using RuntimeDataflowStatisticsCacheUpdaterPtr = std::shared_ptr<RuntimeDataflow
 struct BM25State;
 using BM25StatePtr = std::shared_ptr<const BM25State>;
 
+struct TopKThresholdTracker;
+using TopKThresholdTrackerPtr = std::shared_ptr<TopKThresholdTracker>;
+
 enum class MergeTreeReadType : uint8_t
 {
     /// By default, read will use MergeTreeReadPool and return pipe with num_streams outputs.
@@ -74,8 +80,15 @@ struct IndexReadTask
     NamesAndTypesList columns;
     MergeTreeIndexWithCondition index;
     bool is_final = false;
-    /// Query-global BM25 state for the `_bm25_score` virtual column.
+
+    /// Set when the query computes `bm25()` over this text index. Per distinct token, the number of
+    /// scoring predicates of the assembled score expression that contain it (see `BM25ScoringToken`).
+    std::optional<BM25Params> bm25_params;
+    std::unordered_map<String, UInt32> bm25_pruning_coefficients;
+    /// Query-global BM25 state, built once the parts to read are known (`ReadFromMergeTree::initializePipeline`).
     BM25StatePtr bm25_score_state;
+    /// Threshold of `ORDER BY bm25() DESC LIMIT n`, when the text index reader may skip marks by it.
+    TopKThresholdTrackerPtr bm25_threshold_tracker;
 };
 
 /// Ordered map to ensure deterministic iteration order.

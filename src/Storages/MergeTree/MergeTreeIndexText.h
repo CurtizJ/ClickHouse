@@ -561,7 +561,7 @@ private:
     /// Flat postings of the single-block tokens decoded for BM25 scoring during the granule
     /// analysis, keyed by the block's offset in the postings file.
     absl::flat_hash_map<UInt64, ScoringPostingsPtr> scoring_postings_by_offset;
-    /// Whether the query computes `_bm25_score` with this index.
+    /// Whether the query computes `bm25()` with this index.
     bool scoring_enabled = false;
 };
 

@@ -5,14 +5,14 @@
 
 -- With parallel replicas, a positive `parallel_replicas_min_number_of_rows_per_replica` makes the
 -- initiator run a "row count estimation" index analysis in the planner, before the query plan
--- optimization that attaches the `_bm25_score` column runs. The scoring tokens are stamped onto the
--- text index condition right when it is created (see `ReadFromMergeTree::buildIndexes`), so the
+-- optimization that rewrites `bm25()` runs. The scoring tokens are stamped onto the text index
+-- condition right when it is created (see `ReadFromMergeTree::buildIndexes`), so the
 -- granules deserialized by the estimation pass carry term frequencies and are safely reused by the
 -- data read. A granule deserialized without term frequencies would fail the reader's invariant
 -- check with an exception instead of silently scoring every occurrence with `tf = 1`.
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 
@@ -43,17 +43,17 @@ INSERT INTO tab_bm25_pr SELECT 2, concat(toString(number), multiIf(number % 10 =
 INSERT INTO tab_bm25_pr SELECT 3, concat(toString(number), multiIf(number % 10 = 0, ' error error', number % 10 = 5, ' error', ' noise')) FROM numbers(100000);
 
 -- No estimation pass: the reference behavior.
-SELECT round(_bm25_score, 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
+SELECT round(bm25(), 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
 SETTINGS parallel_replicas_min_number_of_rows_per_replica = 0;
 
 -- The estimation pass runs and concludes that one replica is enough: the query falls back to a
 -- regular read that reuses the estimation's analysis result, including the text index granules it
 -- deserialized. The scores must not change.
-SELECT round(_bm25_score, 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
+SELECT round(bm25(), 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
 SETTINGS parallel_replicas_min_number_of_rows_per_replica = 1000000000;
 
 -- The estimation pass runs and parallel replicas engage.
-SELECT round(_bm25_score, 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
+SELECT round(bm25(), 2) AS score, count() FROM tab_bm25_pr WHERE hasToken(str, 'error') GROUP BY score ORDER BY score
 SETTINGS parallel_replicas_min_number_of_rows_per_replica = 1;
 
 DROP TABLE tab_bm25_pr;

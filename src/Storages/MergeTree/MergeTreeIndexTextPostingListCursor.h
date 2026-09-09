@@ -9,6 +9,7 @@
 #include <Storages/MergeTree/BM25Kernel.h>
 #include <Common/VectorWithMemoryTracking.h>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -95,6 +96,10 @@ protected:
     /// Point `current_segment` at the `segment_idx`-th segment (from the cache or `buildPostingSegment`)
     /// without decoding block data yet. No-op for shared-array cursors, which already hold the array.
     void prepareSegment(size_t segment_idx);
+
+    /// Returns the decoded `segment_idx`-th segment (from the cache or `buildPostingSegment`)
+    /// without touching the iteration state, unlike `prepareSegment`.
+    PostingListSegmentPtr loadSegment(size_t segment_idx);
 
     /// Reads and parses one compressed segment from `stream` into an immutable `PostingListSegment`.
     /// Invoked on a cache miss (or directly when no posting cache is available).
@@ -266,13 +271,33 @@ public:
     /// Block-max score upper bound over the whole current segment under weight `w`.
     Float32 segmentMaxScore(const BM25Weight & w) const;
 
+    /// Upper bound of the token's BM25 contribution to any row of [begin, end) under weight `w`: the max
+    /// block-max score over the blocks intersecting the range, 0 when the range holds no posting of the
+    /// token. Exact for the embedded cursor, which holds the decoded rows; it requires the doc lengths of
+    /// the range to be resident (`DocLengthsCursor::ensureRange`). Does not move the cursor.
+    Float32 upperBound(size_t begin, size_t end, const BM25Weight & w);
+
+    /// Exclusive end row of the first block whose last row id is >= `row`: the nearest point at or after
+    /// `row` where `upperBound` can change. `std::nullopt` for the embedded cursor and past the last
+    /// posting. Does not move the cursor.
+    std::optional<size_t> nextBlockEnd(size_t row);
+
 protected:
     /// Decodes postings from the packed block into `decoded_values` and term frequencies into `decoded_tfs`.
     void decodeBlock(size_t block_idx) override;
 
 private:
+    /// The segment for the bound queries: the current one when it is prepared, else loaded without
+    /// touching the iteration state and kept while consecutive queries stay within it.
+    const PostingListSegment & segmentForBound(size_t segment_idx);
+
+    static Float32 blockMaxScore(const PostingListSegment & segment, size_t block_idx, const BM25Weight & w);
+
     /// Per-granule `SmallFloat` doc-length cursor, queried by the granule-local row id.
     const DocLengthsCursor * doc_lengths = nullptr;
+
+    PostingListSegmentPtr bound_segment;
+    size_t bound_segment_idx = 0;
 
     /// Term frequencies of the current packed block, parallel to `decoded_values`.
     alignas(16) UInt32 decoded_tfs[BLOCK_SIZE]{};

@@ -269,10 +269,9 @@ MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
         {
             new_readers.prewhere.push_back(createMergeTreeReaderIndex(
                 new_readers.main.get(),
-                index_read_task->index,
+                *index_read_task,
                 pre_columns_per_step,
-                read_info->read_hints.index_granules,
-                index_read_task->bm25_score_state));
+                read_info->read_hints.index_granules));
         }
         else
         {

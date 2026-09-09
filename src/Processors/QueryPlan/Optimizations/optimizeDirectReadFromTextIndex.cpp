@@ -13,6 +13,7 @@
 #include <Functions/FunctionHelpers.h>
 #include <Functions/FunctionsMiscellaneous.h>
 #include <Functions/IFunction.h>
+#include <Functions/bm25.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
@@ -37,6 +38,7 @@
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include <Processors/TopKThresholdTracker.h>
 #include <Storages/MergeTree/KeyCondition.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataSelectExecutor.h>
@@ -53,12 +55,14 @@
 namespace DB::ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
+    extern const int LOGICAL_ERROR;
     extern const int SUPPORT_IS_DISABLED;
 }
 
 namespace DB::Setting
 {
-    extern const SettingsBool allow_experimental_bm25_score_column;
+    extern const SettingsBool allow_experimental_bm25_scoring;
+    extern const SettingsBool text_index_bm25_pruning;
 }
 
 namespace DB::QueryPlanOptimizations
@@ -196,6 +200,181 @@ String optimizationInfoToString(const IndexReadColumns & added_columns, const Na
         result += "]";
     }
     return result;
+}
+
+/// The `bm25()` calls of the plan fragment above a read step. They share one parameter pair, and the
+/// pass replaces all of them by one assembled score expression, output under each call's result name.
+struct BM25Rewrite
+{
+    BM25Params params;
+    std::vector<String> result_names;
+};
+
+bool isBM25FunctionNode(const ActionsDAG::Node & node)
+{
+    return node.type == ActionsDAG::ActionType::FUNCTION && node.function_base && node.function_base->getName() == "bm25";
+}
+
+BM25Params parseBM25Node(const ActionsDAG::Node & node)
+{
+    ColumnsWithTypeAndName arguments;
+    for (const auto * child : node.children)
+    {
+        if (child->type != ActionsDAG::ActionType::COLUMN || !child->column)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Arguments of function bm25 must be constants");
+
+        arguments.emplace_back(child->column, child->result_type, child->result_name);
+    }
+
+    return parseBM25FunctionArguments(arguments);
+}
+
+ActionsDAG::NodeRawConstPtrs collectBM25Nodes(const ActionsDAG & dag)
+{
+    ActionsDAG::NodeRawConstPtrs result;
+    for (const auto & node : dag.getNodes())
+    {
+        if (isBM25FunctionNode(node))
+            result.push_back(&node);
+    }
+
+    return result;
+}
+
+/// Throws if a `bm25()` call is part of the filter condition rooted at `filter_node`: the score is defined
+/// by the boolean structure of the filter, so it cannot be an input of it. The argument of the dynamic
+/// top-k filter `__topKFilter(bm25())` is the one legitimate place (see `tryOptimizeTopK`).
+void checkBM25NotInFilterCondition(const ActionsDAG::Node * filter_node)
+{
+    std::vector<const ActionsDAG::Node *> to_visit{filter_node};
+    absl::flat_hash_set<const ActionsDAG::Node *> visited;
+
+    while (!to_visit.empty())
+    {
+        const auto * node = to_visit.back();
+        to_visit.pop_back();
+
+        if (!visited.insert(node).second)
+            continue;
+
+        if (node->type == ActionsDAG::ActionType::FUNCTION && node->function_base && node->function_base->getName() == "__topKFilter")
+            continue;
+
+        if (isBM25FunctionNode(*node))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Function bm25 cannot be used in the WHERE or PREWHERE condition, only in the SELECT list and ORDER BY");
+
+        for (const auto * child : node->children)
+            to_visit.push_back(child);
+    }
+}
+
+/// Adds the `bm25()` calls of `dag` to the rewrite, rejecting a second parameter pair.
+void addBM25Nodes(std::optional<BM25Rewrite> & rewrite, const ActionsDAG & dag, const ActionsDAG::Node * filter_node)
+{
+    auto nodes = collectBM25Nodes(dag);
+    if (nodes.empty())
+        return;
+
+    if (filter_node)
+        checkBM25NotInFilterCondition(filter_node);
+
+    for (const auto * node : nodes)
+    {
+        auto params = parseBM25Node(*node);
+
+        if (!rewrite)
+        {
+            rewrite = BM25Rewrite{.params = params, .result_names = {}};
+        }
+        else if (rewrite->params.k1 != params.k1 || rewrite->params.b != params.b)
+        {
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Function bm25 is used with two different parameter pairs in one query, (k1 = {}, b = {}) and (k1 = {}, b = {}), which is not supported",
+                rewrite->params.k1, rewrite->params.b, params.k1, params.b);
+        }
+
+        if (std::ranges::find(rewrite->result_names, node->result_name) == rewrite->result_names.end())
+            rewrite->result_names.push_back(node->result_name);
+    }
+}
+
+/// Clones the expression rooted at `source` into `dag`: inputs are matched by name to the inputs of `dag`
+/// (added when missing), aliases are dropped, constants and functions are re-added as they are.
+const ActionsDAG::Node * importNode(ActionsDAG & dag, const ActionsDAG::Node * source, std::unordered_map<const ActionsDAG::Node *, const ActionsDAG::Node *> & imported)
+{
+    if (auto it = imported.find(source); it != imported.end())
+        return it->second;
+
+    const ActionsDAG::Node * result = nullptr;
+    switch (source->type)
+    {
+        case ActionsDAG::ActionType::INPUT:
+        {
+            for (const auto * input : dag.getInputs())
+            {
+                if (input->result_name == source->result_name)
+                {
+                    result = input;
+                    break;
+                }
+            }
+
+            if (!result)
+                result = &dag.addInput(source->result_name, source->result_type);
+            break;
+        }
+        case ActionsDAG::ActionType::COLUMN:
+        {
+            result = &dag.addColumn(source->column, source->result_type, source->result_name, source->is_deterministic_constant, source->is_masked_secret);
+            break;
+        }
+        case ActionsDAG::ActionType::ALIAS:
+        {
+            result = importNode(dag, source->children.at(0), imported);
+            break;
+        }
+        case ActionsDAG::ActionType::FUNCTION:
+        {
+            ActionsDAG::NodeRawConstPtrs children;
+            for (const auto * child : source->children)
+                children.push_back(importNode(dag, child, imported));
+
+            result = &dag.addFunction(source->function_base, std::move(children), "");
+            break;
+        }
+        default:
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot copy the node {} of the BM25 score expression into the PREWHERE", source->result_name);
+    }
+
+    imported.emplace(source, result);
+    return result;
+}
+
+/// Replaces the `bm25()` calls of `dag` (a step above the one computing the score) by inputs of the same name.
+/// Returns false if there is none.
+bool replaceBM25NodesWithInputs(ActionsDAG & dag)
+{
+    auto nodes = collectBM25Nodes(dag);
+    if (nodes.empty())
+        return false;
+
+    NodesReplacementMap replacements;
+    std::unordered_map<String, const ActionsDAG::Node *> inputs_by_name;
+
+    for (const auto * node : nodes)
+    {
+        auto [it, inserted] = inputs_by_name.try_emplace(node->result_name);
+        if (inserted)
+            it->second = &dag.addInput(node->result_name, node->result_type);
+
+        replacements[node] = it->second;
+    }
+
+    for (auto & output : dag.getOutputs())
+        output = replaceNodes(dag, output, replacements);
+
+    dag.removeUnusedActions(/*allow_remove_inputs=*/ false);
+    return true;
 }
 
 /// Helper function.
@@ -462,15 +641,38 @@ ASTPtr convertNodeToAST(const ActionsDAG::Node & node, const std::unordered_map<
 class TextIndexDAGReplacer
 {
 public:
-    TextIndexDAGReplacer(ActionsDAG & actions_dag_, const TextIndexReadInfos & text_index_read_infos_, bool direct_read_from_text_index_, bool is_filter_dag_, bool require_index_analyzed_predicate_ = false, NameSet * scoring_predicate_indexes_ = nullptr)
+    TextIndexDAGReplacer(
+        ActionsDAG & actions_dag_,
+        const TextIndexReadInfos & text_index_read_infos_,
+        bool direct_read_from_text_index_,
+        bool is_filter_dag_,
+        bool require_index_analyzed_predicate_ = false,
+        NameSet * scoring_predicate_indexes_ = nullptr,
+        const BM25Rewrite * bm25_rewrite_ = nullptr)
         : actions_dag(actions_dag_)
         , text_index_read_infos(text_index_read_infos_)
         , direct_read_from_text_index(direct_read_from_text_index_)
         , is_filter_dag(is_filter_dag_)
         , require_index_analyzed_predicate(require_index_analyzed_predicate_)
         , scoring_predicate_indexes(scoring_predicate_indexes_)
+        , bm25_rewrite(bm25_rewrite_)
     {
     }
+
+    /// The `bm25()` score assembled over the score columns of the scoring predicates of a filter DAG.
+    struct BM25Assembly
+    {
+        /// The score node (`Float32`) inside the rewritten DAG, null when the filter has no scoring predicate on
+        /// the direct-read path. Valid only while that DAG lives: the steps are rebuilt from clones.
+        const ActionsDAG::Node * score = nullptr;
+        /// A standalone copy of the score expression (its single output) over the read step's columns.
+        std::shared_ptr<const ActionsDAG> score_dag;
+        String index_name;
+        /// Occurrences of scoring predicates in the score expression.
+        size_t num_predicates = 0;
+        /// Per token, the number of these occurrences containing it (the pruning bound coefficients).
+        std::unordered_map<String, UInt32> pruning_coefficients;
+    };
 
     struct ResultReplacement
     {
@@ -479,6 +681,7 @@ public:
         const ActionsDAG::Node * filter_node = nullptr;
         /// True if any function node was rewritten.
         bool is_dag_rewritten = false;
+        BM25Assembly bm25;
     };
 
     /// Replaces text-search functions by virtual columns.
@@ -556,6 +759,45 @@ public:
                 filter_node = output;
         }
 
+        /// Assemble `bm25()` over the rewritten filter and output it under every call's name, replacing the
+        /// calls of this DAG. It is built here so that the score columns survive `removeUnusedActions`.
+        if (bm25_rewrite && filter_node)
+        {
+            result.bm25.score = assembleScore(filter_node, /*on_root_conjunction=*/ true, result.bm25, context);
+
+            if (result.bm25.score)
+            {
+                if (!WhichDataType(result.bm25.score->result_type).isFloat32())
+                    result.bm25.score = &actions_dag.addCast(*result.bm25.score, std::make_shared<DataTypeFloat32>(), "", context);
+
+                NodesReplacementMap bm25_replacements;
+                std::unordered_map<String, const ActionsDAG::Node *> aliases;
+
+                for (const auto * node : collectBM25Nodes(actions_dag))
+                {
+                    auto [it, inserted] = aliases.try_emplace(node->result_name);
+                    if (inserted)
+                        it->second = &actions_dag.addAlias(*result.bm25.score, node->result_name);
+                    bm25_replacements[node] = it->second;
+                }
+
+                for (auto & output : actions_dag.outputs)
+                    output = replaceNodes(actions_dag, output, bm25_replacements);
+
+                for (const auto & name : bm25_rewrite->result_names)
+                {
+                    bool is_output = std::ranges::any_of(actions_dag.outputs, [&](const auto * output) { return output->result_name == name; });
+                    if (is_output)
+                        continue;
+
+                    auto [it, inserted] = aliases.try_emplace(name);
+                    if (inserted)
+                        it->second = &actions_dag.addAlias(*result.bm25.score, name);
+                    actions_dag.outputs.push_back(it->second);
+                }
+            }
+        }
+
         result.is_dag_rewritten = true;
         if (has_filter_column)
             result.filter_node = filter_node;
@@ -582,10 +824,19 @@ public:
     }
 
 private:
+    /// A scoring predicate replaced by a match column: its score column input and search query.
+    struct ScoringLeaf
+    {
+        const ActionsDAG::Node * score_input = nullptr;
+        TextSearchQueryPtr search_query;
+        String index_name;
+    };
+
     struct NodeReplacement
     {
         const ActionsDAG::Node * node = nullptr;
-        std::unordered_map<String, VirtualColumnDescription> added_virtual_columns;
+        std::vector<std::pair<String, VirtualColumnDescription>> added_virtual_columns;
+        std::optional<ScoringLeaf> scoring_leaf;
     };
 
     ActionsDAG & actions_dag;
@@ -598,8 +849,14 @@ private:
     /// When set, collects the names of scoring-enabled text indexes that have a scoring-eligible
     /// text-search predicate (`hasToken` / `hasAnyTokens` / `hasAllTokens`) in this filter DAG.
     NameSet * scoring_predicate_indexes = nullptr;
+    /// When set, the query computes `bm25()`: the scoring predicates replaced for the direct read also get
+    /// score columns, and the score is assembled over the filter (see `assembleScore`).
+    const BM25Rewrite * bm25_rewrite = nullptr;
     /// Per-index cache of the node names in the index-analysis filter DAG.
     std::unordered_map<String, NameSet> index_analyzed_predicate_names;
+    /// The nodes of the rewritten filter that stand for scoring predicates.
+    absl::flat_hash_map<const ActionsDAG::Node *, ScoringLeaf> scoring_leaves;
+    const ActionsDAG::Node * float32_zero = nullptr;
 
     struct SelectedCondition
     {
@@ -769,7 +1026,106 @@ private:
         if (direct_read_from_text_index)
             replaceFunctionsToVirtualColumns(replacement, selected_conditions, virtual_column_to_node, context);
 
+        /// The replaced node (after any cast and alias) is what the rewritten filter refers to.
+        if (replacement.scoring_leaf)
+            scoring_leaves.emplace(replacement.node, *replacement.scoring_leaf);
+
         return replacement;
+    }
+
+    /// Whether the direct read of the predicate gives a BM25 score: one of the three scoring functions,
+    /// read exactly from a text index with `enable_scoring = 1`.
+    static bool isScoringCondition(const SelectedCondition & condition)
+    {
+        const auto & function_name = condition.search_query->getFunctionName();
+        if (function_name != "hasToken" && function_name != "hasAnyTokens" && function_name != "hasAllTokens")
+            return false;
+
+        if (condition.search_query->getDirectReadMode() != TextIndexDirectReadMode::Exact || condition.search_query->getTokens().empty())
+            return false;
+
+        const auto * text_index = condition.info->index ? typeid_cast<const MergeTreeIndexText *>(condition.info->index->index.get()) : nullptr;
+        return text_index && text_index->getParams().enable_scoring;
+    }
+
+    const ActionsDAG::Node & getFloat32Zero()
+    {
+        if (!float32_zero)
+        {
+            auto type = std::make_shared<DataTypeFloat32>();
+            float32_zero = &actions_dag.addColumn(type->createColumnConst(1, Float32(0)), type, "_CAST(0, 'Float32')");
+        }
+
+        return *float32_zero;
+    }
+
+    /// The `bm25()` score of the filter subtree at `node`, mirroring its boolean structure: a scoring predicate
+    /// is its (masked) score column; `OR` adds the scores of its children; `AND` adds them when the whole
+    /// conjunction holds, with no mask on the root conjunction because its rows are filtered anyway; anything
+    /// else (`NOT`, non-text predicates, opaque functions) adds nothing. Null when the subtree has no score.
+    const ActionsDAG::Node * assembleScore(const ActionsDAG::Node * node, bool on_root_conjunction, BM25Assembly & assembly, const ContextPtr & context)
+    {
+        /// A replaced predicate is registered by its final node, which may be an alias of the match column.
+        if (auto it = scoring_leaves.find(node); it != scoring_leaves.end())
+        {
+            const auto & leaf = it->second;
+
+            if (assembly.num_predicates > 0 && assembly.index_name != leaf.index_name)
+            {
+                throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                    "Function bm25 with predicates on multiple scoring text indexes ({} and {}) is not supported",
+                    assembly.index_name, leaf.index_name);
+            }
+
+            assembly.index_name = leaf.index_name;
+            ++assembly.num_predicates;
+
+            /// The tokens are sorted; a repeated token counts once per predicate.
+            const String * previous_token = nullptr;
+            for (const auto & token : leaf.search_query->getTokens())
+            {
+                if (!previous_token || *previous_token != token)
+                    ++assembly.pruning_coefficients[token];
+                previous_token = &token;
+            }
+
+            return leaf.score_input;
+        }
+
+        if (node->type == ActionsDAG::ActionType::ALIAS)
+            return assembleScore(node->children.at(0), on_root_conjunction, assembly, context);
+
+        if (node->type != ActionsDAG::ActionType::FUNCTION || !node->function_base)
+            return nullptr;
+
+        const auto & function_name = node->function_base->getName();
+        if (function_name != "and" && function_name != "or")
+            return nullptr;
+
+        const bool is_conjunction = function_name == "and";
+        ActionsDAG::NodeRawConstPtrs scores;
+
+        for (const auto * child : node->children)
+        {
+            if (const auto * score = assembleScore(child, on_root_conjunction && is_conjunction, assembly, context))
+                scores.push_back(score);
+        }
+
+        if (scores.empty())
+            return nullptr;
+
+        const ActionsDAG::Node * sum = scores.front();
+        auto plus = FunctionFactory::instance().get("plus", context);
+        for (size_t i = 1; i < scores.size(); ++i)
+            sum = &actions_dag.addFunction(plus, {sum, scores[i]}, "");
+
+        if (is_conjunction && !on_root_conjunction)
+        {
+            auto if_function = FunctionFactory::instance().get("if", context);
+            sum = &actions_dag.addFunction(if_function, {node, sum, &getFloat32Zero()}, "");
+        }
+
+        return sum;
     }
 
     /// Applies preprocessor, tokenizer and postprocessor for text-search functions.
@@ -1058,11 +1414,37 @@ private:
                 virtual_column.default_desc.expression = std::move(default_expression);
 
                 it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-                replacement.added_virtual_columns.emplace(condition.index_name, std::move(virtual_column));
+                replacement.added_virtual_columns.emplace_back(condition.index_name, std::move(virtual_column));
             }
 
             return it->second;
         };
+
+        /// A scoring predicate of a query computing `bm25()` also gets its score column (`Float32`), filled by
+        /// the same reader as the match column. It is registered like the match column and referenced only
+        /// by the assembled score, so it is read only when the predicate ends up in the score expression.
+        if (bm25_rewrite)
+        {
+            auto scoring_condition = std::ranges::find_if(selected_conditions, isScoringCondition);
+            if (scoring_condition != selected_conditions.end())
+            {
+                auto & condition_text = typeid_cast<MergeTreeIndexConditionText &>(*scoring_condition->info->condition);
+                String score_column_name = condition_text.registerScoreVirtualColumn(*scoring_condition->search_query, scoring_condition->index_name);
+
+                auto [it, inserted] = virtual_column_to_node.try_emplace(score_column_name);
+                if (inserted)
+                {
+                    /// Only a part with the materialized index can score, and `buildBM25State` rejects the others.
+                    VirtualColumnDescription score_column(score_column_name, std::make_shared<DataTypeFloat32>(), /*codec=*/ nullptr, scoring_condition->index_name, VirtualsKind::Ephemeral, VirtualsMaterializationPlace::Reader, /*deterministic_=*/ true);
+                    score_column.default_desc.kind = ColumnDefaultKind::Default;
+
+                    it->second = &actions_dag.addInput(score_column_name, std::make_shared<DataTypeFloat32>());
+                    replacement.added_virtual_columns.emplace_back(scoring_condition->index_name, std::move(score_column));
+                }
+
+                replacement.scoring_leaf = ScoringLeaf{.score_input = it->second, .search_query = scoring_condition->search_query, .index_name = scoring_condition->index_name};
+            }
+        }
 
         /// If we have only one condition with exact search, we can use
         /// only virtual column and remove the original condition.
@@ -1097,16 +1479,24 @@ private:
     }
 };
 
-static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
+/// Result of the direct-read rewrite of one filter DAG.
+struct TextIndexDAGResult
+{
+    const ActionsDAG::Node * filter_node = nullptr;
+    TextIndexDAGReplacer::BM25Assembly bm25;
+};
+
+static TextIndexDAGResult processAndOptimizeTextIndexDAG(
     ReadFromMergeTree & read_from_merge_tree_step,
     ActionsDAG & filter_dag,
     const TextIndexReadInfos & text_index_read_infos,
     const String & filter_column_name,
     bool direct_read_from_text_index,
-    bool require_index_analyzed_predicate = false,
-    NameSet * scoring_predicate_indexes = nullptr)
+    bool require_index_analyzed_predicate,
+    NameSet * scoring_predicate_indexes,
+    const BM25Rewrite * bm25_rewrite)
 {
-    TextIndexDAGReplacer replacer(filter_dag, text_index_read_infos, direct_read_from_text_index, /*is_filter_dag=*/ true, require_index_analyzed_predicate, scoring_predicate_indexes);
+    TextIndexDAGReplacer replacer(filter_dag, text_index_read_infos, direct_read_from_text_index, /*is_filter_dag=*/ true, require_index_analyzed_predicate, scoring_predicate_indexes, direct_read_from_text_index ? bm25_rewrite : nullptr);
     auto result = replacer.replace(read_from_merge_tree_step.getContext(), filter_column_name);
 
     /// Even when no virtual columns are added (added_columns is empty),
@@ -1115,7 +1505,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     /// In that case, result.filter_node is non-null and we must return it
     /// so the caller can update the filter column name to match the modified DAG.
     if (result.added_columns.empty())
-        return result.filter_node;
+        return {.filter_node = result.filter_node, .bm25 = {}};
 
     /// Keep columns the PREWHERE or row-level filter still read, so this filter DAG's removal does not drop them from the shared read set.
     {
@@ -1155,7 +1545,11 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     const auto & indexes = read_from_merge_tree_step.getIndexes();
     bool is_final = read_from_merge_tree_step.isQueryWithFinal();
     read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.removed_columns, is_final);
-    return result.filter_node;
+
+    if (result.bm25.score)
+        result.bm25.score_dag = std::make_shared<const ActionsDAG>(ActionsDAG::cloneSubDAG({result.bm25.score}, /*remove_aliases=*/ false));
+
+    return {.filter_node = result.filter_node, .bm25 = std::move(result.bm25)};
 }
 
 /// Applies the tokenizer/preprocessor/postprocessor rewrite to text-search functions in an arbitrary DAG,
@@ -1180,123 +1574,27 @@ static bool processAndOptimizeTextIndexFunctionsInPrewhere(
     const TextIndexReadInfos & text_index_read_infos,
     bool direct_read_from_text_index,
     bool require_index_analyzed_predicate,
-    NameSet * scoring_predicate_indexes)
+    NameSet * scoring_predicate_indexes,
+    const BM25Rewrite * bm25_rewrite,
+    TextIndexDAGReplacer::BM25Assembly & bm25_assembly)
 {
     read_from_merge_tree_step.updatePrewhereInfo({});
     auto cloned_prewhere_info = prewhere_info->clone();
-    const auto * result_filter_node = processAndOptimizeTextIndexDAG(read_from_merge_tree_step, cloned_prewhere_info.prewhere_actions, text_index_read_infos, cloned_prewhere_info.prewhere_column_name, direct_read_from_text_index, require_index_analyzed_predicate, scoring_predicate_indexes);
+    auto result = processAndOptimizeTextIndexDAG(read_from_merge_tree_step, cloned_prewhere_info.prewhere_actions, text_index_read_infos, cloned_prewhere_info.prewhere_column_name, direct_read_from_text_index, require_index_analyzed_predicate, scoring_predicate_indexes, bm25_rewrite);
 
-    if (!result_filter_node)
+    if (!result.filter_node)
     {
         read_from_merge_tree_step.updatePrewhereInfo(prewhere_info);
         return false;
     }
 
-    cloned_prewhere_info.prewhere_column_name = result_filter_node->result_name;
+    if (result.bm25.score_dag)
+        bm25_assembly = std::move(result.bm25);
+
+    cloned_prewhere_info.prewhere_column_name = result.filter_node->result_name;
     auto modified_prewhere_info = std::make_shared<PrewhereInfo>(std::move(cloned_prewhere_info));
     read_from_merge_tree_step.updatePrewhereInfo(modified_prewhere_info);
     return true;
-}
-
-/// Attaches the `_bm25_score` virtual column to the read task of the scoring text index when the query reads it.
-/// The column requires exactly one text index with `enable_scoring = 1` among the indexes with read tasks,
-/// and at least one `hasToken` / `hasAnyTokens` / `hasAllTokens` condition on it.
-static void attachScoreColumnIfRequested(
-    ReadFromMergeTree & read_from_merge_tree_step,
-    bool direct_read_from_text_index,
-    const NameSet & scoring_predicate_indexes)
-{
-    const auto & all_column_names = read_from_merge_tree_step.getAllColumnNames();
-    if (std::ranges::find(all_column_names, BM25ScoreColumn::name) == all_column_names.end())
-        return;
-
-    if (read_from_merge_tree_step.getStorageMetadata()->getColumns().has(BM25ScoreColumn::name))
-        return;
-
-    if (!read_from_merge_tree_step.getIndexes())
-        return;
-
-    const auto & settings = read_from_merge_tree_step.getContext()->getSettingsRef();
-    if (!settings[Setting::allow_experimental_bm25_score_column])
-    {
-        throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
-            "The '{}' virtual column is experimental. Enable it with the setting `allow_experimental_bm25_score_column = 1`",
-            BM25ScoreColumn::name);
-    }
-
-    if (!direct_read_from_text_index)
-    {
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "The '{}' virtual column requires the direct read from the text index (the setting `query_plan_direct_read_from_text_index`)",
-            BM25ScoreColumn::name);
-    }
-
-    struct ScoringCandidate
-    {
-        String index_name;
-        std::vector<String> tokens;
-        TextSearchMode global_search_mode;
-    };
-
-    std::vector<ScoringCandidate> candidates;
-
-    for (const auto & [index_name, index_task] : read_from_merge_tree_step.getIndexReadTasks())
-    {
-        /// The pass can visit the same step more than once. The column is attached exactly once.
-        if (index_task.columns.contains(BM25ScoreColumn::name))
-            return;
-
-        const auto * text_index = typeid_cast<const MergeTreeIndexText *>(index_task.index.index.get());
-        if (!text_index || !text_index->getParams().enable_scoring)
-            continue;
-
-        const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*index_task.index.condition_template->generateUnsubstituted());
-        auto tokens = condition_text.getScoringTokens();
-
-        if (tokens.empty())
-            continue;
-
-        candidates.push_back(ScoringCandidate{index_name, std::move(tokens), condition_text.getGlobalSearchMode()});
-    }
-
-    if (scoring_predicate_indexes.size() > 1)
-    {
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "The '{}' virtual column with predicates on multiple scoring text indexes is not supported",
-            BM25ScoreColumn::name);
-    }
-
-    if (candidates.empty())
-    {
-        if (!scoring_predicate_indexes.empty())
-        {
-            throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "The '{}' virtual column requires the text-search predicate on the scoring text index '{}' "
-                "to be evaluated by the direct read from the text index, but it is evaluated row-wise in this query",
-                BM25ScoreColumn::name, *scoring_predicate_indexes.begin());
-        }
-
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "The '{}' virtual column requires a `hasToken`, `hasAnyTokens` or `hasAllTokens` predicate "
-            "on a column with a text index created with `enable_scoring = 1`",
-            BM25ScoreColumn::name);
-    }
-
-    if (candidates.size() > 1)
-    {
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "The '{}' virtual column with predicates on multiple scoring text indexes is not supported",
-            BM25ScoreColumn::name);
-    }
-
-    auto & candidate = candidates.front();
-
-    LOG_TRACE(getLogger("optimizeDirectReadFromTextIndex"),
-        "BM25 score: index '{}', tokens: {}, scorer: {}",
-        candidate.index_name, candidate.tokens.size(),
-        candidate.global_search_mode == TextSearchMode::All ? "conjunction" : "generic");
-
-    read_from_merge_tree_step.attachTextIndexScoreColumn(candidate.index_name);
 }
 
 /// Steps that keep the indexed column intact (WindowStep only appends columns), so the injection walk can
@@ -1316,6 +1614,99 @@ static bool isRowScanPassThroughStep(const IQueryPlanStep * step)
         || typeid_cast<const WindowStep *>(step);
 }
 
+static const ActionsDAG * getStepDAG(const IQueryPlanStep * step)
+{
+    if (const auto * filter_step = typeid_cast<const FilterStep *>(step))
+        return &filter_step->getExpression();
+    if (const auto * expression_step = typeid_cast<const ExpressionStep *>(step))
+        return &expression_step->getExpression();
+    return nullptr;
+}
+
+/// Collects the `bm25()` calls of the query fragment of the read step: its PREWHERE and the steps of the
+/// walk [walk_begin, walk_end). A call beyond the walk (above an aggregation, a join, ...) is rejected.
+static std::optional<BM25Rewrite> collectBM25Rewrite(
+    const ReadFromMergeTree & read_from_merge_tree_step,
+    const Stack & stack,
+    Stack::const_reverse_iterator walk_begin,
+    Stack::const_reverse_iterator walk_end)
+{
+    std::optional<BM25Rewrite> rewrite;
+
+    if (auto prewhere_info = read_from_merge_tree_step.getPrewhereInfo())
+        addBM25Nodes(rewrite, prewhere_info->prewhere_actions, &prewhere_info->prewhere_actions.findInOutputs(prewhere_info->prewhere_column_name));
+
+    for (auto it = walk_begin; it != walk_end; ++it)
+    {
+        const auto * step = it->node->step.get();
+        const auto * filter_step = typeid_cast<const FilterStep *>(step);
+        if (const auto * dag = getStepDAG(step))
+            addBM25Nodes(rewrite, *dag, filter_step ? &dag->findInOutputs(filter_step->getFilterColumnName()) : nullptr);
+    }
+
+    for (auto it = walk_end; it != stack.rend(); ++it)
+    {
+        const auto * dag = getStepDAG(it->node->step.get());
+        if (dag && !collectBM25Nodes(*dag).empty())
+        {
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Function bm25 is supported only in the SELECT list and ORDER BY of the query fragment reading the table with the text index, "
+                "not above the '{}' step", walk_end->node->step->getName());
+        }
+    }
+
+    if (rewrite)
+    {
+        const auto & settings = read_from_merge_tree_step.getContext()->getSettingsRef();
+        if (!settings[Setting::allow_experimental_bm25_scoring])
+            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "Function bm25 is experimental. Enable it with the setting `allow_experimental_bm25_scoring = 1`");
+    }
+
+    return rewrite;
+}
+
+/// Replaces the `bm25()` placeholder of the dynamic top-k PREWHERE (`__topKFilter(bm25())`, see `tryOptimizeTopK`)
+/// by a copy of the assembled score. Its inputs pass through as outputs, so the steps above keep every column
+/// they saw before, including the score columns the filter step computes its own `bm25()` from.
+static void substituteBM25InPrewhere(ReadFromMergeTree & read_from_merge_tree_step, const TextIndexDAGReplacer::BM25Assembly & assembly)
+{
+    auto prewhere_info = read_from_merge_tree_step.getPrewhereInfo();
+    if (!prewhere_info || collectBM25Nodes(prewhere_info->prewhere_actions).empty())
+        return;
+
+    auto cloned_prewhere_info = prewhere_info->clone();
+    auto & dag = cloned_prewhere_info.prewhere_actions;
+    auto & outputs = dag.getOutputs();
+
+    size_t filter_output_idx = 0;
+    while (filter_output_idx < outputs.size() && outputs[filter_output_idx]->result_name != cloned_prewhere_info.prewhere_column_name)
+        ++filter_output_idx;
+
+    if (filter_output_idx == outputs.size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "PREWHERE column {} is not an output of the PREWHERE actions", cloned_prewhere_info.prewhere_column_name);
+
+    std::unordered_map<const ActionsDAG::Node *, const ActionsDAG::Node *> imported;
+    const auto * score = importNode(dag, assembly.score_dag->getOutputs().front(), imported);
+
+    NodesReplacementMap replacements;
+    for (const auto * node : collectBM25Nodes(dag))
+        replacements[node] = score;
+
+    for (auto & output : outputs)
+        output = replaceNodes(dag, output, replacements);
+
+    cloned_prewhere_info.prewhere_column_name = outputs[filter_output_idx]->result_name;
+
+    for (const auto * input : dag.getInputs())
+    {
+        if (std::ranges::find(outputs, input) == outputs.end())
+            outputs.push_back(input);
+    }
+
+    dag.removeUnusedActions();
+    read_from_merge_tree_step.updatePrewhereInfo(std::make_shared<PrewhereInfo>(std::move(cloned_prewhere_info)));
+}
+
 /// Applies text index optimizations to the query plan.
 ///
 /// Always preprocesses `hasAllTokens`/`hasAnyTokens` arguments with text index metadata
@@ -1325,6 +1716,10 @@ static bool isRowScanPassThroughStep(const IQueryPlanStep * step)
 ///
 /// When `direct_read_from_text_index` is true, also replaces text-search functions
 /// with virtual columns for direct index reads (both WHERE and PREWHERE clauses).
+///
+/// When the fragment calls `bm25()`, the scoring predicates of the direct read also get score columns, the
+/// filter step assembles the score from them following its boolean structure (see `TextIndexDAGReplacer::assembleScore`)
+/// and outputs it under the call's name, and the steps above take it as an input.
 ///
 /// See TextIndexDAGReplacer class for more details.
 void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes & nodes, bool direct_read_from_text_index)
@@ -1359,16 +1754,6 @@ void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes 
     /// Scoring text indexes with a scoring-eligible predicate in any of the query's filters,
     NameSet scoring_predicate_indexes;
 
-    /// --- PREWHERE ---
-    bool prewhere_optimized = false;
-    if (auto prewhere_info = read_from_merge_tree_step->getPrewhereInfo())
-    {
-        /// A PREWHERE deferred after FINAL never runs during reading and is excluded from index analysis, so it gets neither the direct read nor a sibling predicate's preprocessor.
-        bool is_deferred_after_final = read_from_merge_tree_step->isPrewhereDeferredAfterFinal();
-        bool direct_read_allowed = direct_read_from_text_index && !already_has_direct_read && !is_deferred_after_final;
-        prewhere_optimized = processAndOptimizeTextIndexFunctionsInPrewhere(*read_from_merge_tree_step, prewhere_info, text_index_infos, direct_read_allowed, /*require_index_analyzed_predicate=*/ is_deferred_after_final, &scoring_predicate_indexes);
-    }
-
     /// A first-pass optimization can leave an `ExpressionStep` on top of the read step and hide the filter, e.g. the
     /// header-converting step of `tryOptimizeTopK`. Merge it into the filter above so direct read stays possible.
     auto walk_begin = stack.rbegin() + 1;
@@ -1379,8 +1764,46 @@ void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes 
             ++walk_begin; /// the merged-away step is detached now, the filter sits directly above the scan
     }
 
-    /// Walk the steps above the scan; traverse row-preserving pass-throughs (liftUpFunctions may hoist a projection above a sort) and stop where the column set changes (aggregation, join).
-    for (auto it = walk_begin; it != stack.rend(); ++it)
+    /// The walk covers the steps above the scan up to the first one that changes the column set (aggregation, join):
+    /// filters, expressions and row-preserving pass-throughs (liftUpFunctions may hoist a projection above a sort).
+    auto walk_end = walk_begin;
+    while (walk_end != stack.rend())
+    {
+        const auto * step = walk_end->node->step.get();
+        if (!typeid_cast<const FilterStep *>(step) && !typeid_cast<const ExpressionStep *>(step) && !isRowScanPassThroughStep(step))
+            break;
+        ++walk_end;
+    }
+
+    /// The `bm25()` calls must be known before the rewrite: the scoring predicates get score columns while they are replaced.
+    std::optional<BM25Rewrite> bm25_rewrite = collectBM25Rewrite(*read_from_merge_tree_step, stack, walk_begin, walk_end);
+    if (bm25_rewrite && already_has_direct_read)
+        bm25_rewrite.reset(); /// the score was assembled by the earlier visit
+
+    /// A plan without index analysis (e.g. the probe plan of the automatic parallel replicas) cannot read the index
+    /// directly, so the calls stay as they are; executing them reports the reason.
+    if (bm25_rewrite && !read_from_merge_tree_step->getIndexes())
+        bm25_rewrite.reset();
+
+    if (bm25_rewrite && !direct_read_from_text_index)
+    {
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "Function bm25 requires the direct read from the text index (the setting `query_plan_direct_read_from_text_index`)");
+    }
+
+    TextIndexDAGReplacer::BM25Assembly bm25_assembly;
+
+    /// --- PREWHERE ---
+    bool prewhere_optimized = false;
+    if (auto prewhere_info = read_from_merge_tree_step->getPrewhereInfo())
+    {
+        /// A PREWHERE deferred after FINAL never runs during reading and is excluded from index analysis, so it gets neither the direct read nor a sibling predicate's preprocessor.
+        bool is_deferred_after_final = read_from_merge_tree_step->isPrewhereDeferredAfterFinal();
+        bool direct_read_allowed = direct_read_from_text_index && !already_has_direct_read && !is_deferred_after_final;
+        prewhere_optimized = processAndOptimizeTextIndexFunctionsInPrewhere(*read_from_merge_tree_step, prewhere_info, text_index_infos, direct_read_allowed, /*require_index_analyzed_predicate=*/ is_deferred_after_final, &scoring_predicate_indexes, bm25_rewrite ? &*bm25_rewrite : nullptr, bm25_assembly);
+    }
+
+    for (auto it = walk_begin; it != walk_end; ++it)
     {
         QueryPlan::Node * node = it->node;
         IQueryPlanStep * step = node->step.get();
@@ -1396,26 +1819,25 @@ void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes 
                 step->getName());
 
         if (!filter_step && !expression_step)
-        {
-            if (isRowScanPassThroughStep(step))
-                continue;
-            break;
-        }
+            continue;
 
         /// Direct read only for the WHERE filter directly above the scan (its rebuild uses the scan's header).
         if (filter_step && it == walk_begin)
         {
             ActionsDAG & filter_dag = filter_step->getExpression();
             bool direct_read_allowed = direct_read_from_text_index && !prewhere_optimized && !already_has_direct_read;
-            const auto * result_filter_node = processAndOptimizeTextIndexDAG(
+            auto result = processAndOptimizeTextIndexDAG(
                 *read_from_merge_tree_step, filter_dag, text_index_infos, filter_step->getFilterColumnName(), direct_read_allowed,
-                /*require_index_analyzed_predicate=*/ false, &scoring_predicate_indexes);
+                /*require_index_analyzed_predicate=*/ false, &scoring_predicate_indexes, bm25_rewrite ? &*bm25_rewrite : nullptr);
 
-            if (!result_filter_node)
+            if (!result.filter_node)
                 continue;
 
+            if (result.bm25.score_dag)
+                bm25_assembly = std::move(result.bm25);
+
             bool removes_filter_column = filter_step->removesFilterColumn();
-            auto new_filter_column_name = result_filter_node->result_name;
+            auto new_filter_column_name = result.filter_node->result_name;
             node->step = std::make_unique<FilterStep>(read_from_merge_tree_step->getOutputHeader(), filter_dag.clone(), new_filter_column_name, removes_filter_column);
             continue;
         }
@@ -1437,7 +1859,95 @@ void processAndOptimizeTextIndexFunctions(const Stack & stack, QueryPlan::Nodes 
             node->step = std::make_unique<ExpressionStep>(input_header, dag.clone());
     }
 
-    attachScoreColumnIfRequested(*read_from_merge_tree_step, direct_read_from_text_index, scoring_predicate_indexes);
+    if (!bm25_rewrite)
+        return;
+
+    if (scoring_predicate_indexes.size() > 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Function bm25 with predicates on multiple scoring text indexes is not supported");
+
+    if (!bm25_assembly.score_dag)
+    {
+        if (!scoring_predicate_indexes.empty())
+        {
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Function bm25 requires the text-search predicate on the scoring text index '{}' "
+                "to be evaluated by the direct read from the text index, but it is evaluated row-wise in this query",
+                *scoring_predicate_indexes.begin());
+        }
+
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "Function bm25 requires a `hasToken`, `hasAnyTokens` or `hasAllTokens` predicate "
+            "on a column with a text index created with `enable_scoring = 1`");
+    }
+
+    /// The reader may prune by the top-k threshold only when the sort key is exactly the assembled score in
+    /// descending order: then every row it zero-fills computes to a score of 0 below the threshold and is
+    /// dropped by `__topKFilter`, whatever the match columns say.
+    TopKThresholdTrackerPtr pruning_tracker;
+    const auto & top_k_filter_info = read_from_merge_tree_step->getTopKFilterInfo();
+    const auto & settings = read_from_merge_tree_step->getContext()->getSettingsRef();
+
+    if (settings[Setting::text_index_bm25_pruning] && top_k_filter_info && top_k_filter_info->threshold_tracker && top_k_filter_info->direction == -1
+        && std::ranges::find(bm25_rewrite->result_names, top_k_filter_info->column_name) != bm25_rewrite->result_names.end())
+    {
+        pruning_tracker = top_k_filter_info->threshold_tracker;
+    }
+
+    LOG_TRACE(getLogger("optimizeDirectReadFromTextIndex"),
+        "BM25 score: index '{}', scoring predicates: {}, k1: {}, b: {}, top-k pruning: {}",
+        bm25_assembly.index_name, bm25_assembly.num_predicates, bm25_rewrite->params.k1, bm25_rewrite->params.b, pruning_tracker != nullptr);
+
+    read_from_merge_tree_step->attachTextIndexScoring(bm25_assembly.index_name, bm25_rewrite->params, std::move(bm25_assembly.pruning_coefficients), std::move(pruning_tracker));
+
+    substituteBM25InPrewhere(*read_from_merge_tree_step, bm25_assembly);
+
+    /// The steps of the walk take `bm25()` as an input of the step computing it, and their headers follow
+    /// the read step's, which the PREWHERE substitution may have reordered.
+    QueryPlan::Node * child = frame.node;
+    for (auto it = walk_begin; it != walk_end; ++it)
+    {
+        QueryPlan::Node * node = it->node;
+        IQueryPlanStep * step = node->step.get();
+        auto child_header = child->step->getOutputHeader();
+
+        auto * filter_step = typeid_cast<FilterStep *>(step);
+        auto * expression_step = typeid_cast<ExpressionStep *>(step);
+
+        if ((filter_step || expression_step) && replaceBM25NodesWithInputs(filter_step ? filter_step->getExpression() : expression_step->getExpression()))
+        {
+            if (filter_step)
+                node->step = std::make_unique<FilterStep>(child_header, filter_step->getExpression().clone(), filter_step->getFilterColumnName(), filter_step->removesFilterColumn());
+            else
+                node->step = std::make_unique<ExpressionStep>(child_header, expression_step->getExpression().clone());
+        }
+        else
+        {
+            size_t child_idx = std::ranges::find(node->children, child) - node->children.begin();
+            if (!blocksHaveEqualStructure(*step->getInputHeaders().at(child_idx), *child_header))
+                step->updateInputHeader(child_header, child_idx);
+        }
+
+        child = node;
+    }
+
+    /// Above the walk, refresh the input headers until the outputs stop changing.
+    for (auto it = walk_end; it != stack.rend(); ++it)
+    {
+        QueryPlan::Node * node = it->node;
+        size_t child_idx = std::ranges::find(node->children, child) - node->children.begin();
+        auto child_header = child->step->getOutputHeader();
+
+        if (blocksHaveEqualStructure(*node->step->getInputHeaders().at(child_idx), *child_header))
+            break;
+
+        auto old_output_header = node->step->getOutputHeader();
+        node->step->updateInputHeader(child_header, child_idx);
+
+        if (blocksHaveEqualStructure(*old_output_header, *node->step->getOutputHeader()))
+            break;
+
+        child = node;
+    }
 }
 
 }

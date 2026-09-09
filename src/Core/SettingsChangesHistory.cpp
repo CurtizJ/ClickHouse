@@ -43,7 +43,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.9",
         {
-            {"allow_experimental_bm25_score_column", false, false, "New setting to allow reading the `_bm25_score` virtual column filled by the direct read from a text index with `enable_scoring = 1`."},
+            {"allow_experimental_bm25_scoring", false, false, "New setting to allow the function `bm25` computed by the direct read from a text index with `enable_scoring = 1`."},
+            {"text_index_bm25_pruning", true, true, "New setting to let the text index reader skip marks and posting-list blocks below the top-k threshold of `ORDER BY bm25() DESC LIMIT n` queries."},
             {"cascades_aggregation_pushdown", false, true, "New setting to consider pushing partial aggregation below a join (eager aggregation) in the Cascades optimizer."},
             {"optimize_read_in_reverse_order_final", false, true, "New setting to enable the read-in-order optimization when reading in reverse order of the sorting key with the `FINAL` modifier from `ReplacingMergeTree` tables."},
             {"ast_fuzzer_oracle", false, false, "New setting to enable correctness oracle checks in the server-side AST fuzzer."},

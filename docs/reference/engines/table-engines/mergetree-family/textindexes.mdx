@@ -577,24 +577,30 @@ Set MergeTree setting [`allow_experimental_text_index_phrase_search`](/reference
 **Experimental: BM25 scoring argument (optional)**.
 
 Experimental parameter `enable_scoring` (default: `0`) controls whether the index stores BM25 scoring data.
-When set to `1`, the index additionally stores the exact per-row term frequencies (embedded into the posting lists) and the per-row document lengths (in a `.dl` file), which enable ranking search results with the [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) relevance score through the `_bm25_score` virtual column.
+When set to `1`, the index additionally stores the exact per-row term frequencies (embedded into the posting lists) and the per-row document lengths (in a `.dl` file), which enable ranking search results with the [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) relevance score through the function `bm25`.
 Such an index is written in the `v3_with_scoring` format regardless of the configured [`text_index_serialization_version`](/reference/settings/merge-tree-settings/text-index#text_index_serialization_version), because older formats cannot represent the scoring data.
 The argument requires a posting list codec (`posting_list_codec = 'bitpacking'`) and a tokenizer that supports scoring.
 Storing scoring data increases the on-disk size of the index and the write cost, so it is opt-in.
 The on-disk format is not yet stable, so this parameter is experimental and may change in a future release.
 Creating an index with `enable_scoring = 1` therefore requires the MergeTree setting [`allow_experimental_text_index_scoring`](/reference/settings/merge-tree-settings/allow-experimental) to be enabled.
 
-To read the `_bm25_score` virtual column, enable the setting `allow_experimental_bm25_score_column`.
+To compute the score, call `bm25()` (optionally `bm25(k1)` or `bm25(k1, b)`, defaults `k1 = 1.2`, `b = 0.75`) in the `SELECT` list or `ORDER BY` and enable the setting `allow_experimental_bm25_scoring`.
 The query must filter with `hasToken`, `hasAnyTokens` or `hasAllTokens` on the column of exactly one scoring-enabled text index, and the direct read from the text index ([`query_plan_direct_read_from_text_index`](/reference/settings/session-settings/query-plan#query_plan_direct_read_from_text_index)) must be enabled:
 
 ```sql
-SELECT id, _bm25_score
+SELECT id, bm25()
 FROM tab
 WHERE hasAnyTokens(str, ['consensus', 'raft'])
-ORDER BY _bm25_score DESC
+ORDER BY bm25() DESC
 LIMIT 10
-SETTINGS allow_experimental_bm25_score_column = 1;
+SETTINGS allow_experimental_bm25_scoring = 1;
 ```
+
+The score follows the boolean structure of the filter, as the `bool` query of Lucene and Elasticsearch does: every matching `hasToken`, `hasAnyTokens` or `hasAllTokens` predicate adds the BM25 score of its tokens (`hasAllTokens` adds it only when all its tokens are present), a conjunction adds the scores of its predicates only when the whole conjunction holds, and a predicate under `NOT`, a predicate on another column or a predicate wrapped into another function adds nothing.
+For example, for `WHERE hasAllTokens(str, ['consensus', 'raft']) OR hasToken(str, 'stream')` a row containing `stream` and `raft` but not `consensus` is scored for `stream` only.
+
+For `ORDER BY bm25() DESC LIMIT n` queries with the dynamic top-k filtering ([`use_top_k_dynamic_filtering`](/reference/settings/session-settings/use#use_top_k_dynamic_filtering)), the text index reader skips the decoding and scoring of the parts of the posting lists whose best possible score stays below the score of the n-th best row found so far (the setting `text_index_bm25_pruning`, enabled by default).
+The `EXPLAIN` of such a query shows the scoring text index, the number of scoring predicates, the parameters and whether the pruning is enabled in the `BM25 scoring` line of the `ReadFromMergeTree` step.
 
 <Warning>
 This argument is experimental and should only be used for testing.

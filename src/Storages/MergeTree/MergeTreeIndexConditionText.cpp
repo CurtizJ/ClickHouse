@@ -387,6 +387,19 @@ std::optional<String> MergeTreeIndexConditionText::replaceToVirtualColumn(const 
     return virtual_column_name;
 }
 
+String MergeTreeIndexConditionText::registerScoreVirtualColumn(const TextSearchQuery & query, const String & index_name)
+{
+    auto it = all_search_queries.find(query.getHash());
+    if (it == all_search_queries.end())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text search query {} is not a query of the text index condition", query.getFunctionName());
+
+    auto hash_str = getSipHash128AsHexString(query.getHash());
+    String virtual_column_name = fmt::format("{}{}_bm25_{}", TEXT_INDEX_VIRTUAL_COLUMN_PREFIX, index_name, hash_str);
+
+    virtual_column_to_search_query[virtual_column_name] = it->second;
+    return virtual_column_name;
+}
+
 TextSearchQueryPtr MergeTreeIndexConditionText::getSearchQueryForVirtualColumn(const String & column_name) const
 {
     auto it = virtual_column_to_search_query.find(column_name);

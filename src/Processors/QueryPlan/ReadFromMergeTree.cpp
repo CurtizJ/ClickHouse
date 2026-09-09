@@ -6,6 +6,7 @@
 #include <Storages/MergeTree/Streaming/Subscription/MergeTreeBoundsSubscription.h>
 #include <Storages/MergeTree/Streaming/MergeTreeCommitOrderSource.h>
 #include <Access/ContextAccess.h>
+#include <Analyzer/FunctionNode.h>
 #include <Analyzer/QueryNode.h>
 #include <Core/Names.h>
 #include <Core/ProtocolDefines.h>
@@ -2747,12 +2748,64 @@ void ReadFromMergeTree::addJoinRuntimeFilterIndexAnalysisOnDataRead(const String
         filter_id, column_name, is_primary_key_column, has_applicable_skip_index);
 }
 
+namespace
+{
+
+/// Whether the query fragment reading the table calls `bm25()`: the expressions of the query node
+/// (projection, ORDER BY, ...), excluding its join tree and the nested queries.
+bool queryFragmentUsesBM25(const QueryTreeNodePtr & query_tree)
+{
+    const auto * query_node = query_tree ? query_tree->as<QueryNode>() : nullptr;
+    if (!query_node)
+        return false;
+
+    std::vector<const IQueryTreeNode *> to_visit;
+    const auto * join_tree = query_node->getJoinTreeNode().get();
+    for (const auto & child : query_node->getChildren())
+    {
+        if (child && child.get() != join_tree)
+            to_visit.push_back(child.get());
+    }
+
+    while (!to_visit.empty())
+    {
+        const auto * node = to_visit.back();
+        to_visit.pop_back();
+
+        switch (node->getNodeType())
+        {
+            case QueryTreeNodeType::QUERY:
+            case QueryTreeNodeType::UNION:
+            case QueryTreeNodeType::TABLE:
+            case QueryTreeNodeType::TABLE_FUNCTION:
+            case QueryTreeNodeType::JOIN:
+            case QueryTreeNodeType::ARRAY_JOIN:
+                continue;
+            case QueryTreeNodeType::FUNCTION:
+                if (node->as<FunctionNode &>().getFunctionName() == "bm25")
+                    return true;
+                break;
+            default:
+                break;
+        }
+
+        for (const auto & child : node->getChildren())
+        {
+            if (child)
+                to_visit.push_back(child.get());
+        }
+    }
+
+    return false;
+}
+
+}
+
 void ReadFromMergeTree::buildIndexes(
     std::optional<ReadFromMergeTree::Indexes> & indexes,
     const ActionsDAG * filter_actions_dag_,
     const MergeTreeData & data,
     const RangesInDataParts & parts,
-    const Names & columns_to_read,
     [[maybe_unused]] const std::optional<VectorSearchParameters> & vector_search_parameters,
     [[maybe_unused]] const std::optional<TopKFilterInfo> top_k_filter_info,
     const ContextPtr & query_context,
@@ -2852,8 +2905,9 @@ void ReadFromMergeTree::buildIndexes(
 
     UsefulSkipIndexes skip_indexes;
 
-    /// A query reading the `_bm25_score` virtual column needs the term frequencies from the scoring text index.
-    const bool query_computes_bm25_score = std::ranges::find(columns_to_read, BM25ScoreColumn::name) != columns_to_read.end() && !metadata_snapshot->getColumns().has(BM25ScoreColumn::name);
+    /// A query computing `bm25()` needs the term frequencies from the scoring text index. The function is
+    /// replaced by the planner after index analysis, so the query tree is the only place to look for it.
+    const bool query_computes_bm25_score = queryFragmentUsesBM25(query_info_.query_tree);
 
     for (const auto & index : all_indexes)
     {
@@ -3174,7 +3228,6 @@ void ReadFromMergeTree::applyFilters(ActionDAGNodes added_filter_nodes)
             index_filter_dag,
             data,
             getParts(),
-            all_column_names,
             vector_search_parameters,
             top_k_filter_info,
             context,
@@ -3312,7 +3365,6 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             query_info_.filter_actions_dag.get(),
             data,
             parts,
-            all_column_names,
             vector_search_parameters,
             top_k_filter_info,
             context_,
@@ -4765,29 +4817,14 @@ size_t ReadFromMergeTree::getNumStreamsWhenNothingToRead(const AnalysisResult & 
 
 void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[maybe_unused]] const BuildQueryPipelineSettings & settings)
 {
-    /// The `_bm25_score` virtual column is filled only by the text index reader.
-    /// Without a read task carrying it, it would be silently zero-filled. Reject such reads on any table.
-    if (std::ranges::find(all_column_names, BM25ScoreColumn::name) != all_column_names.end() && !storage_snapshot->metadata->getColumns().has(BM25ScoreColumn::name))
-    {
-        bool attached = std::ranges::any_of(index_read_tasks, [](const auto & task) { return task.second.columns.contains(BM25ScoreColumn::name); });
-
-        if (!attached && !context->getSettingsRef()[Setting::asterisk_include_virtual_columns])
-        {
-            throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                "The '{}' virtual column requires a `hasToken`, `hasAnyTokens` or `hasAllTokens` predicate "
-                "on a column with a text index created with `enable_scoring = 1`",
-                BM25ScoreColumn::name);
-        }
-    }
-
     auto & result = getAnalysisResult();
 
-    /// Prepare the query-global BM25 state for `_bm25_score`.
+    /// Prepare the query-global BM25 state for `bm25()`.
     /// The statistics are collected from the whole part snapshot
     /// the step was created with (`prepared_parts`), before any pruning.
     auto bm25_score_task_it = std::ranges::find_if(index_read_tasks, [](const auto & task)
     {
-        return task.second.columns.contains(BM25ScoreColumn::name);
+        return task.second.bm25_params.has_value();
     });
 
     if (bm25_score_task_it != index_read_tasks.end())
@@ -4803,10 +4840,10 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
             if (part->hasLightweightDelete() || (mutations_snapshot && !mutations_snapshot->getPatchesForPart(part).empty()))
             {
                 throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                    "Cannot compute the '{}' virtual column: part '{}' has rows hidden by a lightweight DELETE "
+                    "Cannot compute bm25(): part '{}' has rows hidden by a lightweight DELETE "
                     "or modified by pending lightweight updates, so the BM25 statistics of the text index would be stale. "
                     "Run 'ALTER TABLE ... APPLY DELETED MASK' or 'OPTIMIZE TABLE ... FINAL' first",
-                    BM25ScoreColumn::name, part->name);
+                    part->name);
             }
         }
 
@@ -5433,6 +5470,17 @@ void ReadFromMergeTree::describeActions(FormatSettings & format_settings) const
     if (output_each_partition_through_separate_port)
         format_settings.out << prefix << "Read each partition through separate port: 1\n";
 
+    for (const auto & [index_name, index_task] : index_read_tasks)
+    {
+        if (!index_task.bm25_params)
+            continue;
+
+        format_settings.out << prefix << "BM25 scoring: index " << index_name
+            << ", scoring predicates: " << std::ranges::count_if(index_task.columns, [](const auto & column) { return WhichDataType(column.type).isFloat32(); })
+            << ", k1: " << index_task.bm25_params->k1 << ", b: " << index_task.bm25_params->b
+            << ", top-k pruning: " << (index_task.bm25_threshold_tracker ? 1 : 0) << '\n';
+    }
+
     if (format_settings.pretty)
         QueryPlanFormat::formatOutputColumns(format_settings.pretty_names, format_settings.out, *this, prefix);
 
@@ -5555,6 +5603,20 @@ void ReadFromMergeTree::describeActions(JSONBuilder::JSONMap & map) const
 
     if (output_each_partition_through_separate_port)
         map.add("Read each partition through separate port", true);
+
+    for (const auto & [index_name, index_task] : index_read_tasks)
+    {
+        if (!index_task.bm25_params)
+            continue;
+
+        auto bm25_map = std::make_unique<JSONBuilder::JSONMap>();
+        bm25_map->add("Index", index_name);
+        bm25_map->add("Scoring predicates", std::ranges::count_if(index_task.columns, [](const auto & column) { return WhichDataType(column.type).isFloat32(); }));
+        bm25_map->add("k1", index_task.bm25_params->k1);
+        bm25_map->add("b", index_task.bm25_params->b);
+        bm25_map->add("Top-k pruning", index_task.bm25_threshold_tracker != nullptr);
+        map.add("BM25 scoring", std::move(bm25_map));
+    }
 
     std::unique_ptr<JSONBuilder::JSONMap> prewhere_info_map;
     if (query_info.prewhere_info || query_info.row_level_filter)
@@ -5959,7 +6021,12 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
             /// Create tasks for text indexes which don't read virtual columns.
             /// It's required to always read text indexes on separate step on data read.
             if (!index_read_tasks.contains(index.index->index.name))
-                index_read_tasks.emplace(index.index->index.name, IndexReadTask{.columns = {}, .index = index, .is_final = is_final, .bm25_score_state = nullptr});
+            {
+                IndexReadTask index_task;
+                index_task.index = index;
+                index_task.is_final = is_final;
+                index_read_tasks.emplace(index.index->index.name, std::move(index_task));
+            }
         }
     }
 
@@ -5981,40 +6048,27 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
     required_source_columns = all_column_names;
 }
 
-void ReadFromMergeTree::attachTextIndexScoreColumn(const String & index_name)
+void ReadFromMergeTree::attachTextIndexScoring(
+    const String & index_name,
+    const BM25Params & params,
+    std::unordered_map<String, UInt32> pruning_coefficients,
+    TopKThresholdTrackerPtr threshold_tracker)
 {
     auto it = index_read_tasks.find(index_name);
     if (it == index_read_tasks.end())
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Text index '{}' has no read task to attach the '{}' column to",
-            index_name, BM25ScoreColumn::name);
-    }
-
-    if (std::ranges::find(all_column_names, BM25ScoreColumn::name) == all_column_names.end())
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Column '{}' is not read by this step, nothing to attach to the text index '{}'",
-            BM25ScoreColumn::name, index_name);
-    }
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index '{}' has no read task to attach the BM25 scoring to", index_name);
 
     auto & index_task = it->second;
-    if (index_task.columns.contains(BM25ScoreColumn::name))
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Column '{}' is already attached to the read task of the text index '{}'",
-            BM25ScoreColumn::name, index_name);
-    }
+    if (index_task.bm25_params)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "BM25 scoring is already attached to the read task of the text index '{}'", index_name);
 
     const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*index_task.index.condition_template->generateUnsubstituted());
     if (!condition_text.isScoringEnabled())
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Text index '{}' has no scoring enabled on its condition, cannot attach the '{}' column",
-            index_name, BM25ScoreColumn::name);
-    }
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index '{}' has no scoring enabled on its condition, cannot attach the BM25 scoring", index_name);
 
-    index_task.columns.emplace_back(BM25ScoreColumn::name, BM25ScoreColumn::type);
+    index_task.bm25_params = params;
+    index_task.bm25_pruning_coefficients = std::move(pruning_coefficients);
+    index_task.bm25_threshold_tracker = std::move(threshold_tracker);
 }
 
 void ReadFromMergeTree::setTopKColumn(const TopKFilterInfo & top_k_filter_info_)

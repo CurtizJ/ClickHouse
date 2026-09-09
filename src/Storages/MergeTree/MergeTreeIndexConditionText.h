@@ -120,10 +120,14 @@ public:
     bool canAnswerFunctionNode(const ActionsDAG::Node & node) const;
     /// Returns generated virtual column name for the replacement of related function node.
     std::optional<String> replaceToVirtualColumn(const TextSearchQuery & query, const String & index_name);
+    /// Returns the name of the BM25 score virtual column of the query (`__text_index_<index>_bm25_<hash>`),
+    /// registering it for `getSearchQueryForVirtualColumn`. The reader fills it with the query's score
+    /// for the rows the query matches and 0 elsewhere.
+    String registerScoreVirtualColumn(const TextSearchQuery & query, const String & index_name);
     TextSearchQueryPtr getSearchQueryForVirtualColumn(const String & column_name) const;
 
-    /// Tokens contributing to the `_bm25_score` virtual column: the sorted,
-    /// deduplicated union of the tokens of the hasToken / hasAnyTokens / hasAllTokens conditions.
+    /// Tokens whose statistics BM25 scoring needs: the sorted, deduplicated union
+    /// of the tokens of the hasToken / hasAnyTokens / hasAllTokens conditions.
     std::vector<String> getScoringTokens() const;
     bool isScoringEnabled() const { return scoring_enabled; }
 
@@ -234,7 +238,7 @@ private:
     bool has_postprocessor;
     /// Whether the index has position data for phrase queries.
     bool has_positions = false;
-    /// Whether the query computes `_bm25_score` with this index.
+    /// Whether the query computes `bm25()` with this index.
     bool scoring_enabled = false;
     /// Cache for tokens and their infos (cardinality, etc.)
     TextIndexTokensCachePtr tokens_cache;

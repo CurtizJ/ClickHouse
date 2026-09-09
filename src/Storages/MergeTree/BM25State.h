@@ -7,6 +7,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace DB
@@ -21,7 +22,10 @@ class MergeTreeIndexConditionText;
 /// Query-global BM25 state shared by all read tasks and threads of one query.
 struct BM25State
 {
+    BM25Params params;
     std::shared_ptr<const BM25LengthNormCache> length_norm_cache;
+    /// Sorted by token. The weights are per distinct token; the pruning coefficients count the
+    /// scoring predicates of the query that contain the token (0 for tokens outside the score expression).
     std::vector<BM25ScoringToken> tokens;
 };
 
@@ -31,7 +35,10 @@ using BM25StatePtr = std::shared_ptr<const BM25State>;
 class BM25GlobalStatsBuilder
 {
 public:
-    explicit BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_);
+    BM25GlobalStatsBuilder(
+        MergeTreeIndexWithCondition index_with_condition_,
+        BM25Params params_,
+        const std::unordered_map<String, UInt32> & pruning_coefficients_);
 
     void addPart(const DataPartPtr & part, const MergeTreeReaderSettings & reader_settings);
     BM25StatePtr build() const;
@@ -40,7 +47,10 @@ private:
     MergeTreeIndexWithCondition index_with_condition;
     const MergeTreeIndexText * text_index;
     const MergeTreeIndexConditionText * condition_text;
+    BM25Params params;
     std::vector<String> scoring_token_names;
+    /// Parallel to `scoring_token_names`.
+    std::vector<UInt32> pruning_coefficients;
 
     std::atomic<UInt64> num_docs{0};
     std::atomic<UInt64> sum_doc_length{0};
@@ -54,7 +64,7 @@ using IndexReadTasks = std::map<String, IndexReadTask>;
 
 /// Builds the query-global BM25 state (IDF, average document length) for calculating the BM25 score.
 /// Runs one parallel pass over the parts' text-index granules.
-/// Returns null when no index read task carries the score column.
+/// Returns null when no index read task computes `bm25()`.
 BM25StatePtr buildBM25State(
     const RangesInDataParts & parts_ranges,
     const IndexReadTasks & index_read_tasks,

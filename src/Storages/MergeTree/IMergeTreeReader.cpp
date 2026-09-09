@@ -153,11 +153,7 @@ void IMergeTreeReader::fillVirtualColumns(Columns & columns, size_t rows) const
 
         Field field;
 
-        /// The `_bm25_score` column is filled by the text index reader when a scoring
-        /// read task is attached; without one the relevance of every row is zero.
-        if (it->name == BM25ScoreColumn::name)
-            field = Float32(0);
-        else if (auto field_it = virtual_fields.find(it->name); field_it != virtual_fields.end())
+        if (auto field_it = virtual_fields.find(it->name); field_it != virtual_fields.end())
             field = field_it->second;
         else
             field = getFieldForConstVirtualColumn(it->name, *data_part);
@@ -705,15 +701,21 @@ MergeTreeReaderPtr createMergeTreeReader(
 
 MergeTreeReaderPtr createMergeTreeReaderIndex(
     const IMergeTreeReader * main_reader,
-    const MergeTreeIndexWithCondition & index,
+    const IndexReadTask & index_read_task,
     const NamesAndTypesList & columns_to_read,
-    const IndexGranulesMap & index_granules,
-    BM25StatePtr bm25_score_state)
+    const IndexGranulesMap & index_granules)
 {
+    const auto & index = index_read_task.index;
     if (index.index->index.type == "text")
     {
         auto it = index_granules.find(index.index->index.name);
-        return createMergeTreeReaderTextIndex(main_reader, index, columns_to_read, it != index_granules.end() ? it->second : nullptr, std::move(bm25_score_state));
+        return createMergeTreeReaderTextIndex(
+            main_reader,
+            index,
+            columns_to_read,
+            it != index_granules.end() ? it->second : nullptr,
+            index_read_task.bm25_score_state,
+            index_read_task.bm25_threshold_tracker);
     }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot create reader for index with type {}", index.index->index.type);

@@ -1,7 +1,7 @@
 -- Tags: no-parallel-replicas
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 SET use_top_k_dynamic_filtering = 1;
@@ -43,49 +43,61 @@ INSERT INTO tab_bm25_topk VALUES
 -- The dynamic top-K prewhere and the direct read from the text index must both apply to the same plan.
 SELECT 'top-K dynamic filter applied', count() > 0 FROM
 (
-    EXPLAIN actions = 1 SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score DESC, id LIMIT 3
+    EXPLAIN actions = 1 SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() DESC, id LIMIT 3
 )
-WHERE explain LIKE '%__topKFilter(_bm25_score)%';
+WHERE explain LIKE '%__topKFilter(__text_index_idx_body_bm25_%';
 
 SELECT 'direct read applied', count() > 0 FROM
 (
-    EXPLAIN actions = 1 SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score DESC, id LIMIT 3
+    EXPLAIN actions = 1 SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() DESC, id LIMIT 3
 )
 WHERE explain LIKE '%__text_index_idx_body_hasAnyTokens%';
 
+SELECT 'reader pruning enabled for the descending score key', count() > 0 FROM
+(
+    EXPLAIN actions = 1 SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() DESC, id LIMIT 3
+)
+WHERE explain LIKE '%BM25 scoring: index idx_body, scoring predicates: 1, k1: 1.2, b: 0.75, top-k pruning: 1%';
+
+SELECT 'reader pruning disabled for the ascending score key', count() > 0 FROM
+(
+    EXPLAIN actions = 1 SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() ASC, id LIMIT 3
+)
+WHERE explain LIKE '%top-k pruning: 0%';
+
 SELECT 'results desc';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score DESC, id LIMIT 3;
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() DESC, id LIMIT 3;
 
 SELECT 'results desc reference';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score DESC, id LIMIT 3
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() DESC, id LIMIT 3
 SETTINGS use_top_k_dynamic_filtering = 0, use_skip_indexes_for_top_k = 0;
 
 SELECT 'results asc';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score ASC, id LIMIT 3;
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() ASC, id LIMIT 3;
 
 SELECT 'results asc reference';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY _bm25_score ASC, id LIMIT 3
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY bm25() ASC, id LIMIT 3
 SETTINGS use_top_k_dynamic_filtering = 0, use_skip_indexes_for_top_k = 0;
 
 SELECT 'results with extra condition';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') AND id % 2 = 1 ORDER BY _bm25_score DESC, id LIMIT 3;
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') AND id % 2 = 1 ORDER BY bm25() DESC, id LIMIT 3;
 
 SELECT 'results with extra condition reference';
-SELECT id, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') AND id % 2 = 1 ORDER BY _bm25_score DESC, id LIMIT 3
+SELECT id, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') AND id % 2 = 1 ORDER BY bm25() DESC, id LIMIT 3
 SETTINGS use_top_k_dynamic_filtering = 0, use_skip_indexes_for_top_k = 0;
 
 -- Sorting by another column while reading the score: the dynamic filter applies to that column.
 SELECT 'top-K on other sort column applied', count() > 0 FROM
 (
-    EXPLAIN actions = 1 SELECT id, price, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3
+    EXPLAIN actions = 1 SELECT id, price, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3
 )
 WHERE explain LIKE '%__topKFilter(price)%';
 
 SELECT 'results other sort column';
-SELECT id, price, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3;
+SELECT id, price, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3;
 
 SELECT 'results other sort column reference';
-SELECT id, price, round(_bm25_score, 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3
+SELECT id, price, round(bm25(), 4) FROM tab_bm25_topk WHERE hasAnyTokens(body, 'raft consensus') ORDER BY price DESC, id LIMIT 3
 SETTINGS use_top_k_dynamic_filtering = 0, use_skip_indexes_for_top_k = 0;
 
 DROP TABLE tab_bm25_topk;

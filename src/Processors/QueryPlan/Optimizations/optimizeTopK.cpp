@@ -120,37 +120,60 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
     const bool where_clause
         = filter_step || read_from_mergetree_step->getPrewhereInfo() || read_from_mergetree_step->getRowLevelFilter();
 
-    ///remove alias
-    if (sort_column_name.contains('.'))
+    /// `ORDER BY bm25() DESC`: the sort key is the planner placeholder `bm25()`, computed above the read step.
+    /// The dynamic filter gets a placeholder `__topKFilter(bm25())` PREWHERE, and the direct read from the text
+    /// index later replaces `bm25()` in it by the score expression over the columns of the text index reader.
+    const ActionsDAG::Node * bm25_node = nullptr;
+    if (expression_step || filter_step)
     {
-        if (!expression_step && !filter_step)
-            return 0;
+        /// The step right below the sorting computes the sort key.
+        const ActionsDAG & dag = expression_step ? expression_step->getExpression() : filter_step->getExpression();
+        const auto * column_node = dag.tryFindInOutputs(sort_column_name);
 
-        const ActionsDAG::Node * column_node = nullptr;
-        if (filter_step)
-            column_node = filter_step->getExpression().tryFindInOutputs(sort_column_name);
-        else
-            column_node = expression_step->getExpression().tryFindInOutputs(sort_column_name);
+        while (column_node && column_node->type == ActionsDAG::ActionType::ALIAS)
+            column_node = column_node->children.at(0);
 
-        if (unlikely(!column_node))
-            return 0;
-
-        if (column_node->type == ActionsDAG::ActionType::ALIAS)
+        if (column_node && column_node->type == ActionsDAG::ActionType::FUNCTION && column_node->function_base && column_node->function_base->getName() == "bm25")
         {
-            sort_column_name = column_node->children.at(0)->result_name;
-        }
-        else
-        {
-            LOG_DEBUG(getLogger("optimizeTopK"), "Could not resolve column alias {} {}", sort_column_name, column_node->type);
-            return 0;
+            bm25_node = column_node;
+            sort_column_name = column_node->result_name;
         }
     }
 
-    const auto & read_columns = read_from_mergetree_step->getAllColumnNames();
-    if (std::find(read_columns.begin(), read_columns.end(), sort_column_name) == read_columns.end())
+    if (!bm25_node)
     {
-        LOG_DEBUG(getLogger("optimizeTopK"), "Could not find column {} in ReadFromMergeTreeStep", sort_column_name);
-        return 0;
+        ///remove alias
+        if (sort_column_name.contains('.'))
+        {
+            if (!expression_step && !filter_step)
+                return 0;
+
+            const ActionsDAG::Node * column_node = nullptr;
+            if (filter_step)
+                column_node = filter_step->getExpression().tryFindInOutputs(sort_column_name);
+            else
+                column_node = expression_step->getExpression().tryFindInOutputs(sort_column_name);
+
+            if (unlikely(!column_node))
+                return 0;
+
+            if (column_node->type == ActionsDAG::ActionType::ALIAS)
+            {
+                sort_column_name = column_node->children.at(0)->result_name;
+            }
+            else
+            {
+                LOG_DEBUG(getLogger("optimizeTopK"), "Could not resolve column alias {} {}", sort_column_name, column_node->type);
+                return 0;
+            }
+        }
+
+        const auto & read_columns = read_from_mergetree_step->getAllColumnNames();
+        if (std::find(read_columns.begin(), read_columns.end(), sort_column_name) == read_columns.end())
+        {
+            LOG_DEBUG(getLogger("optimizeTopK"), "Could not find column {} in ReadFromMergeTreeStep", sort_column_name);
+            return 0;
+        }
     }
 
     TopKThresholdTrackerPtr threshold_tracker = nullptr;
@@ -168,6 +191,7 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
 
     bool use_skip_index = settings.use_skip_indexes_for_top_k
         && skip_index_type_eligible
+        && !bm25_node
         && read_from_mergetree_step->isSkipIndexAvailableForTopK(sort_column_name);
 
     /// Dynamic and Variant columns cannot be reliably filtered: their lessOrEquals
@@ -217,14 +241,26 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
     if (use_dynamic_filtering)
     {
         auto new_prewhere_info = std::make_shared<PrewhereInfo>();
-        NameAndTypePair sort_column_name_and_type(sort_column_name, sort_column.type);
-        new_prewhere_info->prewhere_actions = ActionsDAG({sort_column_name_and_type});
+        const ActionsDAG::Node * filter_argument = nullptr;
+
+        if (bm25_node)
+        {
+            /// The placeholder has no inputs until the text index pass substitutes it.
+            new_prewhere_info->prewhere_actions = ActionsDAG::cloneSubDAG({bm25_node}, /*remove_aliases=*/ true);
+            filter_argument = new_prewhere_info->prewhere_actions.getOutputs().front();
+            new_prewhere_info->prewhere_actions.getOutputs().clear();
+        }
+        else
+        {
+            NameAndTypePair sort_column_name_and_type(sort_column_name, sort_column.type);
+            new_prewhere_info->prewhere_actions = ActionsDAG({sort_column_name_and_type});
+            filter_argument = new_prewhere_info->prewhere_actions.getInputs().front();
+        }
 
         /// Cannot use get() because need to pass an argument to constructor
         /// auto filter_function = FunctionFactory::instance().get("__topKFilter",nullptr);
         auto filter_function =  DB::createInternalFunctionTopKFilterResolver(threshold_tracker);
-        const auto & prewhere_node = new_prewhere_info->prewhere_actions.addFunction(
-                filter_function, {new_prewhere_info->prewhere_actions.getInputs().front()}, {});
+        const auto & prewhere_node = new_prewhere_info->prewhere_actions.addFunction(filter_function, {filter_argument}, {});
         new_prewhere_info->prewhere_actions.getOutputs().push_back(&prewhere_node);
         new_prewhere_info->prewhere_column_name = prewhere_node.result_name;
         new_prewhere_info->remove_prewhere_column = true;

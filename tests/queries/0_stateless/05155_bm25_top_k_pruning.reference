@@ -1,0 +1,114 @@
+7
+-- rare OR common, k = 1
+7	5.6474
+7	5.6474
+7	5.6474
+-- rare OR common, k = 5 with ties exactly at the k-th score
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+-- rare OR common, k larger than the number of rare rows (the threshold ends up among the common rows)
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+10007	5.6474
+12007	5.6474
+4	0.2549
+8	0.2549
+12	0.2549
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+10007	5.6474
+12007	5.6474
+4	0.2549
+8	0.2549
+12	0.2549
+7	5.6474
+2007	5.6474
+4007	5.6474
+6007	5.6474
+8007	5.6474
+10007	5.6474
+12007	5.6474
+4	0.2549
+8	0.2549
+12	0.2549
+-- hasAllTokens(rare, mid) OR common
+7	9.0546
+2007	9.0546
+4007	9.0546
+7	9.0546
+2007	9.0546
+4007	9.0546
+7	9.0546
+2007	9.0546
+4007	9.0546
+-- rare OR NOT mid: the rows kept only by the negation score 0 and never enter the top-k
+7	5.482
+2007	5.482
+4007	5.482
+7	5.482
+2007	5.482
+4007	5.482
+7	5.482
+2007	5.482
+4007	5.482
+-- rare OR price < 3: the rows kept only by the non-text predicate score 0
+7	5.482
+2007	5.482
+4007	5.482
+7	5.482
+2007	5.482
+4007	5.482
+7	5.482
+2007	5.482
+4007	5.482
+-- (rare AND price > 5) OR common: a masked conjunction
+7	5.6474
+2007	5.6474
+4007	5.6474
+7	5.6474
+2007	5.6474
+4007	5.6474
+7	5.6474
+2007	5.6474
+4007	5.6474
+-- keys that are not the descending score: no pruning, same results
+7	5.6474
+2007	5.6474
+4007	5.6474
+7	5.6474
+2007	5.6474
+4007	5.6474
+107	0.1778
+207	0.1778
+307	0.1778
+107	0.1778
+207	0.1778
+307	0.1778
+-- pruning counters: marks are pruned whenever the key is the descending score; windows only inside marks the multi-segment token `common` shares with a surviving row
+bm25_prune_all_or_common	1	1
+bm25_prune_ascending_key	0	0
+bm25_prune_expression_key	0	0
+bm25_prune_masked_and	1	1
+bm25_prune_rare_or_common_k1	1	1
+bm25_prune_rare_or_common_k5	1	1
+bm25_prune_rare_or_not_mid	1	0
+bm25_prune_rare_or_price	1	0

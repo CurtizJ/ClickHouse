@@ -66,6 +66,9 @@ struct BM25ScoringToken
 {
     String token;
     BM25Weight weight;
+    /// Number of scoring predicates of the assembled `bm25()` expression that contain the token:
+    /// the multiplier of the token's block-max bound in the top-k pruning bound of the text index reader.
+    UInt32 pruning_coefficient = 0;
 };
 
 }

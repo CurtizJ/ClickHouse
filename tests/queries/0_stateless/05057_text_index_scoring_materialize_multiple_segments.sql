@@ -5,7 +5,7 @@
 -- only, while its row ids stay absolute within the part.
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 SET mutations_sync = 2;
@@ -76,12 +76,12 @@ SELECT '-- scores over the materialized index match the index built at insert ti
 SELECT count(), countIf(abs(mat.score - ref.score) > 1e-6)
 FROM
 (
-    SELECT id, _bm25_score AS score FROM tab_mat_scoring
+    SELECT id, bm25() AS score FROM tab_mat_scoring
     WHERE hasAnyTokens(s, ['freq7', 'mid123', 'filler'])
 ) AS mat
 INNER JOIN
 (
-    SELECT id, _bm25_score AS score FROM tab_mat_scoring_ref
+    SELECT id, bm25() AS score FROM tab_mat_scoring_ref
     WHERE hasAnyTokens(s, ['freq7', 'mid123', 'filler'])
 ) AS ref ON mat.id = ref.id;
 
@@ -89,11 +89,11 @@ SELECT '-- top-k with dynamic filtering uses the block-max metadata of the mater
 SET use_top_k_dynamic_filtering = 1;
 SET query_plan_max_limit_for_top_k_optimization = 1000;
 
-SELECT id, round(_bm25_score, 6) FROM tab_mat_scoring
-WHERE hasToken(s, 'freq7') ORDER BY _bm25_score DESC, id LIMIT 5;
+SELECT id, round(bm25(), 6) FROM tab_mat_scoring
+WHERE hasToken(s, 'freq7') ORDER BY bm25() DESC, id LIMIT 5;
 
-SELECT id, round(_bm25_score, 6) FROM tab_mat_scoring_ref
-WHERE hasToken(s, 'freq7') ORDER BY _bm25_score DESC, id LIMIT 5;
+SELECT id, round(bm25(), 6) FROM tab_mat_scoring_ref
+WHERE hasToken(s, 'freq7') ORDER BY bm25() DESC, id LIMIT 5;
 
 DROP TABLE tab_mat_scoring;
 DROP TABLE tab_mat_scoring_ref;

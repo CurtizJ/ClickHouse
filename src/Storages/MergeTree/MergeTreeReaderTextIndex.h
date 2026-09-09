@@ -10,6 +10,7 @@
 #include <Storages/MergeTree/BM25State.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
 #include <Interpreters/ExpressionActions.h>
+#include <Processors/TopKThresholdTracker.h>
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -30,8 +31,13 @@ using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<
 ///
 /// E.g. `__text_index_<name>_hasToken` column created for `hasToken` function.
 ///
-/// It also fills the `_bm25_score` virtual column (the BM25 relevance score) when the query reads it:
-/// per-row scores are summed from posting-list scoring cursors over the query's scoring tokens.
+/// It also fills the BM25 score virtual columns (`__text_index_<name>_bm25_<hash>`, `Float32`) of the
+/// scoring predicates of a query computing `bm25()`: the BM25 score of the predicate's tokens for the
+/// rows the predicate matches and 0 elsewhere. The planner assembles `bm25()` from these columns.
+///
+/// For `ORDER BY bm25() DESC LIMIT n` the reader receives the top-k threshold: marks and block-aligned
+/// windows whose block-max score bound stays below it are zero-filled without decoding the postings.
+/// The rows are then dropped by the `__topKFilter` PREWHERE, which sees a score of exactly 0 for them.
 class MergeTreeReaderTextIndex : public IMergeTreeReader
 {
 public:
@@ -40,7 +46,8 @@ public:
         MergeTreeIndexWithCondition index_,
         NamesAndTypesList columns_,
         MergeTreeIndexGranulePtr index_granule_,
-        BM25StatePtr bm25_score_state_);
+        BM25StatePtr bm25_score_state_,
+        TopKThresholdTrackerPtr bm25_threshold_tracker_);
 
     size_t readRows(
         size_t from_mark,
@@ -96,11 +103,27 @@ private:
 
     PostingListCursorPtr makeLazyCursor(std::string_view token, const TokenPostingsInfo & token_info);
 
-    /// Fills the `_bm25_score` column for rows [row_offset, row_offset + num_rows).
-    void fillColumnScores(IColumn & column, size_t row_offset, size_t num_rows);
+    /// Fills all columns for rows [row_offset, row_offset + num_rows) of `mark` from the index.
+    /// `fallback_offset` is the position of `row_offset` in `fallback_block`.
+    void fillRows(MutableColumns & res_columns, size_t mark, size_t row_offset, size_t num_rows, const Block & fallback_block, size_t fallback_offset);
+    /// Appends `num_rows` zeros (no match, zero score) to all columns.
+    void fillZeroRows(MutableColumns & res_columns, size_t num_rows) const;
 
-    /// Builds one scoring cursor per scoring token present in this part (see `score_cursors`).
-    void initializeScoreCursors();
+    /// Fills the score column `column_idx` for rows [row_offset, row_offset + num_rows).
+    void fillColumnScores(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows);
+
+    /// Builds the scoring cursors of every score column and the pruning cursors (see `score_leaves`, `bound_cursors`).
+    void initializeScoreLeaves();
+    std::shared_ptr<PostingListScoringCursor> makeScoringCursor(const String & token, const TokenPostingsInfo & token_info);
+
+    /// The top-k threshold when the reader may prune by it: the tracker is set and the threshold is positive.
+    std::optional<Float64> getPruningThreshold() const;
+    /// Upper bound of the assembled `bm25()` of any row of [begin, end): the sum over the pruning tokens
+    /// of their block-max bound times their coefficient. Requires the doc lengths of the range to be resident.
+    Float64 scoreUpperBound(size_t begin, size_t end);
+    /// End of the pruning window that starts at `begin` inside the mark ending at `mark_end`: the nearest
+    /// block end among the pruning cursors, where the bound can change.
+    size_t nextPruningWindowEnd(size_t begin, size_t mark_end);
 
     /// Fills a phrase virtual column from positional data (.pos), computing matching documents
     /// via phrase intersection (cached per granule).
@@ -175,13 +198,37 @@ private:
 
     /// Query-global BM25 state (statistics and per-token weights); null when the query reads no scores.
     BM25StatePtr bm25_score_state;
+    /// Threshold of `ORDER BY bm25() DESC LIMIT n`; null when the reader must not prune by it.
+    TopKThresholdTrackerPtr bm25_threshold_tracker;
 
-    /// One scoring cursor per scoring token present in this part's dictionary, sorted by ascending cardinality.
-    std::vector<ScoreCursor> score_cursors;
+    /// Per column: true for a BM25 score column, false for a match column.
+    std::vector<bool> is_score_column;
+    bool has_score_columns = false;
 
-    bool score_cursors_initialized = false;
-    /// True when every scoring token is present in this part.
-    bool score_all_tokens_present = false;
+    /// Scoring state of one score column (one scoring predicate of the query).
+    struct ScoreLeaf
+    {
+        /// One cursor per distinct token of the predicate present in this part, sorted by ascending cardinality.
+        std::vector<ScoreCursor> cursors;
+        /// `hasAllTokens` uses the intersection scorer, `hasToken` / `hasAnyTokens` the union scorer.
+        bool intersect = false;
+        /// False when the predicate matches no row of the part (a required token is absent): the column stays 0.
+        bool can_match = false;
+    };
+
+    /// A token of the pruning bound present in this part. The cursor belongs to a leaf; the bound
+    /// queries do not move it.
+    struct BoundCursor
+    {
+        PostingListScoringCursor * cursor = nullptr;
+        const BM25Weight * weight = nullptr;
+        UInt32 coefficient = 0;
+    };
+
+    /// Parallel to `columns_to_read`; empty for match columns.
+    std::vector<ScoreLeaf> score_leaves;
+    std::vector<BoundCursor> bound_cursors;
+    bool score_leaves_initialized = false;
     /// The part's `.dl` doc-length cursor.
     std::shared_ptr<DocLengthsCursor> score_doc_lengths;
 };
@@ -191,6 +238,7 @@ MergeTreeReaderPtr createMergeTreeReaderTextIndex(
     const MergeTreeIndexWithCondition & index,
     const NamesAndTypesList & columns_to_read,
     MergeTreeIndexGranulePtr index_granule,
-    BM25StatePtr bm25_score_state);
+    BM25StatePtr bm25_score_state,
+    TopKThresholdTrackerPtr bm25_threshold_tracker);
 
 }

@@ -139,31 +139,32 @@ void PostingListCursor::prepareSegment(size_t segment_idx)
     if (is_embedded)
         return;
 
-    chassert(segment_idx < total_segments);
-
-    /// Obtain the decoded segment, sharing it via the cache (keyed by index id + segment offset) when one
-    /// is configured so it is parsed once; either way it is shared_ptr-held for the cursor's lifetime.
-    if (!postings_cache)
-    {
-        current_segment = std::make_shared<PostingListSegment>(buildPostingSegment(segment_idx));
-    }
-    else
-    {
-        UInt64 segment_file_offset = info->offsets[segment_idx];
-        auto key = TextIndexPostingsCache::hash(index_id_for_cache, segment_file_offset, static_cast<UInt8>(TextIndexPostingsCacheKind::Segment));
-
-        auto cell = postings_cache->getOrSet(key, [&]
-        {
-            return std::make_shared<TextIndexPostingsCacheCell>(std::make_shared<PostingListSegment>(buildPostingSegment(segment_idx)));
-        });
-
-        current_segment = std::get<PostingListSegmentPtr>(cell->value);
-    }
+    current_segment = loadSegment(segment_idx);
 
     last_decoded_doc_id = current_segment->first_row_id;
     current_block = 0;
     decoded_count = 0;
     index = 0;
+}
+
+PostingListSegmentPtr PostingListCursor::loadSegment(size_t segment_idx)
+{
+    chassert(!is_embedded && segment_idx < total_segments);
+
+    /// Obtain the decoded segment, sharing it via the cache (keyed by index id + segment offset) when one
+    /// is configured so it is parsed once; either way it is shared_ptr-held for the cursor's lifetime.
+    if (!postings_cache)
+        return std::make_shared<PostingListSegment>(buildPostingSegment(segment_idx));
+
+    UInt64 segment_file_offset = info->offsets[segment_idx];
+    auto key = TextIndexPostingsCache::hash(index_id_for_cache, segment_file_offset, static_cast<UInt8>(TextIndexPostingsCacheKind::Segment));
+
+    auto cell = postings_cache->getOrSet(key, [&]
+    {
+        return std::make_shared<TextIndexPostingsCacheCell>(std::make_shared<PostingListSegment>(buildPostingSegment(segment_idx)));
+    });
+
+    return std::get<PostingListSegmentPtr>(cell->value);
 }
 
 PostingListSegment PostingListCursor::buildPostingSegment(size_t segment_idx)
@@ -754,6 +755,92 @@ Float32 PostingListScoringCursor::blockMaxScore(const BM25Weight & w) const
     return maxTermFrequencyMinusOne(block_index) == 255
         ? w.weight
         : w.contribution(maxTermFrequencyMinusOne(block_index) + 1, minDocumentLengthByte(block_index));
+}
+
+Float32 PostingListScoringCursor::blockMaxScore(const PostingListSegment & segment, size_t block_idx, const BM25Weight & w)
+{
+    chassert(block_idx < segment.block_count && !segment.block_max_tf_minus_one.empty());
+    const UInt8 max_tf_minus_one = segment.block_max_tf_minus_one[block_idx];
+
+    return max_tf_minus_one == 255
+        ? w.weight
+        : w.contribution(max_tf_minus_one + 1, segment.block_min_dl_byte[block_idx]);
+}
+
+const PostingListSegment & PostingListScoringCursor::segmentForBound(size_t segment_idx)
+{
+    if (has_prepared_first_segment && segment_idx == current_segment_idx)
+        return *current_segment;
+
+    if (!bound_segment || bound_segment_idx != segment_idx)
+    {
+        bound_segment = loadSegment(segment_idx);
+        bound_segment_idx = segment_idx;
+    }
+
+    return *bound_segment;
+}
+
+Float32 PostingListScoringCursor::upperBound(size_t begin, size_t end, const BM25Weight & w)
+{
+    if (begin >= end)
+        return 0;
+
+    requireRowOffsetRepresentable(begin);
+    Float32 result = 0;
+
+    if (is_embedded)
+    {
+        const auto & row_ids = embedded_scoring_postings->row_ids;
+        const auto & term_frequencies = embedded_scoring_postings->term_frequencies;
+        const auto * first = std::lower_bound(row_ids.begin(), row_ids.end(), static_cast<UInt32>(begin));
+
+        for (const auto * it = first; it != row_ids.end() && *it < end; ++it)
+            result = std::max(result, w.contribution(term_frequencies[it - row_ids.begin()], doc_lengths->getByte(*it)));
+
+        return result;
+    }
+
+    const auto & ranges = info->ranges;
+    const auto * segment_it = std::lower_bound(ranges.begin(), ranges.end(), begin, [](const RowsRange & range, size_t row) { return range.end < row; });
+
+    for (size_t segment_idx = static_cast<size_t>(segment_it - ranges.begin()); segment_idx < total_segments && ranges[segment_idx].begin < end; ++segment_idx)
+    {
+        const auto & segment = segmentForBound(segment_idx);
+        const auto & block_last_row_ids = segment.block_last_row_ids;
+        const auto * block_it = std::lower_bound(block_last_row_ids.begin(), block_last_row_ids.end(), static_cast<UInt32>(begin));
+
+        for (size_t block_idx = static_cast<size_t>(block_it - block_last_row_ids.begin()); block_idx < segment.block_count; ++block_idx)
+        {
+            const size_t block_first = block_idx == 0 ? segment.first_row_id : static_cast<size_t>(block_last_row_ids[block_idx - 1]) + 1;
+            if (block_first >= end)
+                break;
+
+            result = std::max(result, blockMaxScore(segment, block_idx, w));
+        }
+    }
+
+    return result;
+}
+
+std::optional<size_t> PostingListScoringCursor::nextBlockEnd(size_t row)
+{
+    if (is_embedded)
+        return std::nullopt;
+
+    requireRowOffsetRepresentable(row);
+    const auto & ranges = info->ranges;
+    const auto * segment_it = std::lower_bound(ranges.begin(), ranges.end(), row, [](const RowsRange & range, size_t r) { return range.end < r; });
+    if (segment_it == ranges.end())
+        return std::nullopt;
+
+    const auto & segment = segmentForBound(static_cast<size_t>(segment_it - ranges.begin()));
+    const auto & block_last_row_ids = segment.block_last_row_ids;
+    const auto * block_it = std::lower_bound(block_last_row_ids.begin(), block_last_row_ids.end(), static_cast<UInt32>(row));
+    if (block_it == block_last_row_ids.end())
+        return std::nullopt;
+
+    return static_cast<size_t>(*block_it) + 1;
 }
 
 Float32 PostingListScoringCursor::segmentMaxScore(const BM25Weight & w) const
