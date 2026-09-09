@@ -276,18 +276,26 @@ try
         auto pos = reader_header.getPositionByName(name);
         auto & result_column = result_columns.emplace_back(std::move(read_result.columns[pos]));
 
-        /// When read_task_info->merged_part_offsets we need to adjust parent part offset in projection because it will
-        /// be different when parent has order by column and merge will change order of rows.
-        if (read_task_info->merged_part_offsets && read_task_info->data_part_info->isProjectionPart() && name == "_parent_part_offset")
+        /// Adjust `_parent_part_offset` of a projection part while merging: the parent part
+        /// changes, so the offsets must point to the rows of the merged parent part.
+        /// If the parent has a sorting key, the merge reorders (and may drop) the rows and
+        /// `merged_part_offsets` maps the original offsets to the new ones. Otherwise the merge
+        /// concatenates the rows of the source parts in order and the new offset is the original
+        /// one plus the starting offset of the part.
+        if (read_task_info->data_part_info->isProjectionPart() && name == "_parent_part_offset")
         {
-            chassert(read_task_info->merged_part_offsets->isFinalized());
-
             /// Use `IColumn::mutate` instead of `assumeMutableRef` so the column is cloned
             /// when it is shared. Mutating a shared column in place is a copy-on-write violation.
             auto mutable_column = IColumn::mutate(result_column->convertToFullColumnIfSparse());
             auto & offset_data = assert_cast<ColumnUInt64 &>(*mutable_column).getData();
-            if (read_task_info->merged_part_offsets->isMappingWithDrops())
+            if (!read_task_info->merged_part_offsets)
             {
+                for (auto & offset : offset_data)
+                    offset += read_task_info->part_starting_offset_in_query;
+            }
+            else if (read_task_info->merged_part_offsets->isMappingWithDrops())
+            {
+                chassert(read_task_info->merged_part_offsets->isFinalized());
                 size_t num_filtered = 0;
                 parent_rows_filter.assign(offset_data.size(), static_cast<UInt8>(1));
 
@@ -310,15 +318,11 @@ try
                 else
                     num_result_rows -= num_filtered;
             }
-            else if (read_task_info->merged_part_offsets->isMappingEnabled())
-            {
-                for (auto & offset : offset_data)
-                    offset = (*read_task_info->merged_part_offsets)[read_task_info->part_index_in_query, offset];
-            }
             else
             {
+                chassert(read_task_info->merged_part_offsets->isFinalized());
                 for (auto & offset : offset_data)
-                    offset += read_task_info->part_starting_offset_in_query;
+                    offset = (*read_task_info->merged_part_offsets)[read_task_info->part_index_in_query, offset];
             }
             result_column = std::move(mutable_column);
         }

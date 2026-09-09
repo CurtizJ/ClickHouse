@@ -1935,28 +1935,25 @@ bool MergeTask::ExecuteAndFinalizeHorizontalPart::executeImpl() const
         /// Record _part_offset mapping and remove unneeded columns
         if (global_ctx->merged_part_offsets && global_ctx->parent_part == nullptr)
         {
-            if (global_ctx->merged_part_offsets->isMappingEnabled())
+            chassert(block.has("_part_index"));
+            auto part_index_column = block.getByName("_part_index").column->convertToFullColumnIfSparse();
+            const auto & index_data = assert_cast<const ColumnUInt64 &>(*part_index_column).getData();
+
+            if (global_ctx->merged_part_offsets->isMappingWithDrops())
             {
-                chassert(block.has("_part_index"));
-                auto part_index_column = block.getByName("_part_index").column->convertToFullColumnIfSparse();
-                const auto & index_data = assert_cast<const ColumnUInt64 &>(*part_index_column).getData();
-
-                if (global_ctx->merged_part_offsets->isMappingWithDrops())
-                {
-                    /// Source rows missing from the sequence of original offsets were dropped by the merge.
-                    chassert(block.has("_part_offset"));
-                    auto part_offset_column = block.getByName("_part_offset").column->convertToFullColumnIfSparse();
-                    const auto & offset_data = assert_cast<const ColumnUInt64 &>(*part_offset_column).getData();
-                    global_ctx->merged_part_offsets->insert(index_data.begin(), index_data.end(), offset_data.begin());
-                    block.erase("_part_offset");
-                }
-                else
-                {
-                    global_ctx->merged_part_offsets->insert(index_data.begin(), index_data.end());
-                }
-
-                block.erase("_part_index");
+                /// Source rows missing from the sequence of original offsets were dropped by the merge.
+                chassert(block.has("_part_offset"));
+                auto part_offset_column = block.getByName("_part_offset").column->convertToFullColumnIfSparse();
+                const auto & offset_data = assert_cast<const ColumnUInt64 &>(*part_offset_column).getData();
+                global_ctx->merged_part_offsets->insert(index_data.begin(), index_data.end(), offset_data.begin());
+                block.erase("_part_offset");
             }
+            else
+            {
+                global_ctx->merged_part_offsets->insert(index_data.begin(), index_data.end());
+            }
+
+            block.erase("_part_index");
         }
 
         size_t starting_offset = global_ctx->rows_written;
@@ -3464,13 +3461,17 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
                 part_rows.push_back(part->rows_count);
             return std::make_shared<MergedPartOffsets>(std::move(part_rows));
         }
-        return std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled);
+        return std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size());
     };
 
     Names merging_column_names = global_ctx->merging_columns.getNames();
     for (const auto * projection : global_ctx->projections_to_merge)
     {
-        /// If projection needs part offset mapping, add _part_index column to build this mapping
+        /// If projection needs part offset mapping, add _part_index column to build this mapping.
+        /// Without a sorting key no mapping is needed: the merge concatenates the rows of the source
+        /// parts in order, so the new offset is the original one plus the starting offset of the part
+        /// (see MergeTreeSequentialSource). Projections with `_parent_part_offset` are merged without
+        /// a sorting key only if the merge cannot drop rows, see prepareProjectionsToMergeAndRebuild.
         if (projection->with_parent_part_offset)
         {
             if (global_ctx->metadata_snapshot->hasSortingKey())
@@ -3482,11 +3483,7 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
             }
             else
             {
-                /// Projections with `_parent_part_offset` are merged without a sorting key
-                /// only if the merge cannot drop rows, see prepareProjectionsToMergeAndRebuild.
                 chassert(!global_ctx->merge_may_reduce_rows);
-                global_ctx->merged_part_offsets
-                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Disabled);
             }
             break;
         }
@@ -3494,7 +3491,7 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
 
     if (!global_ctx->rebuild_text_indexes
         && !global_ctx->text_indexes_to_merge.empty()
-        && (!global_ctx->merged_part_offsets || !global_ctx->merged_part_offsets->isMappingEnabled()))
+        && !global_ctx->merged_part_offsets)
     {
         global_ctx->merged_part_offsets = make_enabled_part_offsets();
         merging_column_names.push_back("_part_index");

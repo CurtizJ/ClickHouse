@@ -190,9 +190,9 @@ public:
 /// Tracks how rows from original parts are positioned in the merged result.
 /// Provides efficient lookup from original _part_offset to new _part_offset in merged data.
 ///
-/// In EnabledWithDrops mode the mapping additionally records source rows dropped by the merge
-/// (e.g. by ReplacingMergeTree, lightweight deletes or TTL). Each source row of a part has one
-/// entry indexed by its original _part_offset:
+/// If the merge may drop rows (`with_drops`), the mapping additionally records source rows dropped
+/// by the merge (e.g. by ReplacingMergeTree, lightweight deletes or TTL). Each source row of a part
+/// has one entry indexed by its original _part_offset:
 ///   surviving row with new offset n -> (n << 1) | 1
 ///   dropped row                     -> (m + 1) << 1, where m is the new offset of the part's
 ///                                      previous surviving row (or -1 if there is none yet)
@@ -200,37 +200,28 @@ public:
 class MergedPartOffsets
 {
 public:
-    enum class MappingMode
+    /// Every source row survives the merge.
+    explicit MergedPartOffsets(size_t num_parts)
+        : with_drops(false)
+        , offset_maps(num_parts)
     {
-        Enabled,          /// Full offset mapping is required, every source row survives the merge
-        EnabledWithDrops, /// Full offset mapping is required, the merge may drop source rows
-        Disabled          /// No mapping needed (e.g., no sorting key)
-    };
-
-    explicit MergedPartOffsets(size_t num_parts, MappingMode mode_ = MappingMode::Enabled)
-        : mode(mode_)
-        , offset_maps(mode == MappingMode::Enabled ? num_parts : 0)
-        , finalized(mode == MappingMode::Disabled)
-    {
-        chassert(mode != MappingMode::EnabledWithDrops);
     }
 
-    /// EnabledWithDrops mode: per-part numbers of source rows are required
+    /// The merge may drop source rows. Per-part numbers of source rows are required
     /// to record the rows dropped after each part's last surviving row.
     explicit MergedPartOffsets(std::vector<UInt64> part_rows_)
-        : mode(MappingMode::EnabledWithDrops)
+        : with_drops(true)
         , offset_maps(part_rows_.size())
         , part_rows(std::move(part_rows_))
         , next_part_offsets(part_rows.size())
         , dropped_values(part_rows.size())
-        , finalized(false)
     {
     }
 
     /// Records _part_offset mappings for a batch of _part_index values.
     void insert(const UInt64 * begin_part_index, const UInt64 * end_part_index)
     {
-        chassert(mode == MappingMode::Enabled);
+        chassert(!with_drops);
         for (const UInt64 * it = begin_part_index; it != end_part_index; ++it)
         {
             offset_maps[*it].insert(num_rows);
@@ -242,35 +233,36 @@ public:
     /// Source rows missing from the per-part offset sequences are recorded as dropped.
     void insert(const UInt64 * begin_part_index, const UInt64 * end_part_index, const UInt64 * begin_part_offset)
     {
-        chassert(mode == MappingMode::EnabledWithDrops);
+        chassert(with_drops);
 
         const UInt64 * offset_it = begin_part_offset;
         for (const UInt64 * it = begin_part_index; it != end_part_index; ++it, ++offset_it)
         {
             UInt64 part_index = *it;
             UInt64 part_offset = *offset_it;
+
             chassert(part_index < offset_maps.size());
 
             if (part_offset >= part_rows[part_index])
+            {
                 throw Exception(
                     ErrorCodes::LOGICAL_ERROR,
                     "Got row with offset {} for source part {} that has only {} rows",
                     part_offset, part_index, part_rows[part_index]);
+            }
 
+            auto & offset_map = offset_maps[part_index];
             UInt64 & next_offset = next_part_offsets[part_index];
+            UInt64 & dropped_value = dropped_values[part_index];
 
-            /// Surviving rows of one part must keep their relative order in the merged part.
-            /// A violation means the data is corrupted, e.g. the sign column
-            /// of CollapsingMergeTree has values other than 1 and -1.
             if (part_offset < next_offset)
+            {
                 throw Exception(
                     ErrorCodes::INCORRECT_DATA,
                     "Rows of source part {} are merged out of order: got row with offset {} after {} rows of the part have been consumed. "
                     "It may be caused by corrupted data, e.g. incorrect values of the sign column in CollapsingMergeTree",
                     part_index, part_offset, next_offset);
-
-            auto & offset_map = offset_maps[part_index];
-            UInt64 & dropped_value = dropped_values[part_index];
+            }
 
             for (; next_offset < part_offset; ++next_offset)
             {
@@ -288,7 +280,7 @@ public:
     /// Looks up the new _part_offset in the merged data.
     UInt64 operator[](UInt64 part_index, UInt64 part_offset) const
     {
-        chassert(mode == MappingMode::Enabled);
+        chassert(!with_drops);
         chassert(part_index < offset_maps.size());
         return offset_maps[part_index][part_offset];
     }
@@ -297,10 +289,9 @@ public:
     /// Returns std::nullopt if the source row was dropped by the merge.
     std::optional<UInt64> tryGetNewOffset(UInt64 part_index, UInt64 part_offset) const
     {
-        chassert(mode != MappingMode::Disabled);
         chassert(part_index < offset_maps.size());
 
-        if (mode == MappingMode::Enabled)
+        if (!with_drops)
             return offset_maps[part_index][part_offset];
 
         UInt64 value = offset_maps[part_index][part_offset];
@@ -313,13 +304,10 @@ public:
     /// Must be called after all offsets have been inserted.
     void flush()
     {
-        if (mode == MappingMode::Disabled)
-            return;
-
         chassert(!finalized);
         finalized = true;
 
-        if (mode == MappingMode::EnabledWithDrops)
+        if (with_drops)
         {
             /// Record the rows dropped after the last surviving row of each part.
             for (size_t part_index = 0; part_index < offset_maps.size(); ++part_index)
@@ -352,8 +340,7 @@ public:
     }
 
     bool isFinalized() const { return finalized; }
-    bool isMappingEnabled() const { return mode != MappingMode::Disabled; }
-    bool isMappingWithDrops() const { return mode == MappingMode::EnabledWithDrops; }
+    bool isMappingWithDrops() const { return with_drops; }
 
     bool hasDroppedRows() const
     {
@@ -374,15 +361,16 @@ public:
     }
 
 private:
-    MappingMode mode;
+    /// Whether the merge may drop source rows.
+    bool with_drops;
     std::vector<PackedPartOffsets> offset_maps;
 
-    /// Used only in EnabledWithDrops mode.
+    /// Used only if `with_drops` is set.
     std::vector<UInt64> part_rows;          /// Number of source rows per part
     std::vector<UInt64> next_part_offsets;  /// Next expected source offset per part
     std::vector<UInt64> dropped_values;     /// Encoded value for dropped rows per part
 
-    bool finalized;
+    bool finalized = false;
 
     size_t num_rows = 0;
     size_t num_dropped = 0;
