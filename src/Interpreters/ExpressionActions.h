@@ -88,6 +88,8 @@ public:
     const Actions & getActions() const { return actions; }
     const std::list<Node> & getNodes() const { return actions_dag.getNodes(); }
     const ActionsDAG & getActionsDAG() const { return actions_dag; }
+    /// Whether `execute` drops the input columns that are not outputs (see `ActionsDAG::project_input`).
+    bool projectInputs() const { return project_inputs; }
     const ColumnNumbers & getResultPositions() const { return result_positions; }
     const ExpressionActionsSettings & getSettings() const { return settings; }
 

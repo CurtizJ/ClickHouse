@@ -97,6 +97,7 @@ Strings MergeTreeDataPartWide::getPreferredFileOrder() const
 MergeTreeReaderPtr createMergeTreeReaderWide(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns_to_read,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,
@@ -111,6 +112,7 @@ MergeTreeReaderPtr createMergeTreeReaderWide(
 MergeTreeReaderPtr createMergeTreeReaderWide(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns_to_read,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,
@@ -125,6 +127,7 @@ MergeTreeReaderPtr createMergeTreeReaderWide(
     return std::make_unique<MergeTreeReaderWide>(
         read_info,
         columns_to_read,
+        subcolumns_of_previous_steps,
         virtual_fields,
         storage_snapshot,
         storage_settings,
@@ -690,6 +693,7 @@ std::vector<String> MergeTreeDataPartWide::getListOfStreamsForColumn(const NameA
     MergeTreeReaderPtr reader = createMergeTreeReaderWide(
         part_info,
         cols,
+        /*subcolumns_of_previous_steps=*/ {},
         storage_snapshot_ptr,
         storage.getSettings(),
         MarkRanges{MarkRange(0, getMarksCount())},

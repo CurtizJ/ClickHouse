@@ -23,6 +23,7 @@ public:
     IMergeTreeReader(
         MergeTreeDataPartInfoForReaderPtr data_part_info_for_read_,
         const NamesAndTypesList & columns_,
+        const NameSet & subcolumns_of_previous_steps_,
         const VirtualFields & virtual_fields_,
         const StorageSnapshotPtr & storage_snapshot_,
         const MergeTreeSettingsPtr & storage_settings_,
@@ -189,6 +190,16 @@ protected:
     /// Returns true if the column at position @pos in columns_to_read is a system column that was invalidated.
     bool isSystemColumnInvalidated(size_t pos) const;
 
+    /// Returns true if the column at position @pos in columns_to_read must not be read from the part: it was
+    /// dropped by a pending mutation, it is an invalidated system column, or it is a subcolumn of a column
+    /// produced by an earlier step of the readers chain. The reader leaves such a column empty; it is filled
+    /// with defaults or, for the last case, extracted from the parent in `evaluateMissingDefaults`.
+    bool shouldSkipReadingColumn(size_t pos) const;
+
+    /// Per position in `columns_to_read`: the column is a subcolumn of a column produced by an earlier
+    /// step of the readers chain (see `MergeTreeReadTaskColumns::subcolumns_of_previous_steps`).
+    std::vector<bool> is_subcolumn_of_previous_step;
+
 private:
     friend class MergeTreeReaderIndex;
     friend class MergeTreeReaderTextIndex;
@@ -216,6 +227,7 @@ using MergeTreeReaderPtr = std::unique_ptr<IMergeTreeReader>;
 MergeTreeReaderPtr createMergeTreeReader(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,

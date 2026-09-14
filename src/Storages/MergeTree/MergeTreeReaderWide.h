@@ -17,6 +17,7 @@ public:
     MergeTreeReaderWide(
         MergeTreeDataPartInfoForReaderPtr data_part_info_for_read_,
         NamesAndTypesList columns_,
+        const NameSet & subcolumns_of_previous_steps_,
         const VirtualFields & virtual_fields_,
         const StorageSnapshotPtr & storage_snapshot_,
         const MergeTreeSettingsPtr & storage_settings_,

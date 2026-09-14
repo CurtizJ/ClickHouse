@@ -18,8 +18,9 @@ bool MergeTreeReaderIndex::canSkipAnyMark() const
 MergeTreeReaderIndex::MergeTreeReaderIndex(const IMergeTreeReader * main_reader_, MergeTreeIndexReadResultPtr index_read_result_, const PaddedPODArray<UInt64> * lazy_materializing_rows_)
     : IMergeTreeReader(
           main_reader_->data_part_info_for_read,
-          {},
-          {},
+          /*columns_=*/ {},
+          /*subcolumns_of_previous_steps_=*/ {},
+          /*virtual_fields_=*/ {},
           main_reader_->storage_snapshot,
           main_reader_->storage_settings,
           nullptr,

@@ -89,6 +89,11 @@ struct MergeTreeReadTaskColumns
     NamesAndTypesLists pre_columns;
     /// Column names to read from patch parts.
     NamesAndTypesLists patch_columns;
+    /// Names from `columns` and from each `pre_columns[i]` that are subcolumns of a column produced by an earlier
+    /// step (for example, rewritten by a pending mutation applied on the fly). The part's data is stale for them,
+    /// so the reader does not read it: `IMergeTreeReader::evaluateMissingDefaults` extracts them from the parent.
+    NameSet subcolumns_of_previous_steps;
+    std::vector<NameSet> pre_subcolumns_of_previous_steps;
 
     String dump() const;
     Names getAllColumnNames() const;

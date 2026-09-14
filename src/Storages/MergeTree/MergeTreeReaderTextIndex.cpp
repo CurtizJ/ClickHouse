@@ -60,6 +60,7 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     : IMergeTreeReader(
         main_reader_->data_part_info_for_read,
         columns_,
+        /*subcolumns_of_previous_steps_=*/ {},
         /*virtual_fields=*/ {},
         main_reader_->storage_snapshot,
         main_reader_->storage_settings,
@@ -205,6 +206,7 @@ void MergeTreeReaderTextIndex::initializeFallbackReader(const IMergeTreeReader *
         fallback_reader = createMergeTreeReader(
             main_reader->data_part_info_for_read,
             fallback_columns_list,
+            /*subcolumns_of_previous_steps=*/ {},
             main_reader->storage_snapshot,
             main_reader->storage_settings,
             main_reader->all_mark_ranges,

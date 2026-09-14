@@ -25,6 +25,7 @@ namespace ErrorCodes
 MergeTreeReaderCompact::MergeTreeReaderCompact(
     MergeTreeDataPartInfoForReaderPtr data_part_info_for_read_,
     NamesAndTypesList columns_,
+    const NameSet & subcolumns_of_previous_steps_,
     const VirtualFields & virtual_fields_,
     const StorageSnapshotPtr & storage_snapshot_,
     const MergeTreeSettingsPtr & storage_settings_,
@@ -39,6 +40,7 @@ MergeTreeReaderCompact::MergeTreeReaderCompact(
     : IMergeTreeReader(
         data_part_info_for_read_,
         columns_,
+        subcolumns_of_previous_steps_,
         virtual_fields_,
         storage_snapshot_,
         storage_settings_,
@@ -80,8 +82,7 @@ void MergeTreeReaderCompact::fillColumnPositions()
         auto & column_to_read = columns_to_read[i];
         auto position = data_part_info_for_read->getColumnPosition(column_to_read.getNameInStorage());
 
-        /// Column was dropped by a pending mutation or invalidated. Don't read stale data;
-        if (position.has_value() && (isColumnDroppedByPendingMutation(i) || isSystemColumnInvalidated(i)))
+        if (position.has_value() && shouldSkipReadingColumn(i))
             position.reset();
 
         if (position.has_value() && column_to_read.isSubcolumn())
@@ -106,7 +107,9 @@ void MergeTreeReaderCompact::fillColumnPositions()
 
         /// If array of Nested column is missing in part,
         /// we have to read its offsets if they exist.
-        if (!column_positions[i])
+        /// A subcolumn of a column produced by an earlier step is extracted from that column
+        /// as a whole, so its offsets are not read from the part either.
+        if (!column_positions[i] && !is_subcolumn_of_previous_step[i])
             findPositionForMissedNested(i);
 
         if (column_positions[i] && column_to_read.isSubcolumn())

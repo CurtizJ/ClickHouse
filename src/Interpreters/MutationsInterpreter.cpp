@@ -6,6 +6,7 @@
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Interpreters/MaterializedColumnDependencies.h>
+#include <Interpreters/replaceSubcolumnsToGetSubcolumnFunctionInQuery.h>
 #include <Interpreters/MutationsInterpreter.h>
 #include <Interpreters/TreeRewriter.h>
 #include <Interpreters/MutationsNonDeterministicHelpers.h>
@@ -1063,6 +1064,25 @@ void MutationsInterpreter::prepare(bool dry_run)
         ? (*source.getMergeTreeData()->getSettings())[MergeTreeSetting::alter_column_secondary_index_mode]
         : AlterColumnSecondaryIndexMode::REBUILD;
 
+    /// A subcolumn of a column updated by an earlier stage is rewritten in the expressions of the current stage to
+    /// `getSubcolumn(column, 'name')`, so that it is derived from the updated column. Read as a subcolumn, it would
+    /// come from the source, before the update, and be passed through the stages unchanged.
+    /// The expression is cloned first: it is shared with the command, which other interpreters use concurrently.
+    auto rewrite_subcolumns_of_updated_columns = [&](ASTPtr & ast)
+    {
+        NamesAndTypesList columns_updated_by_previous_stages;
+        for (size_t i = 0; i + 1 < stages.size(); ++i)
+            for (const auto & [name, _] : stages[i].column_to_updated)
+                if (auto column = columns_desc.tryGetPhysical(name))
+                    columns_updated_by_previous_stages.push_back(*column);
+
+        if (columns_updated_by_previous_stages.empty())
+            return;
+
+        ast = ast->clone();
+        replaceSubcolumnsToGetSubcolumnFunctionInQuery(ast, columns_updated_by_previous_stages);
+    };
+
     /// First, break a sequence of commands into stages.
     for (const auto & command : commands)
     {
@@ -1076,6 +1096,7 @@ void MutationsInterpreter::prepare(bool dry_run)
             {
                 auto alter = command.ast();
                 auto predicate = getPartitionAndPredicateExpressionForMutationCommand(alter.get());
+                rewrite_subcolumns_of_updated_columns(predicate);
                 predicate = makeASTFunction("isZeroOrNull", predicate);
                 stages.back().filters.push_back(predicate);
             }
@@ -1096,13 +1117,19 @@ void MutationsInterpreter::prepare(bool dry_run)
             /// The assignment expressions were re-parsed from the serialized mutation command, so their
             /// set operations (UNION/INTERSECT/EXCEPT) are not normalized yet. Normalize them as `executeQuery` does.
             for (auto & [column_name, update_expr] : column_to_update)
+            {
                 normalizeSetOperations(update_expr, context);
+                rewrite_subcolumns_of_updated_columns(update_expr);
+            }
 
             /// Compute partition+predicate once per command (reusing the same parse); cloned per assignment below.
             /// For a single command with returned mutated rows it is already checked by the prefilter.
             ASTPtr base_condition = condition_checked_by_prefilter
                 ? nullptr
                 : getPartitionAndPredicateExpressionForMutationCommand(alter.get());
+
+            if (base_condition)
+                rewrite_subcolumns_of_updated_columns(base_condition);
 
             for (const auto & [column_name, update_expr] : column_to_update)
             {

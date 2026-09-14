@@ -487,6 +487,21 @@ MergeTreeReadTaskColumns getReadTaskColumns(
         .withVirtuals(VirtualsKind::All, VirtualsMaterializationPlace::Reader)
         .withSubcolumns(with_subcolumns);
 
+    /// A subcolumn of a column produced by an earlier step is extracted from that column, not read from the part:
+    /// the part's substream is stale when the parent was rewritten by an on-fly `ALTER UPDATE`. The reader leaves
+    /// such a column empty and `IMergeTreeReader::evaluateMissingDefaults` extracts it from the parent.
+    auto collect_subcolumns_of_previous_steps = [&](const Names & names)
+    {
+        NameSet res;
+        for (const auto & name : names)
+        {
+            auto column = storage_snapshot->tryGetColumn(options, name);
+            if (column && column->isSubcolumn() && columns_from_previous_steps.contains(column->getNameInStorage()))
+                res.insert(name);
+        }
+        return res;
+    };
+
     auto add_step = [&](const PrewhereExprStep & step)
     {
         /// Computation results from previous steps might be used in the current step as well. In such a case these
@@ -521,6 +536,10 @@ MergeTreeReadTaskColumns getReadTaskColumns(
                 with_subcolumns, step_column_names);
         }
 
+        /// Decided before the names of this step are added to the set: a subcolumn read together with its parent
+        /// in the same step is read from the part.
+        auto step_subcolumns_of_previous_steps = collect_subcolumns_of_previous_steps(step_column_names);
+
         /// More columns could have been added, filter them as well by the list of columns from previous steps.
         Names columns_to_read_in_step;
         for (const auto & name : step_column_names)
@@ -530,13 +549,28 @@ MergeTreeReadTaskColumns getReadTaskColumns(
         }
 
         /// Add results of the step to the list of already "known" columns so that we don't read or compute them again.
+        /// The set mirrors what `ExpressionActions::execute` leaves in the block: the outputs of the actions and the
+        /// columns they do not consume, unless the inputs are projected away. A consumed input that is not an output
+        /// (a subcolumn used by an on-fly `DELETE` predicate, for example) is gone and has to be read or derived again.
         if (step.actions)
         {
-            for (const auto & name : step.actions->getActionsDAG().getNames())
-                columns_from_previous_steps.insert(name);
+            const auto & dag = step.actions->getActionsDAG();
+            if (step.actions->projectInputs())
+            {
+                columns_from_previous_steps.clear();
+            }
+            else
+            {
+                for (const auto & name : dag.getRequiredColumnsNames())
+                    columns_from_previous_steps.erase(name);
+            }
+
+            for (const auto * output : dag.getOutputs())
+                columns_from_previous_steps.insert(output->result_name);
         }
 
         result.pre_columns.push_back(storage_snapshot->getColumnsByNames(options, columns_to_read_in_step));
+        result.pre_subcolumns_of_previous_steps.push_back(std::move(step_subcolumns_of_previous_steps));
     };
 
     for (const auto & step : mutation_steps)
@@ -566,6 +600,7 @@ MergeTreeReadTaskColumns getReadTaskColumns(
     }
 
     result.columns = storage_snapshot->getColumnsByNames(options, post_column_names);
+    result.subcolumns_of_previous_steps = collect_subcolumns_of_previous_steps(post_column_names);
     return result;
 }
 

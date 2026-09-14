@@ -32,6 +32,7 @@ namespace ErrorCodes
 MergeTreeReaderWide::MergeTreeReaderWide(
     MergeTreeDataPartInfoForReaderPtr data_part_info_,
     NamesAndTypesList columns_,
+    const NameSet & subcolumns_of_previous_steps_,
     const VirtualFields & virtual_fields_,
     const StorageSnapshotPtr & storage_snapshot_,
     const MergeTreeSettingsPtr & storage_settings_,
@@ -46,6 +47,7 @@ MergeTreeReaderWide::MergeTreeReaderWide(
     : IMergeTreeReader(
         data_part_info_,
         columns_,
+        subcolumns_of_previous_steps_,
         virtual_fields_,
         storage_snapshot_,
         storage_settings_,
@@ -65,8 +67,7 @@ MergeTreeReaderWide::MergeTreeReaderWide(
     {
         for (size_t i = 0; i < columns_to_read.size(); ++i)
         {
-            /// Column was dropped by a pending mutation or invalidated. Don't read stale data;
-            if (!isColumnDroppedByPendingMutation(i) && !isSystemColumnInvalidated(i))
+            if (!shouldSkipReadingColumn(i))
                 addStreams(columns_to_read[i], serializations[i]);
         }
     }
@@ -127,7 +128,7 @@ void MergeTreeReaderWide::prefetchForAllColumns(
     /// so if reading can be asynchronous, it will also be performed in parallel for all columns.
     for (size_t pos = 0; pos < num_columns; ++pos)
     {
-        if (isColumnDroppedByPendingMutation(pos) || isSystemColumnInvalidated(pos))
+        if (shouldSkipReadingColumn(pos))
             continue;
 
         try
@@ -169,7 +170,7 @@ size_t MergeTreeReaderWide::readRows(
 
         for (size_t pos = 0; pos < num_columns; ++pos)
         {
-            if (isColumnDroppedByPendingMutation(pos) || isSystemColumnInvalidated(pos))
+            if (shouldSkipReadingColumn(pos))
             {
                 res_columns[pos] = nullptr;
                 continue;
@@ -498,7 +499,7 @@ void MergeTreeReaderWide::deserializePrefixForAllColumnsImpl(size_t num_columns,
         DeserializeBinaryBulkStateMap deserialize_state_map;
         for (size_t pos = 0; pos < num_columns; ++pos)
         {
-            if (isColumnDroppedByPendingMutation(pos) || isSystemColumnInvalidated(pos))
+            if (shouldSkipReadingColumn(pos))
                 continue;
 
             try

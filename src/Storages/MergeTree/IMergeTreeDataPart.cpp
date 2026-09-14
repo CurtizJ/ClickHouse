@@ -2552,6 +2552,7 @@ UInt64 IMergeTreeDataPart::readExistingRowsCount()
     MergeTreeReaderPtr reader = createMergeTreeReader(
         part_info,
         cols,
+        /*subcolumns_of_previous_steps=*/ {},
         storage_snapshot_ptr,
         storage.getSettings(),
         MarkRanges{MarkRange(0, total_mark)},
@@ -3679,6 +3680,7 @@ ColumnPtr IMergeTreeDataPart::getColumnSample(const NameAndTypePair & column) co
     MergeTreeReaderPtr reader = createMergeTreeReader(
         part_info,
         cols,
+        /*subcolumns_of_previous_steps=*/ {},
         storage_snapshot_ptr,
         storage.getSettings(),
         MarkRanges{MarkRange(0, total_mark)},

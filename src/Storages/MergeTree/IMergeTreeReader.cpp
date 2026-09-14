@@ -43,6 +43,7 @@ namespace ErrorCodes
 IMergeTreeReader::IMergeTreeReader(
     MergeTreeDataPartInfoForReaderPtr data_part_info_for_read_,
     const NamesAndTypesList & columns_,
+    const NameSet & subcolumns_of_previous_steps_,
     const VirtualFields & virtual_fields_,
     const StorageSnapshotPtr & storage_snapshot_,
     const MergeTreeSettingsPtr & storage_settings_,
@@ -76,11 +77,13 @@ IMergeTreeReader::IMergeTreeReader(
 
     columns_to_read.reserve(getColumns().size());
     serializations.reserve(getColumns().size());
+    is_subcolumn_of_previous_step.reserve(getColumns().size());
 
     for (const auto & column : getColumns())
     {
         const auto & column_to_read = columns_to_read.emplace_back(getColumnInPart(column));
         serializations.emplace_back(getSerializationInPart(column));
+        is_subcolumn_of_previous_step.push_back(subcolumns_of_previous_steps_.contains(column.name));
 
         if (column.isSubcolumn()
             && data_part_info_for_read->isCompactPart()
@@ -115,6 +118,11 @@ bool IMergeTreeReader::isColumnDroppedByPendingMutation(size_t pos) const
 bool IMergeTreeReader::isSystemColumnInvalidated(size_t pos) const
 {
     return data_part_info_for_read->isSystemColumnInvalidated(columns_to_read[pos].getNameInStorage());
+}
+
+bool IMergeTreeReader::shouldSkipReadingColumn(size_t pos) const
+{
+    return isColumnDroppedByPendingMutation(pos) || isSystemColumnInvalidated(pos) || is_subcolumn_of_previous_step[pos];
 }
 
 void IMergeTreeReader::fillVirtualColumns(Columns & columns, size_t rows) const
@@ -337,7 +345,11 @@ void IMergeTreeReader::evaluateMissingDefaults(Block additional_columns, Columns
         it = original_requested_columns.begin();
         for (size_t pos = 0; pos < num_columns; ++pos, ++it)
         {
-            if (additional_columns.has(it->name))
+            /// A subcolumn that was not read here is extracted from its parent when the parent is in the block.
+            /// The copy of the subcolumn that an earlier step stashed in `ReadResult::additional_columns` may
+            /// predate a rewrite of the parent by a later step (on-fly `ALTER UPDATE`) and is stale then.
+            bool extract_from_parent = !res_columns[pos] && it->isSubcolumn() && additional_columns.has(it->getNameInStorage());
+            if (additional_columns.has(it->name) && !extract_from_parent)
             {
                 res_columns[pos] = additional_columns.getByName(it->name).column;
                 continue;
@@ -628,6 +640,7 @@ String IMergeTreeReader::getMessageForDiagnosticOfBrokenPart(size_t from_mark, s
 MergeTreeReaderPtr createMergeTreeReaderCompact(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns_to_read,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,
@@ -642,6 +655,7 @@ MergeTreeReaderPtr createMergeTreeReaderCompact(
 MergeTreeReaderPtr createMergeTreeReaderWide(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns_to_read,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,
@@ -656,6 +670,7 @@ MergeTreeReaderPtr createMergeTreeReaderWide(
 MergeTreeReaderPtr createMergeTreeReader(
     const MergeTreeDataPartInfoForReaderPtr & read_info,
     const NamesAndTypesList & columns_to_read,
+    const NameSet & subcolumns_of_previous_steps,
     const StorageSnapshotPtr & storage_snapshot,
     const MergeTreeSettingsPtr & storage_settings,
     const MarkRanges & mark_ranges,
@@ -671,6 +686,7 @@ MergeTreeReaderPtr createMergeTreeReader(
         return createMergeTreeReaderCompact(
             read_info,
             columns_to_read,
+            subcolumns_of_previous_steps,
             storage_snapshot,
             storage_settings,
             mark_ranges,
@@ -686,6 +702,7 @@ MergeTreeReaderPtr createMergeTreeReader(
         return createMergeTreeReaderWide(
             read_info,
             columns_to_read,
+            subcolumns_of_previous_steps,
             storage_snapshot,
             storage_settings,
             mark_ranges,
