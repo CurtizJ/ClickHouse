@@ -1,0 +1,15 @@
+1700007492600031
+-- wrong element size
+CANNOT_DECOMPRESS
+-- wrong mode
+CANNOT_DECOMPRESS
+-- block width above 64 bits
+CANNOT_DECOMPRESS
+-- block width of 64 bits does not fit in the stream
+CANNOT_DECOMPRESS
+-- more exceptions than values in a block
+CANNOT_DECOMPRESS
+-- the checksum catches the corruption when enabled
+CHECKSUM_DOESNT_MATCH
+-- the intact part reads back
+1700007492600031

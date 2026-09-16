@@ -10543,6 +10543,10 @@ Enables the `ALP` compression codec.
 Enables the `PCO` compression codec.
 )", BETA, \
         {"26.10", false, false, "New setting to enable the beta `PCO` compression codec."}) \
+    DECLARE(Bool, enable_pfor_codec, false, R"(
+Enables the `PFor` compression codec.
+)", BETA, \
+        {"26.10", false, false, "New setting to enable the beta `PFor` compression codec."}) \
     DECLARE(Bool, enable_quantized_codec, false, R"(
 Enables the `Quantized` compression codec.
 )", EXPERIMENTAL, \

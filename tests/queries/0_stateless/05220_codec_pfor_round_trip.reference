@@ -1,0 +1,21 @@
+row counts	60018	60018	60018	60018
+none differs from reference	0
+delta differs from reference	0
+double_delta differs from reference	0
+parts after merge	1
+none differs from reference after merge	0
+delta differs from reference after merge	0
+double_delta differs from reference after merge	0
+a	CODEC(PFor(\'delta\'))
+b	CODEC(PFor(\'none\'))
+c	CODEC(PFor(\'double_delta\'))
+d	CODEC(PFor(\'delta\'), ZSTD(1))
+ts_pfor	1
+PFor is not larger than DoubleDelta	1
+ts_none	CODEC(PFor(\'double_delta\'))
+recompressed with PFor	1
+differs after recompression	0
+ts_none	CODEC(NONE)
+differs after decompression	0
+unaligned blocks differ	0
+10
