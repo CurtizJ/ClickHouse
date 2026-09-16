@@ -26,13 +26,16 @@ class StorageTimeSeries;
 ///   4 - The "metrics" target table was renamed to "metric families": the inner table is named
 ///       `.inner_id.metricfamilies.<uuid>` instead of `.inner_id.metrics.<uuid>`, the same name is used in backups,
 ///       and the definition is written with the keyword `METRIC FAMILIES` instead of `METRICS`.
+///   5 - The generated `timestamp` column of the samples tables is compressed with `PFor('double_delta')`
+///       instead of `DoubleDelta, ZSTD(1)`: the bit-packed representation is both smaller and faster to decode
+///       on the near-monotonic timestamps of a scrape-like workload.
 namespace TimeSeriesVersion
 {
     /// The latest version, new tables get it unless the CREATE query specifies another supported version.
     /// Bump it each time the schema of the target tables or the semantics of the stored data changes;
     /// every version in [MIN_SUPPORTED, LATEST] must stay supported, so either make the schema generation
     /// version-aware or bump MIN_SUPPORTED too.
-    constexpr UInt64 LATEST = 4;
+    constexpr UInt64 LATEST = 5;
 
     /// The first version recording the `id_type` setting (see the version history above).
     /// A table of an earlier version must not have the setting: an older server wouldn't understand it.
@@ -59,6 +62,11 @@ namespace TimeSeriesVersion
     /// The earlier versions name it "metrics" and write it with the keyword `METRICS`, so an older server can read them.
     constexpr UInt64 MIN_WITH_METRIC_FAMILIES_TARGET_NAME = 4;
 
+    /// The first version compressing the generated `timestamp` column of the samples tables with `PFor('double_delta')`
+    /// (see the version history above). The earlier versions compress it with `DoubleDelta, ZSTD(1)`, which an older
+    /// server can read.
+    constexpr UInt64 MIN_WITH_PFOR_TIMESTAMP_CODEC = 5;
+
     static_assert(MIN_SUPPORTED <= MIN_WRITABLE);
     static_assert(MIN_WITH_ID_TYPE_SETTING <= LATEST);
     static_assert(MIN_WITH_SAMPLES_OUTER_COLUMN <= LATEST);
@@ -66,6 +74,7 @@ namespace TimeSeriesVersion
     static_assert(MIN_SUPPORTED <= MIN_SUPPORTED_BY_PROMQL);
     static_assert(MIN_SUPPORTED_BY_PROMQL <= LATEST);
     static_assert(MIN_WITH_METRIC_FAMILIES_TARGET_NAME <= LATEST);
+    static_assert(MIN_WITH_PFOR_TIMESTAMP_CODEC <= LATEST);
 }
 
 /// Whether a version is in the range [MIN_SUPPORTED, LATEST].

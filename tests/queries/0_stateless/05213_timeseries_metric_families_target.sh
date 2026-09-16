@@ -26,7 +26,7 @@ function count_tables_like()
     $CLIENT -q "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name LIKE '$1'"
 }
 
-echo '--- a new table: the METRIC FAMILIES keyword, version 4, the .inner_id.metricfamilies inner table ---'
+echo '--- a new table: the METRIC FAMILIES keyword, the latest version, the .inner_id.metricfamilies inner table ---'
 $CLIENT -q "CREATE TABLE ts_new ENGINE = TimeSeries METRIC FAMILIES INNER ENGINE = ReplacingMergeTree"
 get_create_query ts_new | grep -o "METRIC FAMILIES INNER COLUMNS\|METRIC FAMILIES INNER ENGINE = ReplacingMergeTree ORDER BY metric_family_name\|version = [0-9]*"
 count_tables_like '.inner\_id.metricfamilies.%'

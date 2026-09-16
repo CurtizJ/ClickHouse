@@ -55,6 +55,13 @@ void createTimeSeriesInnerTable(
 {
     auto create_context = Context::createCopy(context);
 
+    /// From version 5 the engine generates `CODEC(PFor('double_delta'))` for the `timestamp` column of the samples
+    /// tables (see TimeSeriesVersion.h). `PFor` is in beta and a fresh `CREATE` referring to it is rejected unless
+    /// the session enables it, but a codec the engine picks for its own inner table is not user input: a `TimeSeries`
+    /// table has to be creatable with its default schema. The engine itself is experimental and is already gated
+    /// by `allow_experimental_time_series_table`.
+    create_context->setSetting("enable_pfor_codec", true);
+
     auto manual_create_query = getInnerTableCreateQuery(
         inner_table_kind, inner_table_uuid, inner_columns,
         inner_storage_def, time_series_storage_id, version);

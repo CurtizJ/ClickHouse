@@ -1,5 +1,5 @@
---- a new table: the METRIC FAMILIES keyword, version 4, the .inner_id.metricfamilies inner table ---
-version = 4
+--- a new table: the METRIC FAMILIES keyword, the latest version, the .inner_id.metricfamilies inner table ---
+version = 5
 METRIC FAMILIES INNER COLUMNS
 METRIC FAMILIES INNER ENGINE = ReplacingMergeTree ORDER BY metric_family_name
 1
