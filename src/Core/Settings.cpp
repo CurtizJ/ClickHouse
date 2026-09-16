@@ -8982,6 +8982,9 @@ Enables the `ALP` compression codec.
     DECLARE(Bool, enable_pfor_codec, false, R"(
 Enables the `PFor` compression codec.
 )", BETA) \
+    DECLARE(Bool, enable_pco_codec, false, R"(
+Enables the `PCO` compression codec.
+)", EXPERIMENTAL) \
     DECLARE(Bool, enable_quantized_codec, false, R"(
 Enables the `Quantized` compression codec.
 )", EXPERIMENTAL) \
