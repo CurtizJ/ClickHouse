@@ -10,6 +10,9 @@ target_link_libraries (delta_decompress_fuzzer PRIVATE dbms)
 clickhouse_add_executable (double_delta_decompress_fuzzer double_delta_decompress_fuzzer.cpp)
 target_link_libraries (double_delta_decompress_fuzzer PRIVATE dbms)
 
+clickhouse_add_executable (pfor_decompress_fuzzer pfor_decompress_fuzzer.cpp)
+target_link_libraries (pfor_decompress_fuzzer PRIVATE dbms)
+
 clickhouse_add_executable (encrypted_decompress_fuzzer encrypted_decompress_fuzzer.cpp)
 target_link_libraries (encrypted_decompress_fuzzer PRIVATE dbms)
 

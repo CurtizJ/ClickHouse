@@ -316,6 +316,7 @@ CompressionCodecFactory::CompressionCodecFactory()
     registerCodecDelta(*this);
     registerCodecT64(*this);
     registerCodecDoubleDelta(*this);
+    registerCodecPFor(*this);
     registerCodecGorilla(*this);
     registerCodecEncrypted(*this);
     registerCodecFPC(*this);
