@@ -39,6 +39,7 @@ public:
     CompressionCodecPco(UInt8 data_bytes_size_, UInt8 pco_type_byte_, UInt8 compression_level_);
 
     uint8_t getMethodByte() const override;
+    ASTPtr getCodecDescription() const override;
 
     void updateHash(SipHash & hash) const override;
 
@@ -147,7 +148,11 @@ UInt8 widthOfPcoType(UInt8 type_byte)
 CompressionCodecPco::CompressionCodecPco(UInt8 data_bytes_size_, UInt8 pco_type_byte_, UInt8 compression_level_)
     : data_bytes_size(data_bytes_size_), pco_type_byte(pco_type_byte_), compression_level(compression_level_)
 {
-    setCodecDescription("PCO", {make_intrusive<ASTLiteral>(static_cast<UInt64>(compression_level))});
+}
+
+ASTPtr CompressionCodecPco::getCodecDescription() const
+{
+    return makeCodecDescription("PCO", {make_intrusive<ASTLiteral>(static_cast<UInt64>(compression_level))});
 }
 
 uint8_t CompressionCodecPco::getMethodByte() const
