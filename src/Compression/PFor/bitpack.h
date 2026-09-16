@@ -5,14 +5,45 @@
 
 #include <Compression/PFor/common.h>
 
+#include <bit>
+#include <cstring>
+
 namespace DB::PFor::detail
 {
+
+// Full-width values are their own packing: the LSB-first stream of n values of typeBits<T> bits is their little-endian byte image.
+template <typename T>
+inline ALWAYS_INLINE void copyFullWidth(const T * in, size_t n, uint8_t * out) noexcept
+{
+    if constexpr (std::endian::native == std::endian::little)
+        std::memcpy(out, in, n * sizeof(T));
+    else
+        for (size_t i = 0; i < n; ++i)
+            storeLE(out + i * sizeof(T), static_cast<uint64_t>(in[i]), sizeof(T));
+}
+
+template <typename T>
+inline ALWAYS_INLINE void copyFullWidth(const uint8_t * in, size_t n, T * out) noexcept
+{
+    if constexpr (std::endian::native == std::endian::little)
+        std::memcpy(out, in, n * sizeof(T));
+    else
+        for (size_t i = 0; i < n; ++i)
+            out[i] = static_cast<T>(loadLE(in + i * sizeof(T), sizeof(T)));
+}
 
 template <typename T>
 inline ALWAYS_INLINE void packBits(const T * in, size_t n, unsigned b, uint8_t * out) noexcept
 {
     if (b == 0)
         return;
+
+    if (b == typeBits<T>)
+    {
+        copyFullWidth<T>(in, n, out);
+        return;
+    }
+
     using W = Wide<T>;
     const T mask = lowMask<T>(b);
     W acc = 0;
@@ -43,6 +74,7 @@ inline ALWAYS_INLINE void unpackFixed(const uint8_t * in, size_t n, T * out) noe
     W acc = 0;
     unsigned bits = 0;
     const uint8_t * p = in;
+
     for (size_t i = 0; i < n; ++i)
     {
         while (bits < B)
@@ -50,6 +82,7 @@ inline ALWAYS_INLINE void unpackFixed(const uint8_t * in, size_t n, T * out) noe
             acc |= static_cast<W>(*p++) << bits;
             bits += 8;
         }
+
         out[i] = static_cast<T>(acc & mask);
         acc >>= B;
         bits -= B;
@@ -59,6 +92,12 @@ inline ALWAYS_INLINE void unpackFixed(const uint8_t * in, size_t n, T * out) noe
 template <typename T>
 inline ALWAYS_INLINE void unpackBits(const uint8_t * in, size_t n, unsigned b, T * out) noexcept
 {
+    if (b == typeBits<T>)
+    {
+        copyFullWidth<T>(in, n, out);
+        return;
+    }
+
     switch (b)
     {
         case 0:

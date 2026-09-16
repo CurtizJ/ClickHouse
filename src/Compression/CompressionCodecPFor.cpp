@@ -10,6 +10,7 @@
 #include <Parsers/IAST_fwd.h>
 #include <base/unaligned.h>
 
+#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -196,42 +197,57 @@ void decompressDataForType(const char * source, UInt32 source_size, char * dest,
     static_assert(is_unsigned_v<ValueType>);
     using Packed = PackedType<ValueType>;
 
-    /// The block stream is decoded fail-closed: every read is bounded by `end` and any malformed
-    /// block header yields 0. The stream must also be consumed exactly, so trailing garbage is rejected.
-    PODArray<Packed> residuals(count);
     const auto * begin = reinterpret_cast<const uint8_t *>(source);
-    const size_t consumed = PFor::decodeBlocks<Packed>(begin, count, PFor::Delta::none, residuals.data(), begin + source_size);
-    if (consumed == 0)
-        throw Exception(ErrorCodes::CANNOT_DECOMPRESS, "Cannot decompress PFor-encoded data: the block stream is corrupted");
-    if (consumed != source_size)
-        throw Exception(ErrorCodes::CANNOT_DECOMPRESS,
-            "Cannot decompress PFor-encoded data: the block stream has {} bytes but {} were decoded", source_size, consumed);
+    const auto * end = begin + source_size;
+    const uint8_t * pos = begin;
+
+    /// The blocks are decoded one at a time into a small buffer that stays in L1 while its residuals are
+    /// unzigzagged, summed up and stored, instead of materializing the residuals of the whole stream first.
+    Packed residuals[PFor::BLOCK];
+    Packed prev = 0; /// The carry of the block codec's own delta transform, unused with `Delta::none`.
 
     ValueType value = 0;
     ValueType delta = 0;
 
-    switch (mode)
+    for (size_t offset = 0; offset < count; offset += PFor::BLOCK)
     {
-        case Mode::None:
-            for (size_t i = 0; i < count; ++i)
-                unalignedStoreLittleEndian<ValueType>(dest + i * sizeof(ValueType), static_cast<ValueType>(residuals[i]));
-            break;
-        case Mode::Delta:
-            for (size_t i = 0; i < count; ++i)
-            {
-                value = static_cast<ValueType>(value + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
-                unalignedStoreLittleEndian<ValueType>(dest + i * sizeof(ValueType), value);
-            }
-            break;
-        case Mode::DoubleDelta:
-            for (size_t i = 0; i < count; ++i)
-            {
-                delta = static_cast<ValueType>(delta + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
-                value = static_cast<ValueType>(value + delta);
-                unalignedStoreLittleEndian<ValueType>(dest + i * sizeof(ValueType), value);
-            }
-            break;
+        /// Fail-closed: every read is bounded by `end` and any malformed block header yields 0.
+        const auto block_count = static_cast<unsigned>(std::min<size_t>(PFor::BLOCK, count - offset));
+        const size_t consumed = PFor::decodeBlock<Packed>(pos, block_count, PFor::Delta::none, residuals, prev, end);
+
+        if (consumed == 0)
+            throw Exception(ErrorCodes::CANNOT_DECOMPRESS, "Cannot decompress PFor-encoded data: the block at byte {} of {} is corrupted", pos - begin, source_size);
+
+        pos += consumed;
+        char * block_dest = dest + offset * sizeof(ValueType);
+
+        switch (mode)
+        {
+            case Mode::None:
+                for (unsigned i = 0; i < block_count; ++i)
+                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), static_cast<ValueType>(residuals[i]));
+                break;
+            case Mode::Delta:
+                for (unsigned i = 0; i < block_count; ++i)
+                {
+                    value = static_cast<ValueType>(value + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
+                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), value);
+                }
+                break;
+            case Mode::DoubleDelta:
+                for (unsigned i = 0; i < block_count; ++i)
+                {
+                    delta = static_cast<ValueType>(delta + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
+                    value = static_cast<ValueType>(value + delta);
+                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), value);
+                }
+                break;
+        }
     }
+
+    /// The stream must be consumed exactly, so trailing garbage is rejected.
+    if (pos != end)
+        throw Exception(ErrorCodes::CANNOT_DECOMPRESS, "Cannot decompress PFor-encoded data: the block stream has {} bytes but {} were decoded", source_size, pos - begin);
 }
 
 UInt8 getDataBytesSize(const IDataType * column_type)

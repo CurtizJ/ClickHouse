@@ -1,13 +1,14 @@
 #pragma once
 
-// SIMD vertical bit-packing for full 128-value uint32_t blocks. Independently authored.
+// SIMD vertical bit-packing for full 128-value blocks of uint32_t or uint64_t. Independently authored.
 //
-// Values are laid out in 4 interleaved 32-bit lanes: value i -> lane (i & 3), row (i >> 2),
-// 32 rows per lane. The 4 lanes share one bit cursor, so a 16-byte stripe carries one
-// 32-bit chunk of every lane and decode emits 4 values per vector step. The byte layout is
-// exactly packedBytes(128, b) = 16*b bytes -- identical in size to the scalar horizontal
-// packing, just reordered for parallel extraction. Used only for b in [1, 31]; b == 0 / 32
-// and partial blocks / uint64 stay on the scalar path.
+// A block is laid out in LANES interleaved lanes of the element width, LANES * sizeof(T) == 16 bytes, i.e. one
+// SSE/NEON vector: value i -> lane (i % LANES), row (i / LANES), so a row is LANES consecutive values and pack/unpack
+// move contiguous vectors. The lanes share one bit cursor: a 16-byte stripe carries the next LANE_BITS bits of every
+// lane, and decode emits LANES values per vector step. Because ROWS = 128 / LANES == LANE_BITS, every lane packs
+// exactly b whole words, so a block takes exactly packedBytes(128, b) = 16*b bytes -- the size of the scalar
+// horizontal packing, just reordered for parallel extraction. Used for b in [1, LANE_BITS - 1]; b == 0,
+// b == LANE_BITS and partial blocks stay on the scalar path.
 //
 // GCC/Clang vector extensions lower each lane op to one SSE/NEON instruction.
 
@@ -15,6 +16,7 @@
 
 #include <bit>
 #include <cstring>
+#include <type_traits>
 
 #if defined(__GNUC__) || defined(__clang__)
 #    define PFOR_HAS_VERTICAL 1
@@ -28,58 +30,94 @@ namespace DB::PFor::detail
 {
 
 using v4u32 = uint32_t __attribute__((vector_size(16)));
+using v2u64 = uint64_t __attribute__((vector_size(16)));
 
-// The packed stream is canonical little-endian (matching bitpack.h), but a vector store/load is
-// native-endian, so byte-swap each 32-bit lane on big-endian targets. On little-endian this is the
-// identity and folds back to a plain 16-byte move, leaving the fast path unchanged.
-inline ALWAYS_INLINE v4u32 bswapLanes(v4u32 v) noexcept
+/// The 16-byte vector of T lanes and the geometry of the vertical layout for T.
+template <typename T>
+struct Vertical
 {
-    return v4u32{__builtin_bswap32(v[0]), __builtin_bswap32(v[1]), __builtin_bswap32(v[2]), __builtin_bswap32(v[3])};
-}
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+    using Vec = std::conditional_t<sizeof(T) == 4, v4u32, v2u64>;
+    static constexpr unsigned LANES = 16 / sizeof(T);
+    static constexpr unsigned LANE_BITS = typeBits<T>;
+    static constexpr unsigned ROWS = BLOCK / LANES;
+    static_assert(ROWS == LANE_BITS, "every lane must pack whole words so that a block takes exactly 16*b bytes");
+};
 
-inline ALWAYS_INLINE void storeStripeLE(uint8_t * p, v4u32 v) noexcept
+template <typename T>
+inline ALWAYS_INLINE typename Vertical<T>::Vec splat(T x) noexcept
 {
-    if constexpr (std::endian::native == std::endian::big)
-        v = bswapLanes(v);
-    std::memcpy(p, &v, 16);
-}
-
-inline ALWAYS_INLINE v4u32 loadStripeLE(const uint8_t * p) noexcept
-{
-    v4u32 v;
-    std::memcpy(&v, p, 16);
-    if constexpr (std::endian::native == std::endian::big)
-        v = bswapLanes(v);
+    typename Vertical<T>::Vec v = {};
+    for (unsigned lane = 0; lane < Vertical<T>::LANES; ++lane)
+        v[lane] = x;
     return v;
 }
 
-inline ALWAYS_INLINE void packVertical32(const uint32_t * r, unsigned b, uint8_t * out) noexcept
+// The packed stream is canonical little-endian (matching bitpack.h), but a vector store/load is
+// native-endian, so byte-swap each lane on big-endian targets. On little-endian this is the
+// identity and folds back to a plain 16-byte move, leaving the fast path unchanged.
+template <typename T>
+inline ALWAYS_INLINE typename Vertical<T>::Vec bswapLanes(typename Vertical<T>::Vec v) noexcept
 {
-    const uint32_t m = (1u << b) - 1u; // b in [1,31]
-    const v4u32 mask = {m, m, m, m};
-    v4u32 acc = {0, 0, 0, 0};
+    if constexpr (sizeof(T) == 4)
+        return v4u32{__builtin_bswap32(v[0]), __builtin_bswap32(v[1]), __builtin_bswap32(v[2]), __builtin_bswap32(v[3])};
+    else
+        return v2u64{__builtin_bswap64(v[0]), __builtin_bswap64(v[1])};
+}
+
+template <typename T>
+inline ALWAYS_INLINE void storeStripeLE(uint8_t * p, typename Vertical<T>::Vec v) noexcept
+{
+    if constexpr (std::endian::native == std::endian::big)
+        v = bswapLanes<T>(v);
+    std::memcpy(p, &v, 16);
+}
+
+template <typename T>
+inline ALWAYS_INLINE typename Vertical<T>::Vec loadStripeLE(const uint8_t * p) noexcept
+{
+    typename Vertical<T>::Vec v;
+    std::memcpy(&v, p, 16);
+    if constexpr (std::endian::native == std::endian::big)
+        v = bswapLanes<T>(v);
+    return v;
+}
+
+// Pack a full block at a compile-time width B: with the row loop fully unrolled the bit cursor is a constant at
+// every row, so every shift is an immediate and every refill branch folds away.
+template <typename T, unsigned B>
+inline ALWAYS_INLINE void packVerticalFixed(const T * r, uint8_t * out) noexcept
+{
+    using V = Vertical<T>;
+    using Vec = typename V::Vec;
+    static_assert(B >= 1 && B < V::LANE_BITS);
+    const Vec mask = splat<T>(static_cast<T>((T(1) << B) - 1));
+    Vec acc = {};
     unsigned bits = 0;
     uint8_t * p = out;
-    for (unsigned row = 0; row < 32; ++row)
+
+#pragma clang loop unroll(full)
+    for (unsigned row = 0; row < V::ROWS; ++row)
     {
-        v4u32 v;
-        std::memcpy(&v, r + 4u * row, 16);
+        Vec v;
+        std::memcpy(&v, r + V::LANES * row, 16);
         v &= mask;
         acc |= v << bits;
-        const unsigned nb = bits + b;
-        if (nb >= 32)
+        const unsigned nb = bits + B;
+
+        if (nb >= V::LANE_BITS)
         {
-            storeStripeLE(p, acc);
+            storeStripeLE<T>(p, acc);
             p += 16;
-            if (nb == 32)
+            if (nb == V::LANE_BITS)
             {
-                acc = v4u32{0, 0, 0, 0};
+                acc = Vec{};
                 bits = 0;
             }
             else
             {
-                acc = v >> (32 - bits); // bits > 0 here, so shift in [1,31]
-                bits = nb - 32;
+                acc = v >> (V::LANE_BITS - bits); // bits > 0 here, so the shift is in [1, LANE_BITS - 1]
+                bits = nb - V::LANE_BITS;
             }
         }
         else
@@ -89,33 +127,88 @@ inline ALWAYS_INLINE void packVertical32(const uint32_t * r, unsigned b, uint8_t
     }
 }
 
-inline ALWAYS_INLINE void unpackVertical32(const uint8_t * in, unsigned b, uint32_t * out) noexcept
+template <typename T, unsigned B>
+inline ALWAYS_INLINE void unpackVerticalFixed(const uint8_t * in, T * out) noexcept
 {
-    const uint32_t m = (1u << b) - 1u; // b in [1,31]
-    const v4u32 mask = {m, m, m, m};
-    v4u32 acc = {0, 0, 0, 0};
+    using V = Vertical<T>;
+    using Vec = typename V::Vec;
+    static_assert(B >= 1 && B < V::LANE_BITS);
+    const Vec mask = splat<T>(static_cast<T>((T(1) << B) - 1));
+    Vec acc = {};
     unsigned bits = 0;
     const uint8_t * p = in;
-    for (unsigned row = 0; row < 32; ++row)
+
+#pragma clang loop unroll(full)
+    for (unsigned row = 0; row < V::ROWS; ++row)
     {
-        v4u32 outv;
-        if (bits >= b)
+        Vec outv;
+        if (bits >= B)
         {
             outv = acc & mask;
-            acc >>= b;
-            bits -= b;
+            acc >>= B;
+            bits -= B;
         }
         else
         {
-            v4u32 w = loadStripeLE(p);
+            Vec w = loadStripeLE<T>(p);
             p += 16;
             outv = (acc | (w << bits)) & mask; // low `bits` from acc, the rest from w
-            acc = w >> (b - bits); // b - bits in [1,31]
-            bits = 32 - (b - bits);
+            acc = w >> (B - bits); // B - bits in [1, LANE_BITS - 1]
+            bits = V::LANE_BITS - (B - bits);
         }
-        std::memcpy(out + 4u * row, &outv, 16);
+        std::memcpy(out + V::LANES * row, &outv, 16);
     }
 }
+
+// Runtime-width front ends; b must be in [1, LANE_BITS - 1]. Widths that do not exist for T are never instantiated.
+#define PFOR_VERTICAL_CASES(FN, ...) \
+    switch (b) \
+    { \
+        PFOR_VERTICAL_CASE(FN, 1, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 2, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 3, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 4, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 5, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 6, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 7, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 8, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 9, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 10, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 11, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 12, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 13, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 14, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 15, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 16, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 17, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 18, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 19, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 20, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 21, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 22, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 23, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 24, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 25, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 26, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 27, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 28, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 29, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 30, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 31, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 32, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 33, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 34, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 35, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 36, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 37, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 38, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 39, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 40, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 41, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 42, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 43, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 44, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 45, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 46, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 47, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 48, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 49, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 50, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 51, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 52, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 53, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 54, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 55, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 56, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 57, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 58, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 59, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 60, __VA_ARGS__) \
+        PFOR_VERTICAL_CASE(FN, 61, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 62, __VA_ARGS__) PFOR_VERTICAL_CASE(FN, 63, __VA_ARGS__) \
+        default: \
+            return; \
+    }
+
+#define PFOR_VERTICAL_CASE(FN, K, ...) \
+    case (K): \
+        if constexpr ((K) < typeBits<T>) \
+            FN<T, (((K) < typeBits<T>) ? (K) : 1u)>(__VA_ARGS__); \
+        return;
+
+template <typename T>
+inline ALWAYS_INLINE void packVertical(const T * r, unsigned b, uint8_t * out) noexcept
+{
+    PFOR_VERTICAL_CASES(packVerticalFixed, r, out)
+}
+
+template <typename T>
+inline ALWAYS_INLINE void unpackVertical(const uint8_t * in, unsigned b, T * out) noexcept
+{
+    PFOR_VERTICAL_CASES(unpackVerticalFixed, in, out)
+}
+
+#undef PFOR_VERTICAL_CASE
+#undef PFOR_VERTICAL_CASES
 
 // SIMD delta reconstruction (inclusive prefix sum) over a contiguous uint32 residual
 // array, with a running carry across blocks. `plus` is 0 for d0 and 1 for d1 (gap-1).
@@ -146,7 +239,7 @@ inline ALWAYS_INLINE void deltaDecode32(uint32_t * out, unsigned cnt, uint32_t &
     carry = c;
 }
 
-// Fused single-pass unpack + delta: like unpackVertical32 but each row's 4 residuals are
+// Fused single-pass unpack + delta: like unpackVertical<uint32_t> but each row's 4 residuals are
 // prefix-summed with the running carry and stored as final values, so there is no second
 // pass over the output. Valid only for exception-free blocks (residuals == decoded base).
 // plus is 0 for d0, 1 for d1.
@@ -161,6 +254,7 @@ inline ALWAYS_INLINE void unpackVertical32FusedDelta(
     unsigned bits = 0;
     const uint8_t * p = in;
     uint32_t c = carry;
+
     for (unsigned row = 0; row < 32; ++row)
     {
         v4u32 v;
@@ -172,12 +266,13 @@ inline ALWAYS_INLINE void unpackVertical32FusedDelta(
         }
         else
         {
-            v4u32 w = loadStripeLE(p);
+            v4u32 w = loadStripeLE<uint32_t>(p);
             p += 16;
             v = (acc | (w << bits)) & mask;
             acc = w >> (b - bits);
             bits = 32 - (b - bits);
         }
+
         // The 4 lanes are consecutive values (4*row .. 4*row+3): prefix-sum + carry, fused.
         v += plusv;
         v += v4u32{0, v[0], v[1], v[2]};
