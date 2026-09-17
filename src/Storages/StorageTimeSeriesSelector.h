@@ -21,6 +21,11 @@ public:
         /// Data types of the corresponding columns in the TimeSeries table.
         /// We use these data types for the columns we read from table function timeSeriesSelector().
         DataTypePtr id_data_type;
+
+        /// The column identifying a time series in the target tables: `tags_id` from version
+        /// `MIN_WITH_SPLIT_ID`, `id` before it (see TimeSeriesVersion.h). The selector always
+        /// exposes it to the PromQL layer under the name `id`.
+        String id_column_name;
         DataTypePtr timestamp_data_type;
         DataTypePtr scalar_data_type;
 
@@ -42,6 +47,7 @@ public:
     /// Makes a SELECT query for the ids (`series_id`) of the series matching the matchers and optional time bounds (need stored min_time/max_time), registering their tags for timeSeriesIdToTags().
     static ASTPtr makeSelectIDsQuery(
         const StorageID & tags_table_id,
+        const String & id_column_name,
         const PrometheusQueryTree::MatcherList & matchers,
         const TimeSeriesSettings & time_series_settings,
         const std::optional<DateTime64> & min_time,

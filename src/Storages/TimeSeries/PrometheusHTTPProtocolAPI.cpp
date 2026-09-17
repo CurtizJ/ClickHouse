@@ -572,7 +572,8 @@ ASTPtr PrometheusHTTPProtocolAPI::makeSeriesIDsQuery(
                             quoteString(match_param));
 
         auto select_ids_query = StorageTimeSeriesSelector::makeSelectIDsQuery(
-            tags_table_id, matchers, *time_series_settings, min_time, max_time, timestamp_data_type);
+            tags_table_id, TimeSeriesColumnNames::getIdentifier(time_series_storage->getVersion()), matchers,
+            *time_series_settings, min_time, max_time, timestamp_data_type);
         const auto & select_ids = typeid_cast<const ASTSelectWithUnionQuery &>(*select_ids_query);
         list_of_selects->children.push_back(select_ids.list_of_selects->children.at(0));
     }
