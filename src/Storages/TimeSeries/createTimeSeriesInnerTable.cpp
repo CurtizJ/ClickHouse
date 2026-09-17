@@ -62,6 +62,12 @@ void createTimeSeriesInnerTable(
     /// by `allow_experimental_time_series_table`.
     create_context->setSetting("enable_pfor_codec", true);
 
+    /// From version 6 the engine generates `tags_id LowCardinality(UInt128)` (see TimeSeriesVersion.h).
+    /// `LowCardinality` over a wide fixed-size type is rejected by default because it is usually a
+    /// pessimization, but here the dictionary holds one entry per time series and is what makes a
+    /// `tags_id IN <set>` filter run per distinct series instead of per row.
+    create_context->setSetting("allow_suspicious_low_cardinality_types", true);
+
     auto manual_create_query = getInnerTableCreateQuery(
         inner_table_kind, inner_table_uuid, inner_columns,
         inner_storage_def, time_series_storage_id, version);

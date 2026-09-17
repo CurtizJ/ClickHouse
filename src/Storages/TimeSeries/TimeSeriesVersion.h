@@ -29,13 +29,18 @@ class StorageTimeSeries;
 ///   5 - The generated `timestamp` column of the samples tables is compressed with `PFor('double_delta')`
 ///       instead of `DoubleDelta, ZSTD(1)`: the bit-packed representation is both smaller and faster to decode
 ///       on the near-monotonic timestamps of a scrape-like workload.
+///   6 - The single `id` column of the target tables was split into `metric_id UInt64` (a hash of the metric name,
+///       a clustering prefix of the primary key) and `tags_id LowCardinality(UInt128)` (a hash of all the tags,
+///       which identifies the time series on its own). The identifier used by the PromQL layer is `tags_id`;
+///       `metric_id` only keeps the series of one metric together in the primary key. Splitting them makes the
+///       `tags_id IN <set>` filter of a selector run over the LowCardinality dictionary instead of per row.
 namespace TimeSeriesVersion
 {
     /// The latest version, new tables get it unless the CREATE query specifies another supported version.
     /// Bump it each time the schema of the target tables or the semantics of the stored data changes;
     /// every version in [MIN_SUPPORTED, LATEST] must stay supported, so either make the schema generation
     /// version-aware or bump MIN_SUPPORTED too.
-    constexpr UInt64 LATEST = 5;
+    constexpr UInt64 LATEST = 6;
 
     /// The first version recording the `id_type` setting (see the version history above).
     /// A table of an earlier version must not have the setting: an older server wouldn't understand it.
@@ -67,6 +72,10 @@ namespace TimeSeriesVersion
     /// server can read.
     constexpr UInt64 MIN_WITH_PFOR_TIMESTAMP_CODEC = 5;
 
+    /// The first version whose target tables have `metric_id` and `tags_id` instead of a single `id` column
+    /// (see the version history above). The earlier versions keep `id`, so an older server can read them.
+    constexpr UInt64 MIN_WITH_SPLIT_ID = 6;
+
     static_assert(MIN_SUPPORTED <= MIN_WRITABLE);
     static_assert(MIN_WITH_ID_TYPE_SETTING <= LATEST);
     static_assert(MIN_WITH_SAMPLES_OUTER_COLUMN <= LATEST);
@@ -75,6 +84,7 @@ namespace TimeSeriesVersion
     static_assert(MIN_SUPPORTED_BY_PROMQL <= LATEST);
     static_assert(MIN_WITH_METRIC_FAMILIES_TARGET_NAME <= LATEST);
     static_assert(MIN_WITH_PFOR_TIMESTAMP_CODEC <= LATEST);
+    static_assert(MIN_WITH_SPLIT_ID <= LATEST);
 }
 
 /// Whether a version is in the range [MIN_SUPPORTED, LATEST].

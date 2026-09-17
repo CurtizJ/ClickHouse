@@ -9,9 +9,21 @@ namespace DB
 struct TimeSeriesColumnNames
 {
     /// The "samples" table contains time series:
+    /// `id` in tables of versions before `MIN_WITH_SPLIT_ID`, `metric_id` + `tags_id` from it on.
     static constexpr const char * ID = "id";
     static constexpr const char * Timestamp = "timestamp";
     static constexpr const char * Value = "value";
+
+    /// A hash of the metric name. Not an identifier of a time series: it only groups the series of one metric
+    /// together in the primary key, so that a whole-metric selector reads a contiguous key range.
+    static constexpr const char * MetricID = "metric_id";
+
+    /// A hash of all the tags (which include the `__name__` tag), so it identifies a time series on its own.
+    /// This is the identifier the PromQL layer works with (`timeSeriesIdToGroup`, the tags collector).
+    static constexpr const char * TagsID = "tags_id";
+
+    /// Whether the target tables of a table of this version have `metric_id` and `tags_id` instead of `id`.
+    static bool hasSplitID(UInt64 version) { return version >= TimeSeriesVersion::MIN_WITH_SPLIT_ID; }
 
     /// The "tags" table contains identifiers for each combination of a metric name with corresponding tags (labels):
 

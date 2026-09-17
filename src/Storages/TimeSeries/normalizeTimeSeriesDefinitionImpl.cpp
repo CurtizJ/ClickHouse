@@ -574,6 +574,35 @@ namespace
         }
     }
 
+    /// From `MIN_WITH_SPLIT_ID` the identifier of a time series is stored in two columns instead of one
+    /// (see TimeSeriesVersion.h): `metric_id` is a hash of the metric name and only clusters the series of one
+    /// metric together in the primary key, while `tags_id` is a hash of all the tags and identifies the series.
+    /// `tags_id` is LowCardinality so that a `tags_id IN <set>` filter is answered over the dictionary
+    /// (one probe per distinct series in a block) instead of once per row.
+    DataTypePtr getMetricIDType()
+    {
+        return std::make_shared<DataTypeUInt64>();
+    }
+
+    DataTypePtr getTagsIDType()
+    {
+        return std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeUInt128>());
+    }
+
+    /// `metric_id` DEFAULT: a hash of the metric name.
+    ASTPtr getMetricIDDefault()
+    {
+        return makeASTFunction("sipHash64", make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::MetricName));
+    }
+
+    /// `tags_id` DEFAULT: a hash of all the tags, dictionary-encoded so the expression's type matches the column.
+    ASTPtr getTagsIDDefault()
+    {
+        return makeASTFunction("toLowCardinality",
+            makeASTFunction("reinterpretAsUInt128",
+                makeASTFunction("sipHash128", make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::Tags))));
+    }
+
     /// The compression codec of the auto-created `timestamp` column of the samples tables: under generic LZ4
     /// near-monotonic millisecond timestamps barely compress and dominate the table size (>90% of on-disk bytes
     /// on a scrape-like corpus). The codec is pinned by the version of the table, so an older server can still read
@@ -954,10 +983,18 @@ namespace
             case ViewTarget::Samples:
             case ViewTarget::RecentSamples:
             {
-                /// Column "id" - no DEFAULT in the samples table: the identifier is computed in the "tags"
-                /// inner table because it depends on columns like "metric_name" or "tags" which don't
+                /// Identifier columns - no DEFAULT in the samples table: the identifier is computed in the
+                /// "tags" inner table because it depends on columns like "metric_name" or "tags" which don't
                 /// exist in samples.
-                add_column_if_missing(TimeSeriesColumnNames::ID, dataTypeToAST(resolved_types.id_type));
+                if (TimeSeriesColumnNames::hasSplitID(time_series_settings[TimeSeriesSetting::version]))
+                {
+                    add_column_if_missing(TimeSeriesColumnNames::MetricID, dataTypeToAST(getMetricIDType()));
+                    add_column_if_missing(TimeSeriesColumnNames::TagsID, dataTypeToAST(getTagsIDType()));
+                }
+                else
+                {
+                    add_column_if_missing(TimeSeriesColumnNames::ID, dataTypeToAST(resolved_types.id_type));
+                }
 
                 /// Auto-created "timestamp" and "value" columns get compression codecs
                 /// (see `getGeneratedTimestampCodec` and `getGeneratedValueCodec`).
@@ -972,21 +1009,34 @@ namespace
 
             case ViewTarget::Tags:
             {
-                /// Column "id" - with a DEFAULT expression that computes the identifier from "metric_name" and tags.
+                /// Identifier columns - with DEFAULT expressions computing them from "metric_name" and "tags".
                 /// The DEFAULT is auto-added (derived from the id type) only when the `id_generator` setting is not set.
-                add_column_if_missing(TimeSeriesColumnNames::ID, dataTypeToAST(resolved_types.id_type));
+                auto set_generated_default = [&](ASTPtr default_expression)
                 {
                     auto & column = new_list->children.back();
-                    if (!column->as<ASTColumnDeclaration &>().getDefaultExpression()
-                        && !time_series_settings[TimeSeriesSetting::id_generator].value)
-                    {
-                        column = column->clone();
-                        auto & new_decl = column->as<ASTColumnDeclaration &>();
-                        new_decl.default_specifier = ColumnDefaultSpecifier::Default;
-                        new_decl.ephemeral_default = false;
-                        new_decl.setDefaultExpression(TimeSeriesIDGenerator::getDefault(resolved_types.id_type, table_id));
-                        changed = true;
-                    }
+                    if (column->as<ASTColumnDeclaration &>().getDefaultExpression())
+                        return;
+                    column = column->clone();
+                    auto & new_decl = column->as<ASTColumnDeclaration &>();
+                    new_decl.default_specifier = ColumnDefaultSpecifier::Default;
+                    new_decl.ephemeral_default = false;
+                    new_decl.setDefaultExpression(std::move(default_expression));
+                    changed = true;
+                };
+
+                if (TimeSeriesColumnNames::hasSplitID(time_series_settings[TimeSeriesSetting::version]))
+                {
+                    add_column_if_missing(TimeSeriesColumnNames::MetricID, dataTypeToAST(getMetricIDType()));
+                    set_generated_default(getMetricIDDefault());
+                    add_column_if_missing(TimeSeriesColumnNames::TagsID, dataTypeToAST(getTagsIDType()));
+                    if (!time_series_settings[TimeSeriesSetting::id_generator].value)
+                        set_generated_default(getTagsIDDefault());
+                }
+                else
+                {
+                    add_column_if_missing(TimeSeriesColumnNames::ID, dataTypeToAST(resolved_types.id_type));
+                    if (!time_series_settings[TimeSeriesSetting::id_generator].value)
+                        set_generated_default(TimeSeriesIDGenerator::getDefault(resolved_types.id_type, table_id));
                 }
 
                 add_column_if_missing(TimeSeriesColumnNames::MetricName,
@@ -1450,8 +1500,17 @@ namespace
 
                 if (needs_sorting_key())
                 {
-                    set_sorting_key({make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID),
-                        make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::Timestamp)});
+                    if (TimeSeriesColumnNames::hasSplitID(settings[TimeSeriesSetting::version]))
+                    {
+                        set_sorting_key({make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::MetricID),
+                            make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::TagsID),
+                            make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::Timestamp)});
+                    }
+                    else
+                    {
+                        set_sorting_key({make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID),
+                            make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::Timestamp)});
+                    }
                 }
 
                 const auto & index_granularity = settings[(inner_table_kind == ViewTarget::Samples)
@@ -1506,7 +1565,11 @@ namespace
 
                     ASTs key_columns;
                     key_columns.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::MetricName));
-                    key_columns.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID));
+                    /// `tags_id` alone identifies the series, so `metric_id` is not part of the key here:
+                    /// the tags table is already clustered by `metric_name`.
+                    key_columns.push_back(make_intrusive<ASTIdentifier>(
+                        TimeSeriesColumnNames::hasSplitID(settings[TimeSeriesSetting::version])
+                            ? TimeSeriesColumnNames::TagsID : TimeSeriesColumnNames::ID));
                     if (settings[TimeSeriesSetting::store_min_time_and_max_time] && !aggregate_min_time_and_max_time)
                     {
                         key_columns.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::MinTime));
@@ -1649,12 +1712,27 @@ namespace
                 resolved_types.timestamp_type->getName());
         };
 
+        /// From `MIN_WITH_SPLIT_ID` the identifier lives in `metric_id` + `tags_id` instead of a single `id`
+        /// (see TimeSeriesVersion.h).
+        auto check_id_columns = [&]
+        {
+            if (TimeSeriesColumnNames::hasSplitID(time_series_settings[TimeSeriesSetting::version]))
+            {
+                check_column_type(TimeSeriesColumnNames::MetricID, getMetricIDType());
+                check_column_type(TimeSeriesColumnNames::TagsID, getTagsIDType());
+            }
+            else
+            {
+                check_column_type(TimeSeriesColumnNames::ID, resolved_types.id_type);
+            }
+        };
+
         switch (target_kind)
         {
             case ViewTarget::Samples:
             case ViewTarget::RecentSamples:
             {
-                check_column_type(TimeSeriesColumnNames::ID, resolved_types.id_type);
+                check_id_columns();
                 check_column_type(TimeSeriesColumnNames::Timestamp, resolved_types.timestamp_type);
                 check_column_type(TimeSeriesColumnNames::Value, resolved_types.scalar_type);
                 break;
@@ -1662,7 +1740,7 @@ namespace
 
             case ViewTarget::Tags:
             {
-                check_column_type(TimeSeriesColumnNames::ID, resolved_types.id_type);
+                check_id_columns();
                 check_column_is_string(TimeSeriesColumnNames::MetricName);
 
                 const Map & tags_to_columns = time_series_settings[TimeSeriesSetting::tags_to_columns];
