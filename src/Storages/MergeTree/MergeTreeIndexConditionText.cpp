@@ -164,7 +164,14 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     }
 
     const auto & settings = context_->getSettingsRef();
-    static constexpr auto cache_policy = "SLRU";
+    /// Plain LRU for the local (per-query) caches. They were SLRU with the protected part sized as the whole
+    /// cache: entries hit twice were promoted and, because the protected queue never exceeded its own limit,
+    /// never demoted, so once the first ~100 MiB of entries were pinned every later insert was evicted right
+    /// after landing in the probationary queue. A query touching more posting list segments than the cap
+    /// rebuilt each of them for nearly every read task (Q04 of SearchBench: 4880 segment builds and 4 GB of
+    /// reads for 307 distinct segments at 2 threads). Scan resistance is pointless for a cache that lives for
+    /// one query, and the readers access the segments in the order the tasks are scheduled, so LRU is the fit.
+    static constexpr auto cache_policy = "LRU";
     /// Local caches: ~10% of the query memory budget, capped at 100 MiB; max_memory_usage == 0 (unlimited) uses the cap, not a 0-size cache.
     static constexpr size_t local_cache_size_cap = 100ULL * 1024 * 1024;
     const size_t query_memory_limit = settings[Setting::max_memory_usage];
@@ -176,18 +183,18 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     if (settings[Setting::use_text_index_tokens_cache])
         tokens_cache = context_->getTextIndexTokensCache();
     else
-        tokens_cache = std::make_shared<TextIndexTokensCache>(cache_policy, local_cache_max_size, 0, 1.0);
+        tokens_cache = std::make_shared<TextIndexTokensCache>(cache_policy, local_cache_max_size, 0, /*size_ratio=*/ 0.0);
 
     use_global_header_cache = settings[Setting::use_text_index_header_cache];
     if (use_global_header_cache)
         header_cache = context_->getTextIndexHeaderCache();
     else
-        header_cache = std::make_shared<TextIndexHeaderCache>(cache_policy, local_cache_max_size, 0, 1.0);
+        header_cache = std::make_shared<TextIndexHeaderCache>(cache_policy, local_cache_max_size, 0, /*size_ratio=*/ 0.0);
 
     if (settings[Setting::use_text_index_postings_cache])
         postings_cache = context_->getTextIndexPostingsCache();
     else
-        postings_cache = std::make_shared<TextIndexPostingsCache>(cache_policy, local_cache_max_size, 0, 1.0);
+        postings_cache = std::make_shared<TextIndexPostingsCache>(cache_policy, local_cache_max_size, 0, /*size_ratio=*/ 0.0);
 
     rpn = std::move(RPNBuilder<RPNElement>(
         predicate,
