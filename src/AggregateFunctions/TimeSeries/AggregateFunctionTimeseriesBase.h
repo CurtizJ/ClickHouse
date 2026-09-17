@@ -300,7 +300,9 @@ public:
     {
         auto & buckets = data(place)->buckets;
         const auto & rhs_buckets = data(rhs)->buckets;
-        buckets.reserve(rhs_buckets.size());
+        /// The merged map holds at most the buckets of both sides, and never more than the whole grid.
+        /// Sizing it for `rhs_buckets.size()` alone leaves the destination doubling through the merge.
+        buckets.reserve(std::min<size_t>(bucket_count, buckets.size() + rhs_buckets.size()));
         for (const auto & rhs_bucket : rhs_buckets)
         {
             auto & bucket = buckets[rhs_bucket.getKey()];
@@ -569,6 +571,11 @@ private:
 
     /// How many buckets `deserialize` reserves before reading the data. Bigger states grow while they are read.
     static constexpr size_t MAX_BUCKETS_TO_RESERVE = 4096;
+
+    /// When a state has collected this many buckets, `sizeBucketsForGrid` stops letting the map double and
+    /// sizes it for the whole grid at once. Small enough that the doublings it skips are the expensive ones,
+    /// big enough that a state which stays sparse never reserves for a grid it will not fill.
+    static constexpr size_t BUCKETS_BEFORE_SIZING_FOR_GRID = 64;
 
     /// Validates and normalizes the grid step. For a single-point grid (`start == end`) the step is irrelevant, so it
     /// is normalized to 0 (making each window a single bucket); otherwise it must be positive.
@@ -1132,6 +1139,8 @@ private:
         size_t row_begin,
         size_t row_end) const
     {
+        sizeBucketsForGrid(data(place)->buckets);
+
         if (flags)
         {
             for (size_t i = row_begin; i < row_end; ++i)
@@ -1150,6 +1159,18 @@ private:
         }
 #endif
         addSamplesToBucketsImpl(state, timestamps, values, row_begin, row_end);
+    }
+
+    /// A bucket map that grows by doubling is reallocated and rehashed once per doubling, and for a dense grid
+    /// the last of those reallocations are large enough to miss jemalloc's thread cache and go through the extent
+    /// allocator - which showed up as the single largest allocation site of a PromQL range query. A state that has
+    /// already collected `BUCKETS_BEFORE_SIZING_FOR_GRID` buckets is filling the grid, so size its map for the grid
+    /// in one step and skip the rest. The final capacity is the one the doublings would have reached anyway, so
+    /// this trades no memory for the copies; a state that stays sparse never reaches the threshold.
+    void sizeBucketsForGrid(TimeSeriesBucketsMap<Bucket> & buckets) const
+    {
+        if (buckets.size() >= BUCKETS_BEFORE_SIZING_FOR_GRID)
+            buckets.reserve(std::min<size_t>(bucket_count, MAX_BUCKETS_TO_RESERVE));
     }
 
     void addMany(AggregateDataPtr __restrict place, const TimestampType * __restrict timestamp_ptr, const ValueType * __restrict value_ptr, size_t start, size_t end) const
