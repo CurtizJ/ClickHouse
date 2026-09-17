@@ -25,6 +25,10 @@ struct TimeSeriesColumnNames
     /// Whether the target tables of a table of this version have `metric_id` and `tags_id` instead of `id`.
     static bool hasSplitID(UInt64 version) { return version >= TimeSeriesVersion::MIN_WITH_SPLIT_ID; }
 
+    /// The column that identifies a time series in the target tables: `tags_id` from
+    /// `MIN_WITH_SPLIT_ID`, `id` before it. This is the column the samples and tags tables are joined on.
+    static const char * getIdentifier(UInt64 version) { return hasSplitID(version) ? TagsID : ID; }
+
     /// The "tags" table contains identifiers for each combination of a metric name with corresponding tags (labels):
 
     /// The default expression specified for the "id" column contains an expression for calculating an identifier of a time series by a metric name and tags.

@@ -140,14 +140,15 @@ namespace
         }
     }
 
-    /// Fills columns id, timestamp, value for the "samples" table.
+    /// Fills the identifier, timestamp and value columns for the "samples" table.
+    /// Every identifier column of the tags block is replicated once per sample of its time series.
     void fillSamplesColumns(
         const PaddedPODArray<UInt8> & filter,
-        const IColumn & id_column,
+        const Columns & id_columns,
         const IColumn & ts_timestamps,
         const IColumn & ts_values,
         const ColumnArray::Offsets & ts_offsets,
-        IColumn & out_id_column,
+        MutableColumns & out_id_columns,
         IColumn & out_timestamp_column,
         IColumn & out_value_column)
     {
@@ -170,7 +171,8 @@ namespace
 
             if (num_samples > 0)
             {
-                out_id_column.insertManyFrom(id_column, id_index, num_samples);
+                for (size_t j = 0; j != id_columns.size(); ++j)
+                    out_id_columns[j]->insertManyFrom(*id_columns[j], id_index, num_samples);
                 out_timestamp_column.insertRangeFrom(ts_timestamps, ts_start, num_samples);
                 out_value_column.insertRangeFrom(ts_values, ts_start, num_samples);
             }
@@ -359,12 +361,17 @@ TimeSeriesSink::TargetPipeline::~TargetPipeline()
 }
 
 
-ColumnPtr TimeSeriesSink::calculateId(const Block & tags_block) const
+Columns TimeSeriesSink::calculateIds(const Block & tags_block) const
 {
     Block block = tags_block;
     calculate_id_actions->execute(block);
     convert_id_actions->execute(block);
-    return block.getByName(TimeSeriesColumnNames::ID).column;
+
+    Columns result;
+    result.reserve(id_columns.size());
+    for (const auto & id_column : id_columns)
+        result.push_back(block.getByName(id_column.name).column);
+    return result;
 }
 
 
@@ -475,15 +482,38 @@ void TimeSeriesSink::initTagsAndSamplesPipelines()
     auto tags_target_metadata = tags_target->getInMemoryMetadataPtr(getContext(), false);
     const auto & settings = *time_series_settings;
 
-    /// Resolve the expression for generating `id`.
-    const auto & tags_id_col = tags_target_metadata->columns.get(TimeSeriesColumnNames::ID);
-    id_type = tags_id_col.type;
-    ASTPtr id_generator = settings[TimeSeriesSetting::id_generator].value;
-    if (!id_generator)
-        id_generator = tags_id_col.default_desc.expression;
-    if (!id_generator)
-        id_generator = TimeSeriesIDGenerator::getDefault(id_type, time_series_storage.getStorageID());
-    id_generator_uses_all_tags = TimeSeriesIDGenerator::usesAllTags(id_generator);
+    /// Resolve the identifier columns and the expressions generating them. From version
+    /// `MIN_WITH_SPLIT_ID` there are two of them, `metric_id` and `tags_id` (see TimeSeriesVersion.h);
+    /// the `id_generator` setting, when set, overrides the generator of the identifying column
+    /// (`tags_id`, or `id` in the earlier versions).
+    Names id_column_names;
+    if (TimeSeriesColumnNames::hasSplitID(time_series_storage.getVersion()))
+        id_column_names = {TimeSeriesColumnNames::MetricID, TimeSeriesColumnNames::TagsID};
+    else
+        id_column_names = {TimeSeriesColumnNames::ID};
+
+    ColumnsDescription id_columns_description;
+    id_generator_uses_all_tags = false;
+
+    for (const auto & id_column_name : id_column_names)
+    {
+        const auto & id_col = tags_target_metadata->columns.get(id_column_name);
+        id_columns.push_back(IdColumn{id_column_name, id_col.type});
+
+        ASTPtr generator;
+        if (id_column_name != TimeSeriesColumnNames::MetricID)
+            generator = settings[TimeSeriesSetting::id_generator].value;
+        if (!generator)
+            generator = id_col.default_desc.expression;
+        if (!generator)
+            generator = TimeSeriesIDGenerator::getDefault(id_col.type, time_series_storage.getStorageID());
+        id_generator_uses_all_tags |= TimeSeriesIDGenerator::usesAllTags(generator);
+
+        ColumnDescription description{id_column_name, id_col.type};
+        description.default_desc.kind = ColumnDefaultKind::Default;
+        description.default_desc.expression = std::move(generator);
+        id_columns_description.add(std::move(description));
+    }
 
     /// Build the tags header WITHOUT the "id" column (matches what consume() produces before ID calculation).
     auto metric_name_type = tags_target_metadata->columns.get(TimeSeriesColumnNames::MetricName).type;
@@ -533,26 +563,22 @@ void TimeSeriesSink::initTagsAndSamplesPipelines()
         tags_header_before_id.insert(ColumnWithTypeAndName{min_max_time_type, TimeSeriesColumnNames::MaxTime});
     }
 
-    /// Precompute ExpressionActions for calculating the "id" column.
-    ColumnDescription id_column_description{TimeSeriesColumnNames::ID, id_type};
-    id_column_description.default_desc.kind = ColumnDefaultKind::Default;
-    id_column_description.default_desc.expression = id_generator;
-
-    /// A single-column header containing just the "id" column, used to build the ExpressionActions for ID calculation.
+    /// A header containing just the identifier columns, used to build the ExpressionActions calculating them.
     Block id_header;
-    id_header.insert(ColumnWithTypeAndName{id_type, TimeSeriesColumnNames::ID});
+    for (const auto & id_column : id_columns)
+        id_header.insert(ColumnWithTypeAndName{id_column.type, id_column.name});
 
-    /// Evaluates the id_generator expression (e.g. reinterpretAsUUID(sipHash128(tags)))
-    /// to compute the "id" column from tags columns.
+    /// Evaluates the generator expressions (e.g. reinterpretAsUUID(sipHash128(tags)))
+    /// to compute the identifier columns from the tags columns.
     auto calculate_id_dag = addMissingDefaults(
         tags_header_before_id,
         id_header.getNamesAndTypesList(),
-        ColumnsDescription{id_column_description},
+        id_columns_description,
         getContext());
     auto calculate_id_result_columns = calculate_id_dag.getResultColumns();
     calculate_id_actions = std::make_shared<ExpressionActions>(std::move(calculate_id_dag));
 
-    /// Converts the computed "id" column to the configured id_type.
+    /// Converts the computed identifier columns to the types of the target tables.
     auto convert_id_dag = ActionsDAG::makeConvertingActions(
         calculate_id_result_columns,
         id_header.getColumnsWithTypeAndName(),
@@ -562,9 +588,10 @@ void TimeSeriesSink::initTagsAndSamplesPipelines()
         std::move(convert_id_dag),
         ExpressionActionsSettings(getContext(), CompileExpressions::yes));
 
-    /// Build the full tags source header WITH the "id" column (what we push to the pipeline).
+    /// Build the full tags source header WITH the identifier columns (what we push to the pipeline).
     Block tags_header;
-    tags_header.insert(ColumnWithTypeAndName{id_type, TimeSeriesColumnNames::ID});
+    for (const auto & id_column : id_columns)
+        tags_header.insert(ColumnWithTypeAndName{id_column.type, id_column.name});
     for (const auto & column : tags_header_before_id)
     {
         /// The "all_tags" column is not a stored column, we may have used it only to calculate "id",
@@ -577,7 +604,8 @@ void TimeSeriesSink::initTagsAndSamplesPipelines()
 
     /// Build source header for samples block.
     Block samples_header;
-    samples_header.insert(ColumnWithTypeAndName{id_type, TimeSeriesColumnNames::ID});
+    for (const auto & id_column : id_columns)
+        samples_header.insert(ColumnWithTypeAndName{id_column.type, id_column.name});
     samples_header.insert(ColumnWithTypeAndName{timestamp_type, TimeSeriesColumnNames::Timestamp});
     samples_header.insert(ColumnWithTypeAndName{scalar_type, TimeSeriesColumnNames::Value});
     samples_pipeline = createTargetPipeline(ViewTarget::Samples, samples_header);
@@ -711,9 +739,10 @@ void TimeSeriesSink::consumeTagsAndSamples(const Block & block)
         tags_block.insert(ColumnWithTypeAndName{std::move(max_time_column), min_max_time_type, TimeSeriesColumnNames::MaxTime});
     }
 
-    /// Calculate IDs using precomputed ExpressionActions.
-    auto id_column = calculateId(tags_block);
-    tags_block.insert(0, ColumnWithTypeAndName{id_column, id_type, TimeSeriesColumnNames::ID});
+    /// Calculate the identifier columns using precomputed ExpressionActions.
+    auto calculated_id_columns = calculateIds(tags_block);
+    for (size_t i = 0; i != id_columns.size(); ++i)
+        tags_block.insert(i, ColumnWithTypeAndName{calculated_id_columns[i], id_columns[i].type, id_columns[i].name});
 
     if (tags_block.has(TimeSeriesColumnNames::AllTags))
         tags_block.erase(TimeSeriesColumnNames::AllTags);
@@ -728,8 +757,13 @@ void TimeSeriesSink::consumeTagsAndSamples(const Block & block)
     if (total_samples)
     {
         /// Build columns for the samples block.
-        auto samples_id_column = id_type->createColumn();
-        samples_id_column->reserve(total_samples);
+        MutableColumns samples_id_columns;
+        samples_id_columns.reserve(id_columns.size());
+        for (const auto & id_column : id_columns)
+        {
+            samples_id_columns.push_back(id_column.type->createColumn());
+            samples_id_columns.back()->reserve(total_samples);
+        }
 
         auto timestamp_column = timestamp_type->createColumn();
         timestamp_column->reserve(total_samples);
@@ -739,12 +773,13 @@ void TimeSeriesSink::consumeTagsAndSamples(const Block & block)
 
         fillSamplesColumns(
             filter,
-            *id_column, ts_timestamps, ts_values, ts_offsets,
-            *samples_id_column, *timestamp_column, *value_column);
+            calculated_id_columns, ts_timestamps, ts_values, ts_offsets,
+            samples_id_columns, *timestamp_column, *value_column);
 
         /// Assemble the block and push it to the "samples" table.
         Block samples_block;
-        samples_block.insert(ColumnWithTypeAndName{std::move(samples_id_column), id_type, TimeSeriesColumnNames::ID});
+        for (size_t i = 0; i != id_columns.size(); ++i)
+            samples_block.insert(ColumnWithTypeAndName{std::move(samples_id_columns[i]), id_columns[i].type, id_columns[i].name});
         samples_block.insert(ColumnWithTypeAndName{std::move(timestamp_column), timestamp_type, TimeSeriesColumnNames::Timestamp});
         samples_block.insert(ColumnWithTypeAndName{std::move(value_column), scalar_type, TimeSeriesColumnNames::Value});
 

@@ -77,8 +77,9 @@ private:
     void consumeTagsAndSamples(const Block & block);
     void consumeMetricFamilies(const Block & block);
 
-    /// Calculates the "id" column by applying id_generator defaults and type conversion to the tags block.
-    ColumnPtr calculateId(const Block & tags_block) const;
+    /// Calculates the identifier columns by applying their DEFAULT expressions and type conversion
+    /// to the tags block. Returns one column per entry of `id_columns`, in the same order.
+    Columns calculateIds(const Block & tags_block) const;
 
     StorageTimeSeries & time_series_storage;
     TimeSeriesSettingsPtr time_series_settings;
@@ -91,13 +92,19 @@ private:
     /// Source header for the tags pipeline WITHOUT the `id` column.
     Block tags_header_before_id;
 
-    /// Type of the `id` column in the tags target table.
-    DataTypePtr id_type;
+    /// The identifier columns of the target tables, in the order they are written: a single `id`
+    /// before version `MIN_WITH_SPLIT_ID`, `metric_id` and `tags_id` from it on (see TimeSeriesVersion.h).
+    struct IdColumn
+    {
+        String name;
+        DataTypePtr type;
+    };
+    std::vector<IdColumn> id_columns;
 
     /// True when the resolved id-generator references the `all_tags` identifier.
     bool id_generator_uses_all_tags = false;
 
-    /// Precomputed ExpressionActions for calculating the "id" column from a tags block.
+    /// Precomputed ExpressionActions for calculating the identifier columns from a tags block.
     std::shared_ptr<ExpressionActions> calculate_id_actions;
     std::shared_ptr<ExpressionActions> convert_id_actions;
 

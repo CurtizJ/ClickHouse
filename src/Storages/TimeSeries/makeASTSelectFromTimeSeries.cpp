@@ -340,19 +340,20 @@ namespace
     ///     FROM <samples>
     ///     GROUP BY id
     /// ) AS __samples
-    ASTPtr makeSamplesTableElement(const StorageID & samples_table_id, const String & samples_outer_column_name)
+    ASTPtr makeSamplesTableElement(const StorageID & samples_table_id, const String & samples_outer_column_name,
+                                   const String & id_column_name)
     {
         auto inner = make_intrusive<ASTSelectQuery>();
 
         auto select_list = make_intrusive<ASTExpressionList>();
-        select_list->children.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID));
+        select_list->children.push_back(make_intrusive<ASTIdentifier>(id_column_name));
         select_list->children.push_back(makeGroupArrayOfSamples(samples_outer_column_name));
         inner->setExpression(ASTSelectQuery::Expression::SELECT, select_list);
 
         inner->setExpression(ASTSelectQuery::Expression::TABLES, makeSingleTableList(samples_table_id));
 
         auto group_by = make_intrusive<ASTExpressionList>();
-        group_by->children.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID));
+        group_by->children.push_back(make_intrusive<ASTIdentifier>(id_column_name));
         inner->setExpression(ASTSelectQuery::Expression::GROUP_BY, group_by);
 
         return makeTableElementFromSubquery(std::move(inner), samples_subquery_alias);
@@ -367,7 +368,7 @@ namespace
     /// Here `LIMIT 1 BY id` deduplicates series: unmerged AggregatingMergeTree
     /// parts can hold duplicate rows per series `id`.
     /// If `deduplicate_by_id` is false, the function just returns the plain table <tags>.
-    ASTPtr makeTagsTableElement(const StorageID & tags_table_id, bool deduplicate_by_id)
+    ASTPtr makeTagsTableElement(const StorageID & tags_table_id, bool deduplicate_by_id, const String & id_column_name)
     {
         if (!deduplicate_by_id)
             return makeTableElement(tags_table_id);
@@ -380,7 +381,7 @@ namespace
 
         inner->setExpression(ASTSelectQuery::Expression::LIMIT_BY_LENGTH, make_intrusive<ASTLiteral>(static_cast<UInt8>(1)));
         auto limit_by = make_intrusive<ASTExpressionList>();
-        limit_by->children.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID));
+        limit_by->children.push_back(make_intrusive<ASTIdentifier>(id_column_name));
         inner->setExpression(ASTSelectQuery::Expression::LIMIT_BY, limit_by);
 
         return makeTableElementFromSubquery(std::move(inner), tags_subquery_alias);
@@ -445,19 +446,19 @@ namespace
 
     /// Builds a JOIN clause for the "tags" table to join it to the "samples" table:
     /// INNER ANY JOIN tags USING id
-    ASTPtr makeTagsJoinElement(const StorageID & tags_table_id)
+    ASTPtr makeTagsJoinElement(const StorageID & tags_table_id, const String & id_column_name)
     {
         auto join = make_intrusive<ASTTableJoin>();
         join->kind = JoinKind::Inner;
         join->strictness = JoinStrictness::Any;
         auto using_list = make_intrusive<ASTExpressionList>();
-        using_list->children.push_back(make_intrusive<ASTIdentifier>(TimeSeriesColumnNames::ID));
+        using_list->children.push_back(make_intrusive<ASTIdentifier>(id_column_name));
         join->using_expression_list = using_list;
         join->children.push_back(join->using_expression_list);
 
         /// Samples are grouped by `id`, and `ANY` suppresses duplicate tags rows per `id`,
         /// so the "tags" table is read without the `LIMIT 1 BY id` deduplication.
-        auto tags_elem = makeTagsTableElement(tags_table_id, /* deduplicate_by_id= */ false);
+        auto tags_elem = makeTagsTableElement(tags_table_id, /* deduplicate_by_id= */ false, id_column_name);
 
         auto & tags_elem_ref = *tags_elem->as<ASTTablesInSelectQueryElement>();
         tags_elem_ref.table_join = join;
@@ -526,7 +527,8 @@ namespace
     /// Unlike the joined read (where the `INNER ANY JOIN` with the "tags" table drops them), this branch also returns
     /// samples whose id has no "tags" row - possible only after direct writes into the inner "samples" table.
     ASTPtr buildSelectQueryFromSamplesOnly(
-        const StorageID & samples_table_id, const NameSet & requested_columns, const String & samples_outer_column_name)
+        const StorageID & samples_table_id, const NameSet & requested_columns, const String & samples_outer_column_name,
+        const String & id_column_name)
     {
         auto select_query = make_intrusive<ASTSelectQuery>();
         auto select_list = make_intrusive<ASTExpressionList>();
@@ -540,7 +542,7 @@ namespace
         select_query->setExpression(ASTSelectQuery::Expression::SELECT, select_list);
 
         auto tables = make_intrusive<ASTTablesInSelectQuery>();
-        tables->children.push_back(makeSamplesTableElement(samples_table_id, samples_outer_column_name));
+        tables->children.push_back(makeSamplesTableElement(samples_table_id, samples_outer_column_name, id_column_name));
         select_query->setExpression(ASTSelectQuery::Expression::TABLES, tables);
 
         return makeSelectWithUnionQuery(std::move(select_query));
@@ -561,7 +563,7 @@ namespace
     ASTPtr buildSelectQueryFromTagsOnly(const StorageID & tags_table_id, const NameSet & requested_columns,
                                         const NameSet & requested_tags,
                                         const std::unordered_map<String, String> & columns_by_tags,
-                                        bool deduplicate_tags_by_id)
+                                        bool deduplicate_tags_by_id, const String & id_column_name)
     {
         auto select_query = make_intrusive<ASTSelectQuery>();
         auto select_list = make_intrusive<ASTExpressionList>();
@@ -580,7 +582,7 @@ namespace
         select_query->setExpression(ASTSelectQuery::Expression::SELECT, select_list);
 
         auto tables = make_intrusive<ASTTablesInSelectQuery>();
-        tables->children.push_back(makeTagsTableElement(tags_table_id, deduplicate_tags_by_id));
+        tables->children.push_back(makeTagsTableElement(tags_table_id, deduplicate_tags_by_id, id_column_name));
         select_query->setExpression(ASTSelectQuery::Expression::TABLES, tables);
 
         return makeSelectWithUnionQuery(std::move(select_query));
@@ -665,7 +667,8 @@ namespace
         const NameSet & requested_tags,
         const std::unordered_map<String, String> & columns_by_tags,
         const String & samples_outer_column_name,
-        bool deduplicate_tags_by_id)
+        bool deduplicate_tags_by_id,
+        const String & id_column_name)
     {
         auto select_query = make_intrusive<ASTSelectQuery>();
         select_query->setExpression(ASTSelectQuery::Expression::SELECT,
@@ -675,12 +678,12 @@ namespace
         if (samples_table_id)
         {
             /// Samples-anchored: samples are the (streamed) probe side, tags/metric families the smaller build sides.
-            tables->children.push_back(makeSamplesTableElement(*samples_table_id, samples_outer_column_name));
-            tables->children.push_back(makeTagsJoinElement(tags_table_id));
+            tables->children.push_back(makeSamplesTableElement(*samples_table_id, samples_outer_column_name, id_column_name));
+            tables->children.push_back(makeTagsJoinElement(tags_table_id, id_column_name));
         }
         else
         {
-            tables->children.push_back(makeTagsTableElement(tags_table_id, deduplicate_tags_by_id));
+            tables->children.push_back(makeTagsTableElement(tags_table_id, deduplicate_tags_by_id, id_column_name));
         }
         if (metric_families_table_id)
             tables->children.push_back(makeMetricFamiliesFullJoinElement(*metric_families_table_id));
@@ -698,6 +701,8 @@ ASTPtr makeASTSelectFromTimeSeries(
     const ContextPtr & context)
 {
     const String samples_outer_column_name = TimeSeriesColumnNames::getOuterSamples(storage.getVersion());
+    /// The column the samples and tags tables are joined on (see TimeSeriesVersion.h).
+    const String id_column_name = TimeSeriesColumnNames::getIdentifier(storage.getVersion());
     bool need_samples = requested_columns.contains(samples_outer_column_name);
 
     bool need_tags = requested_columns.contains(TimeSeriesColumnNames::MetricName)
@@ -748,11 +753,11 @@ ASTPtr makeASTSelectFromTimeSeries(
 
     /// Single-table reads (no join).
     if (need_samples && !need_tags && !need_metric_families)
-        return buildSelectQueryFromSamplesOnly(*samples_table_id, requested_columns, samples_outer_column_name);
+        return buildSelectQueryFromSamplesOnly(*samples_table_id, requested_columns, samples_outer_column_name, id_column_name);
 
     if (need_tags && !need_samples && !need_metric_families)
         return buildSelectQueryFromTagsOnly(*tags_table_id, requested_columns, requested_tags, columns_by_tags,
-                                            deduplicate_tags_by_id);
+                                            deduplicate_tags_by_id, id_column_name);
 
     if (need_metric_families && !need_tags && !need_samples)
         return buildSelectQueryFromMetricFamiliesOnly(*metric_families_table_id, requested_columns);
@@ -760,7 +765,8 @@ ASTPtr makeASTSelectFromTimeSeries(
     /// Multi-table reads: anchored on "samples" when it is read, otherwise on "tags".
     chassert(need_tags);
     return buildSelectQueryFromMultipleTables(*tags_table_id, samples_table_id, metric_families_table_id, requested_columns,
-                                           requested_tags, columns_by_tags, samples_outer_column_name, deduplicate_tags_by_id);
+                                           requested_tags, columns_by_tags, samples_outer_column_name, deduplicate_tags_by_id,
+                                           id_column_name);
 }
 
 SettingsChanges getSettingsForSelectFromTimeSeries()
