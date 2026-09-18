@@ -1,5 +1,6 @@
 #pragma once
 
+#include <numeric>
 #include <span>
 #include <config.h>
 #include <Common/Exception.h>
@@ -71,6 +72,29 @@ struct BitpackingBlockCodecImpl<true>
         const __m128i * m128i_in = reinterpret_cast<const __m128i *>(in.data());
         const __m128i * m128i_in_end = simdunpack_length(m128i_in, n, out.data(), max_bits);
         size_t read_bytes = static_cast<size_t>(m128i_in_end - m128i_in) * sizeof(__m128);
+        in = in.subspan(read_bytes);
+        return read_bytes;
+    }
+
+    /// Like `decode`, but the packed values are deltas and the output is their running sum starting from
+    /// `base`: `out[i] = base + in[0] + ... + in[i]`. A full block is decoded with `simdunpackd1`, which
+    /// folds the prefix sum into the SIMD unpack: it reads the same packed layout as `simdunpack` (with
+    /// unaligned loads) and replaces the serial chain of `n` dependent additions a scalar scan needs.
+    /// A tail block (`n < BLOCK_SIZE`) has no integrated variant and is decoded and then scanned.
+    static size_t decodePrefixSum(std::span<const std::byte> & in, size_t n, uint32_t max_bits, uint32_t base, std::span<uint32_t> & out)
+    {
+        if (n != BLOCK_SIZE)
+        {
+            size_t read_bytes = decode(in, n, max_bits, out);
+            std::inclusive_scan(out.begin(), out.begin() + n, out.begin(), std::plus<uint32_t>{}, base);
+            return read_bytes;
+        }
+
+        if (max_bits > 32)
+            throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Invalid bit width {} bits must be in [0, 32].", max_bits);
+
+        simdunpackd1(base, reinterpret_cast<const __m128i *>(in.data()), out.data(), max_bits);
+        size_t read_bytes = bitpackingCompressedBytes(BLOCK_SIZE, max_bits);
         in = in.subspan(read_bytes);
         return read_bytes;
     }
@@ -171,6 +195,15 @@ struct BitpackingBlockCodecImpl<false>
         const char * data_in_end = unpackingLength(data_in, n, out.data(), max_bits);
         size_t read_bytes = static_cast<size_t>(data_in_end - data_in);
         in = in.subspan(read_bytes);
+        return read_bytes;
+    }
+
+    /// Like `decode`, but the packed values are deltas and the output is their running sum starting from
+    /// `base`: `out[i] = base + in[0] + ... + in[i]`. Same result as the SIMD implementation.
+    [[maybe_unused]] static size_t decodePrefixSum(std::span<const std::byte> & in, size_t n, uint32_t max_bits, uint32_t base, std::span<uint32_t> & out)
+    {
+        size_t read_bytes = decode(in, n, max_bits, out);
+        std::inclusive_scan(out.begin(), out.begin() + n, out.begin(), std::plus<uint32_t>{}, base);
         return read_bytes;
     }
 

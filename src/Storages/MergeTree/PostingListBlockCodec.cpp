@@ -61,6 +61,32 @@ namespace
 
         size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) override
         {
+            auto [bits, required_size] = readBlockHeader(in, count);
+            size_t consumed_size = BitpackingBlockCodec::decode(in, count, bits, out);
+            checkConsumedSize(required_size, consumed_size, count, bits);
+
+            /// Total bytes consumed from `in`: the bits byte plus the bit-packed payload.
+            return 1 + consumed_size;
+        }
+
+        size_t decodeBlockPrefixSum(std::span<const std::byte> & in, size_t count, uint32_t base, std::span<uint32_t> out) override
+        {
+            auto [bits, required_size] = readBlockHeader(in, count);
+            size_t consumed_size = BitpackingBlockCodec::decodePrefixSum(in, count, bits, base, out);
+            checkConsumedSize(required_size, consumed_size, count, bits);
+            return 1 + consumed_size;
+        }
+
+        /// `1` (bits header) + `4 * BLOCK_SIZE` (bit-pure max at `bits = 32`) + 16 (SIMD alignment slack).
+        size_t maxBlockBytes() const override { return 1 + sizeof(uint32_t) * BLOCK_SIZE + 16; }
+
+        IPostingListCodec::Type type() const override { return IPostingListCodec::Type::Bitpacking; }
+
+    private:
+        /// Reads the bits byte of a block of `count` values and returns it with the payload size it implies,
+        /// checking that `in` holds that much.
+        static std::pair<uint8_t, size_t> readBlockHeader(std::span<const std::byte> & in, size_t count)
+        {
             if (in.empty())
                 throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected at least {} bytes, but got {}", 1, in.size());
 
@@ -72,7 +98,11 @@ namespace
             if (in.size() < required_size)
                 throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected data size {}, but got {}", required_size, in.size());
 
-            size_t consumed_size = BitpackingBlockCodec::decode(in, count, bits, out);
+            return {bits, required_size};
+        }
+
+        static void checkConsumedSize(size_t required_size, size_t consumed_size, size_t count, uint8_t bits)
+        {
             if (required_size != consumed_size)
                 throw Exception(ErrorCodes::CORRUPTED_DATA,
                 "Bitpacking decode size mismatch: expected to consume {} bytes for {} integers with {} bits, but actually consumed {} bytes",
@@ -80,15 +110,7 @@ namespace
                 count,
                 bits,
                 consumed_size);
-
-            /// Total bytes consumed from `in`: the bits byte plus the bit-packed payload.
-            return 1 + consumed_size;
         }
-
-        /// `1` (bits header) + `4 * BLOCK_SIZE` (bit-pure max at `bits = 32`) + 16 (SIMD alignment slack).
-        size_t maxBlockBytes() const override { return 1 + sizeof(uint32_t) * BLOCK_SIZE + 16; }
-
-        IPostingListCodec::Type type() const override { return IPostingListCodec::Type::Bitpacking; }
     };
 
 }

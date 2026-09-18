@@ -28,6 +28,11 @@ public:
     /// `count` slots), advancing `in` past the consumed bytes. Returns the number of bytes consumed.
     virtual size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) = 0;
 
+    /// Like `decodeBlock` for a block of deltas: writes their running sum starting from `base`,
+    /// `out[i] = base + deltas[0] + ... + deltas[i]`, so the caller gets the absolute row ids directly.
+    /// Codecs fold the prefix sum into the decoding where they can.
+    virtual size_t decodeBlockPrefixSum(std::span<const std::byte> & in, size_t count, uint32_t base, std::span<uint32_t> out) = 0;
+
     /// Upper bound on the encoded size of one block (1..BLOCK_SIZE delta values), in bytes.
     virtual size_t maxBlockBytes() const = 0;
 
