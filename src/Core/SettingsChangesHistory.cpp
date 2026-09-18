@@ -48,6 +48,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"max_bytes_before_external_distinct", 0, 0, "New setting to enable spilling of `DISTINCT` to disk when memory usage exceeds the given threshold in bytes. If 0, only `max_bytes_ratio_before_external_distinct` applies."},
             {"max_bytes_ratio_before_external_distinct", 0., 0.5, "New setting to enable spilling of `DISTINCT` to disk when memory usage exceeds the given ratio of available memory. If 0, only `max_bytes_before_external_distinct` applies."},
             {"output_format_arrow_unsupported_types", "binary", "binary", "New setting superseding `output_format_arrow_unsupported_types_as_binary`, adding a `text` mode. Its default matches the previous behavior, so `compatibility` must not change it."},
+            {"text_index_postings_cursor_intersection_algorithm", "auto", "auto", "New setting superseding `text_index_lazy_intersection_density_threshold`: selects the posting list intersection algorithm in lazy posting list apply mode. `auto` keeps the previous default behavior, so `compatibility` must not change it."},
+            {"text_index_lazy_intersection_density_threshold", 0.2, 0.2, "Obsolete setting, superseded by `text_index_postings_cursor_intersection_algorithm`. A posting list density is no longer compared against a threshold: brute force is chosen whenever the sparsest posting list has a posting in every packed block of the densest one, which subsumed every value of the threshold below `1`."},
         });
         addSettingsChanges(settings_changes_history, "26.9",
         {

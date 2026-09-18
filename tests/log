@@ -1,0 +1,865 @@
+Using queries from 'queries' directory
+Connecting to ClickHouse server... OK
+Connected to server 26.6.1.1 @ 1a5b3fce109aa356dfef4ef1275b3cfb97cadfc7 text-index-lazy-share-prebuilt-and-segments
+build_flags=['release', 'use_embedded_compiler', 'use_glibc_compatibility', 'use_jemalloc', 'use_icu', 'use_h3', 'use_mysql', 'use_rdkafka', 'use_capnp', 'use_base64', 'use_hdfs', 'use_snappy', 'use_parquet', 'use_protobuf', 'use_brotli', 'use_ssl', 'use_vectorscan', 'use_simdjson', 'use_grpc', 'use_ldap', 'use_krb5', 'use_filelog', 'use_bzip2', 'use_amqpcpp', 'use_rocksdb', 'use_nuraft', 'use_nlp', 'use_libstemmer', 'use_liburing', 'use_sqlite', 'use_libpqxx', 'use_azure_blob_storage', 'use_aws_s3', 'use_cassandra', 'use_yaml_cpp', 'use_datasketches', 'use_avro', 'use_arrow', 'use_orc', 'use_msgpack', 'use_xray', 'use_wasmedge', 'cpu-x86_64'] collect_per_test_coverage=False coverage_active=False
+Found 578 parallel tests and 31 sequential tests
+Running about 19 stateless tests (Process-3).
+02346_text_index_functions_with_empty_needle:                           [ OK ] 0.24 sec.
+Running about 19 stateless tests (Process-12).
+04039_text_index_map_values_subcolumn:                                  [ OK ] 0.26 sec.
+Running about 19 stateless tests (Process-26).
+02346_text_index_bug54541:                                              [ OK ] 0.27 sec.
+Running about 19 stateless tests (Process-4).
+02346_text_index_direct_read_nullable:                                  [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-11).
+04043_text_index_in_with_preprocessor:                                  [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-10).
+04256_text_index_lazy_apply_with_patterns:                              [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-18).
+04003_text_index_search_mode:                                           [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-16).
+02346_text_index_bug101913:                                             [ OK ] 0.31 sec.
+Running about 19 stateless tests (Process-25).
+04092_text_index_like_large_postings:                                   [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-8).
+02346_text_index_bug87887:                                              [ OK ] 0.35 sec.
+Running about 19 stateless tests (Process-19).
+04095_text_index_like_overflow_fallback:                                [ OK ] 0.35 sec.
+Running about 19 stateless tests (Process-29).
+02346_text_index_dictionary_frontcoding:                                [ OK ] 0.35 sec.
+Running about 19 stateless tests (Process-24).
+04093_text_index_separate_analysis:                                     [ OK ] 0.36 sec.
+Running about 19 stateless tests (Process-22).
+04093_text_index_separate_analysis:                                     [ OK ] 0.41 sec.
+Running about 19 stateless tests (Process-6).
+02346_text_index_hint:                                                  [ OK ] 0.45 sec.
+Running about 19 stateless tests (Process-5).
+04258_text_index_lazy_intersect_heap:                                   [ OK ] 0.45 sec.
+Running about 19 stateless tests (Process-14).
+02346_text_index_summingmergetree:                                      [ OK ] 0.45 sec.
+Running about 19 stateless tests (Process-17).
+02346_text_index_duplicate_tokens:                                      [ OK ] 0.45 sec.
+Running about 19 stateless tests (Process-30).
+04095_text_index_like_overflow_fallback:                                [ OK ] 0.41 sec.
+02346_text_index_bug90609:                                              [ OK ] 0.24 sec.
+Running about 19 stateless tests (Process-23).
+02346_text_index_bug102497:                                             [ OK ] 0.51 sec.
+Running about 19 stateless tests (Process-7).
+04261_text_index_partial_mark_read:                                     [ OK ] 0.55 sec.
+Running about 19 stateless tests (Process-20).
+02346_text_index_partially_materialized:                                [ OK ] 0.56 sec.
+04063_text_index_in_tuple:                                              [ OK ] 0.25 sec.
+02346_text_index_hint_profileevents:                                    [ OK ] 0.30 sec.
+02346_text_index_vertical_merge:                                        [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-27).
+04042_text_index_lightweight_delete:                                    [ OK ] 0.65 sec.
+04003_text_index_search_mode:                                           [ OK ] 0.29 sec.
+04039_text_index_map_values_subcolumn:                                  [ OK ] 0.25 sec.
+04094_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+02346_text_index_bug102497:                                             [ OK ] 0.39 sec.
+03100_lwu_48_text_index:                                                [ OK ] 0.30 sec.
+Running about 19 stateless tests (Process-15).
+04042_text_index_lightweight_delete:                                    [ OK ] 0.79 sec.
+02346_text_index_tokenizer_partially_materialized:                      [ OK ] 0.39 sec.
+Running about 19 stateless tests (Process-28).
+04042_text_index_lightweight_delete:                                    [ OK ] 0.80 sec.
+04102_text_index_alias_direct_read:                                     [ OK ] 0.29 sec.
+04261_text_index_partial_mark_read:                                     [ OK ] 0.45 sec.
+03913_text_index_preprocessor_expression:                               [ OK ] 0.55 sec.
+02346_text_index_partially_materialized:                                [ OK ] 0.50 sec.
+04257_text_index_lazy_profile_events:                                   [ FAIL ] 0.29 sec.
+Reason: result differs with reference:  
+--- /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.reference	2026-05-29 15:40:30.451538872 +0200
++++ /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.538705.stdout	2026-05-30 00:00:01.596173388 +0200
+@@ -5,11 +5,11 @@
+ cardinality eright	300
+ 512
+ 2000
+ 2000
+ 512
+ 300
+ 0
+ 128
+ 512
+ all events fired across tagged queries:
+-1	1	1	1	1	1	1	1	1	1	1
++1	1	1	1	1	1	1	0	1	1	1
+
+
+Settings used in the test: --max_insert_threads 2 --group_by_two_level_threshold 762774 --group_by_two_level_threshold_bytes 44940451 --distributed_aggregation_memory_efficient 0 --fsync_metadata 0 --output_format_parallel_formatting 0 --input_format_parallel_parsing 0 --min_chunk_bytes_for_parallel_parsing 14464834 --max_read_buffer_size 747959 --prefer_localhost_replica 1 --max_block_size 8516 --max_joined_block_size_rows 84206 --joined_block_split_single_row 1 --join_output_by_rowlist_perkey_rows_threshold 200 --max_threads 2 --optimize_append_index 1 --use_hedged_requests 1 --optimize_if_chain_to_multiif 1 --optimize_if_transform_strings_to_enum 1 --optimize_read_in_order 0 --optimize_or_like_chain 0 --optimize_substitute_columns 1 --enable_multiple_prewhere_read_steps 0 --read_in_order_two_level_merge_threshold 26 --optimize_aggregation_in_order 0 --aggregation_in_order_max_block_bytes 24489132 --use_uncompressed_cache 1 --min_bytes_to_use_direct_io 1 --min_bytes_to_use_mmap_io 6213319244 --local_filesystem_read_method mmap --remote_filesystem_read_method read --local_filesystem_read_prefetch 1 --filesystem_cache_segments_batch_size 3 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 1 --throw_on_error_from_cache_on_write_operations 1 --remote_filesystem_read_prefetch 0 --distributed_cache_discard_connection_if_unread_data 0 --distributed_cache_use_clients_cache_for_write 0 --distributed_cache_use_clients_cache_for_read 0 --allow_prefetched_read_pool_for_remote_filesystem 0 --filesystem_prefetch_max_memory_usage 64Mi --filesystem_prefetches_limit 10 --filesystem_prefetch_min_bytes_for_single_read_task 16Mi --filesystem_prefetch_step_marks 50 --filesystem_prefetch_step_bytes 0 --enable_filesystem_cache 1 --enable_filesystem_cache_on_write_operations 1 --compile_expressions 0 --compile_aggregate_expressions 0 --compile_sort_description 0 --merge_tree_coarse_index_granularity 2 --optimize_distinct_in_order 1 --max_bytes_before_remerge_sort 2603140257 --min_compress_block_size 2257939 --max_compress_block_size 1570600 --merge_tree_compact_parts_min_granules_to_multibuffer_read 70 --optimize_sorting_by_input_stream_properties 0 --http_response_buffer_size 6882605 --http_wait_end_of_query True --enable_memory_bound_merging_of_aggregation_results 0 --min_count_to_compile_expression 0 --min_count_to_compile_aggregate_expression 3 --min_count_to_compile_sort_description 3 --session_timezone America/Hermosillo --use_page_cache_for_disks_without_file_cache False --use_page_cache_for_local_disks False --use_page_cache_for_object_storage True --page_cache_inject_eviction False --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.47 --prefer_external_sort_block_bytes 0 --cross_join_min_rows_to_compress 0 --cross_join_min_bytes_to_compress 1 --min_external_table_block_size_bytes 0 --max_parsing_threads 0 --optimize_functions_to_subcolumns 1 --parallel_replicas_local_plan 1 --query_plan_join_swap_table false --enable_vertical_final 1 --optimize_extract_common_expressions 0 --optimize_rewrite_array_exists_to_has False --optimize_skip_unused_shards True --optimize_trivial_approximate_count_query True --optimize_trivial_insert_select False --optimize_using_constraints False --optimize_syntax_fuse_functions False --optimize_aggregators_of_group_by_keys True --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons True --optimize_group_by_constant_keys True --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup True --optimize_move_to_prewhere True --optimize_multiif_to_if True --optimize_normalize_count_variants True --optimize_on_insert True --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if True --optimize_skip_unused_shards_rewrite_in True --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count True --optimize_use_projections True --optimize_use_implicit_projections False --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 0 --use_query_condition_cache 1 --secondary_indices_enable_bulk_filtering 1 --use_skip_indexes_if_final 0 --use_skip_indexes_on_data_read 1 --optimize_rewrite_like_perfect_affix 0 --enable_lazy_columns_replication 0 --allow_special_serialization_kinds_in_output_formats 1 --use_skip_indexes_for_top_k 0 --use_top_k_dynamic_filtering False --query_plan_max_limit_for_top_k_optimization 1 --query_plan_read_in_order_through_join 0 --read_in_order_use_virtual_row 1 --short_circuit_function_evaluation_for_nulls_threshold 0.6540565023414029 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 918140 --query_plan_optimize_join_order_algorithm greedy,dpsize --max_bytes_before_external_join 1000000000 --execute_exists_as_scalar_subquery False --normalize_function_names True --enable_join_runtime_filters False --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions False --query_plan_join_shard_by_pk_ranges False --count_distinct_optimization True --enable_add_distinct_to_in_subqueries True --use_statistics False --use_statistics_cache False --enable_optimize_predicate_expression False --enable_optimize_predicate_expression_to_final_subquery True --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions False --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition True --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 1 --query_plan_optimize_join_order_limit 5 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint True --optimize_truncate_order_by_after_group_by_keys True --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions True --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down True --enable_join_transitive_predicates False --max_bytes_before_external_sort 10737418240 --max_bytes_before_external_group_by 10737418240 --max_bytes_ratio_before_external_sort 0 --max_bytes_ratio_before_external_group_by 0 --use_skip_indexes_if_final_exact_mode 0
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 0.0 --prefer_fetch_merged_part_size_threshold 10737418240 --vertical_merge_algorithm_min_rows_to_activate 1000000 --vertical_merge_algorithm_min_columns_to_activate 1 --allow_vertical_merges_from_compact_to_wide_parts 1 --min_merge_bytes_to_use_direct_io 1 --index_granularity_bytes 16484031 --merge_max_block_size 12755 --index_granularity 13622 --min_bytes_for_wide_part 1073741824 --compress_marks 0 --compress_primary_key 1 --marks_compress_block_size 63951 --primary_key_compress_block_size 53415 --replace_long_file_name_to_hash 1 --max_file_name_length 0 --min_bytes_for_full_part_storage 468482851 --compact_parts_max_bytes_to_buffer 297873131 --compact_parts_max_granules_to_buffer 46 --compact_parts_merge_max_bytes_to_prefetch_part 24882378 --cache_populated_by_fetch 0 --concurrent_part_removal_threshold 100 --old_parts_lifetime 210 --prewarm_mark_cache 1 --use_const_adaptive_granularity 0 --enable_index_granularity_compression 1 --enable_block_number_column 1 --enable_block_offset_column 1 --use_primary_key_cache 0 --prewarm_primary_key_cache 0 --object_serialization_version v2 --object_shared_data_serialization_version map --object_shared_data_serialization_version_for_zero_level_parts map_with_buckets --object_shared_data_buckets_for_compact_part 27 --object_shared_data_buckets_for_wide_part 19 --dynamic_serialization_version v2 --auto_statistics_types countmin,tdigest --serialization_info_version basic --string_serialization_version single_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 1 --min_columns_to_activate_adaptive_write_buffer 420 --reduce_blocking_parts_sleep_ms 1659 --shared_merge_tree_outdated_parts_group_size 1 --shared_merge_tree_max_outdated_parts_to_process_at_once 4 --map_serialization_version basic --map_serialization_version_for_zero_level_parts with_buckets --max_buckets_in_map 15 --map_buckets_strategy linear --map_buckets_min_avg_size 821 --map_buckets_coefficient 1.71 --propagate_types_serialization_versions_to_nested_types 1 --compress_per_column_in_compact_parts 0
+
+Database: test_nw719n7h
+02346_text_index_qualify_filter_name_mismatch:                          [ OK ] 0.44 sec.
+02346_text_index_mergeTreeTextIndex:                                    [ OK ] 0.34 sec.
+04041_text_index_direct_read_or_multi_column:                           [ OK ] 0.24 sec.
+04050_text_index_map_keys_in_subquery:                                  [ OK ] 0.30 sec.
+02346_text_index_direct_read_nullable:                                  [ OK ] 0.30 sec.
+04033_text_index_empty_block_during_merge:                              [ OK ] 0.25 sec.
+02346_text_index_bug101913:                                             [ OK ] 0.29 sec.
+Running about 19 stateless tests (Process-32).
+02346_text_index_function_ilike:                                        [ OK ] 1.00 sec.
+02346_text_index_dictionary_frontcoding:                                [ OK ] 0.29 sec.
+04042_text_index_prewhere_alias_select:                                 [ OK ] 0.29 sec.
+02346_text_index_on_subcolumns:                                         [ OK ] 0.70 sec.
+04075_text_index_apply_mode_lazy:                                       [ OK ] 0.59 sec.
+02346_text_index_bug47393:                                              [ OK ] 0.29 sec.
+04075_text_index_linear_scan_block_skip:                                [ OK ] 0.54 sec.
+04092_text_index_like_large_postings:                                   [ OK ] 0.19 sec.
+02346_text_index_default_granularity:                                   [ OK ] 0.29 sec.
+02346_text_index_bug103812:                                             [ OK ] 0.24 sec.
+Running about 19 stateless tests (Process-21).
+04050_text_index_starts_ends_with:                                      [ OK ] 1.22 sec.
+02346_text_index_preprocessor_partially_materialized:                   [ OK ] 0.39 sec.
+02346_text_index_posting_list_compression_data_size_validation:         [ OK ] 0.34 sec.
+Running about 19 stateless tests (Process-9).
+02346_text_index_nullable:                                              [ OK ] 1.25 sec.
+02346_text_index_bug47393:                                              [ OK ] 0.24 sec.
+02346_text_index_bug59039:                                              [ OK ] 0.19 sec.
+02346_text_index_bug84805:                                              [ OK ] 0.43 sec.
+02346_text_index_bug54541:                                              [ OK ] 0.29 sec.
+04010_text_index_incompelete_granules:                                  [ OK ] 0.49 sec.
+02346_text_index_creation:                                              [ OK ] 1.01 sec.
+04043_text_index_in_with_preprocessor:                                  [ OK ] 0.24 sec.
+04093_text_index_like_overflow_fallback:                                [ OK ] 0.29 sec.
+04036_text_index_map_keys_values_in:                                    [ OK ] 0.29 sec.
+04044_text_index_hash_token_boundaries:                                 [ OK ] 0.24 sec.
+02346_text_index_default_granularity:                                   [ OK ] 0.29 sec.
+02346_text_index_byte_size_reporting:                                   [ OK ] 0.24 sec.
+04102_text_index_hasAny_hasAll:                                         [ OK ] 0.54 sec.
+02346_text_index_on_lower_column:                                       [ OK ] 0.40 sec.
+Running about 19 stateless tests (Process-13).
+02346_text_index_creation:                                              [ OK ] 1.54 sec.
+02346_text_index_bug93432:                                              [ OK ] 0.24 sec.
+04035_text_index_map_values_in:                                         [ OK ] 0.29 sec.
+02346_text_index_function_hasAnyAllTokens_partially_materialized:       [ OK ] 0.64 sec.
+02346_text_index_bug102497:                                             [ OK ] 0.39 sec.
+02346_text_index_bug87887:                                              [ OK ] 0.34 sec.
+02346_text_index_match_predicate:                                       [ OK ] 0.34 sec.
+04093_text_index_like_overflow_fallback:                                [ OK ] 0.24 sec.
+02346_text_index_materialization:                                       [ OK ] 0.44 sec.
+02346_text_index_bug92921:                                              [ OK ] 0.28 sec.
+02346_text_index_replacingmergetree2:                                   [ OK ] 0.39 sec.
+04026_prewhere_qualify_text_index:                                      [ OK ] 0.29 sec.
+04030_text_index_condition_logical_error:                               [ OK ] 0.29 sec.
+02346_text_index_on_lower_column:                                       [ OK ] 0.39 sec.
+04095_text_index_like_overflow_fallback:                                [ OK ] 0.34 sec.
+04249_text_index_lazy_all_duplicate_tokens:                             [ OK ] 0.24 sec.
+04042_text_index_prewhere_alias_select:                                 [ OK ] 0.34 sec.
+04103_text_index_alias_direct_read_map:                                 [ OK ] 0.28 sec.
+04223_text_index_direct_read_like_90802:                                [ OK ] 0.29 sec.
+02346_text_index_bug88080:                                              [ OK ] 0.18 sec.
+02346_text_index_coalescingmergetree:                                   [ OK ] 0.34 sec.
+02346_text_index_lwd:                                                   [ OK ] 0.49 sec.
+04035_text_index_map_values_in:                                         [ OK ] 0.29 sec.
+02346_text_index_posting_list_compression:                              [ OK ] 0.34 sec.
+04102_text_index_alias_direct_read:                                     [ OK ] 0.34 sec.
+04093_text_index_separate_analysis:                                     [ OK ] 0.34 sec.
+04258_text_index_lazy_intersect_heap:                                   [ OK ] 0.44 sec.
+04249_text_index_lazy_all_duplicate_tokens:                             [ OK ] 0.29 sec.
+04075_text_index_apply_mode_lazy_segment_advance:                       [ OK ] 0.94 sec.
+02346_text_index_bug88080:                                              [ OK ] 0.19 sec.
+02346_text_index_bug93432:                                              [ OK ] 0.18 sec.
+04075_text_index_apply_mode:                                            [ OK ] 1.04 sec.
+02346_text_index_parallel_replicas:                                     [ OK ] 0.44 sec.
+02346_text_index_qualify_filter_name_mismatch:                          [ OK ] 0.44 sec.
+02346_text_index_on_lower_column:                                       [ OK ] 0.34 sec.
+02346_text_index_preprocessor_partially_materialized:                   [ OK ] 0.34 sec.
+02346_text_index_bug89605:                                              [ OK ] 0.29 sec.
+04092_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+02346_text_index_tokenizer_partially_materialized:                      [ OK ] 0.34 sec.
+04093_text_index_like_overflow_fallback:                                [ OK ] 0.29 sec.
+04093_text_index_like_overflow_fallback:                                [ OK ] 0.29 sec.
+04043_text_index_in_with_preprocessor:                                  [ OK ] 0.29 sec.
+04038_text_index_preprocessor_type_validation:                          [ OK ] 1.94 sec.
+02346_text_index_preprocessor_partially_materialized:                   [ OK ] 0.39 sec.
+02346_text_index_collapsingmergetree:                                   [ OK ] 0.44 sec.
+02346_text_index_bug87887:                                              [ OK ] 0.40 sec.
+02346_text_index_materialize_subcolumns:                                [ OK ] 0.49 sec.
+02346_text_index_function_ilike:                                        [ OK ] 1.14 sec.
+04223_text_index_direct_read_like_90802:                                [ OK ] 0.39 sec.
+02346_text_index_materialize_subcolumns:                                [ OK ] 0.50 sec.
+04256_text_index_lazy_apply_with_patterns:                              [ OK ] 0.24 sec.
+04043_text_index_in_with_preprocessor:                                  [ OK ] 0.24 sec.
+04266_text_index_tokens_cardinality_order:                              [ OK ] 1.69 sec.
+04266_text_index_tokens_cardinality_order:                              [ OK ] 1.70 sec.
+02346_text_index_coalescingmergetree:                                   [ OK ] 0.39 sec.
+02346_text_index_bug47393:                                              [ OK ] 0.29 sec.
+04098_text_index_read_once:                                             [ OK ] 0.28 sec.
+02346_text_index_dictionary_frontcoding:                                [ OK ] 0.29 sec.
+02346_text_index_direct_read_with_query_condition_cache:                [ OK ] 0.28 sec.
+02346_text_index_byte_size_reporting:                                   [ OK ] 0.24 sec.
+04033_text_index_empty_block_during_merge:                              [ OK ] 0.29 sec.
+04030_text_index_condition_logical_error:                               [ OK ] 0.30 sec.
+02346_text_index_bug62681:                                              [ OK ] 0.34 sec.
+02346_text_index_detach_attach:                                         [ OK ] 0.24 sec.
+04093_text_index_separate_analysis:                                     [ OK ] 0.39 sec.
+04039_text_index_map_values_subcolumn:                                  [ OK ] 0.24 sec.
+02346_text_index_on_lower_column:                                       [ OK ] 0.40 sec.
+02346_text_index_function_ilike:                                        [ OK ] 0.94 sec.
+02346_text_index_bug90778:                                              [ OK ] 0.34 sec.
+04038_text_index_no_negated_functions:                                  [ OK ] 0.29 sec.
+02346_text_index_bug92921:                                              [ OK ] 0.34 sec.
+02346_text_index_partially_materialized:                                [ OK ] 0.50 sec.
+04038_text_index_no_negated_functions:                                  [ OK ] 0.25 sec.
+04075_text_index_correctness:                                           [ OK ] 0.34 sec.
+02346_text_index_direct_read_crash:                                     [ OK ] 0.34 sec.
+04010_text_index_incompelete_granules:                                  [ OK ] 0.54 sec.
+03913_text_index_preprocessor_expression:                               [ OK ] 0.69 sec.
+04082_materialize_skip_indexes_text_index:                              [ OK ] 0.34 sec.
+02346_text_index_collapsingmergetree:                                   [ OK ] 0.34 sec.
+04102_text_index_hasAny_hasAll:                                         [ OK ] 0.49 sec.
+04075_text_index_apply_mode:                                            [ OK ] 0.94 sec.
+04041_text_index_direct_read_or_multi_column:                           [ OK ] 0.29 sec.
+02346_text_index_direct_read_crash:                                     [ OK ] 0.39 sec.
+02346_text_index_posting_list_compression_data_size_validation:         [ OK ] 0.39 sec.
+04026_prewhere_qualify_text_index:                                      [ OK ] 0.29 sec.
+02346_text_index_bug101913:                                             [ OK ] 0.30 sec.
+02346_text_index_bug103812:                                             [ OK ] 0.30 sec.
+02346_text_index_bug47393:                                              [ OK ] 0.30 sec.
+02346_text_index_collapsingmergetree:                                   [ OK ] 0.49 sec.
+04266_text_index_tokens_cardinality_order:                              [ OK ] 1.60 sec.
+02346_text_index_on_lower_column:                                       [ OK ] 0.39 sec.
+Running about 19 stateless tests (Process-31).
+02346_text_index_mergeTreeTextIndex_access:                             [ OK ] 3.41 sec.
+04096_text_index_json_subcolumn:                                        [ OK ] 0.24 sec.
+03100_lwu_48_text_index:                                                [ OK ] 0.24 sec.
+02346_text_index_direct_read_with_query_condition_cache:                [ OK ] 0.24 sec.
+04103_text_index_alias_direct_read_map:                                 [ OK ] 0.25 sec.
+04141_text_index_alias_lambda_with_constants:                           [ OK ] 0.74 sec.
+04075_text_index_correctness:                                           [ OK ] 0.29 sec.
+04030_text_index_condition_logical_error:                               [ OK ] 0.29 sec.
+04256_text_index_lazy_apply_with_patterns:                              [ OK ] 0.29 sec.
+02346_text_index_bug54541:                                              [ OK ] 0.29 sec.
+04037_text_index_map_empty_values_in:                                   [ OK ] 0.29 sec.
+02346_text_index_posting_list_compression:                              [ OK ] 0.34 sec.
+02346_text_index_collapsingmergetree:                                   [ OK ] 0.39 sec.
+04044_text_index_hash_token_boundaries:                                 [ OK ] 0.28 sec.
+02346_text_index_posting_list_compression_data_size_validation:         [ OK ] 0.39 sec.
+02346_text_index_lwd:                                                   [ OK ] 0.44 sec.
+04082_materialize_skip_indexes_text_index:                              [ OK ] 0.34 sec.
+02346_text_index_materialization:                                       [ OK ] 0.55 sec.
+02346_text_index_function_hasAnyAllTokens_partially_materialized:       [ OK ] 0.59 sec.
+02346_text_index_bug47393:                                              [ OK ] 0.34 sec.
+02346_text_index_bug102497:                                             [ OK ] 0.49 sec.
+03776_text_index_covered_sparse_grams:                                  [ OK ] 0.39 sec.
+02346_text_index_hint_profileevents:                                    [ OK ] 0.34 sec.
+02346_text_index_multiple_blocks:                                       [ OK ] 0.49 sec.
+04092_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+02346_text_index_partially_materialized:                                [ OK ] 0.54 sec.
+04223_text_index_direct_read_like_90802:                                [ OK ] 0.24 sec.
+02346_text_index_match_predicate:                                       [ OK ] 0.34 sec.
+02346_text_index_function_ilike:                                        [ OK ] 1.09 sec.
+03913_text_index_preprocessor_expression:                               [ OK ] 0.59 sec.
+04036_text_index_map_keys_values_in:                                    [ OK ] 0.34 sec.
+04094_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+02346_text_index_part_format:                                           [ OK ] 0.39 sec.
+02346_text_index_replacingmergetree1:                                   [ OK ] 0.39 sec.
+04038_text_index_preprocessor_type_validation:                          [ OK ] 2.26 sec.
+04075_text_index_apply_mode_lazy:                                       [ OK ] 0.74 sec.
+02346_text_index_bug89605:                                              [ OK ] 0.29 sec.
+02346_text_index_function_like:                                         [ OK ] 0.99 sec.
+02346_text_index_vertical_merge:                                        [ OK ] 0.29 sec.
+02346_text_index_multiple_blocks:                                       [ OK ] 0.60 sec.
+04258_text_index_lazy_intersect_heap:                                   [ OK ] 0.34 sec.
+04141_text_index_alias_lambda_with_constants:                           [ OK ] 0.80 sec.
+04033_text_index_empty_block_during_merge:                              [ OK ] 0.29 sec.
+04050_text_index_starts_ends_with:                                      [ OK ] 1.25 sec.
+02346_text_index_function_like:                                         [ OK ] 0.89 sec.
+02346_text_index_queries:                                               [ OK ] 1.09 sec.
+04039_text_index_direct_read_select_alias:                              [ OK ] 0.34 sec.
+02346_text_index_function_hasAnyAllTokens:                              [ OK ] 2.06 sec.
+04102_text_index_alias_direct_read:                                     [ OK ] 0.30 sec.
+02346_text_index_hint:                                                  [ OK ] 0.44 sec.
+02346_text_index_array_support:                                         [ OK ] 0.69 sec.
+04039_text_index_direct_read_select_alias:                              [ OK ] 0.35 sec.
+02346_text_index_direct_read_crash:                                     [ OK ] 0.40 sec.
+03776_text_index_covered_sparse_grams:                                  [ OK ] 0.39 sec.
+02346_text_index_posting_list_compression_data_size_validation:         [ OK ] 0.50 sec.
+02346_text_index_mergeTreeTextIndex_access:                             [ OK ] 3.85 sec.
+04075_text_index_posting_list_format:                                   [ OK ] 0.35 sec.
+02346_text_index_replacingmergetree2:                                   [ OK ] 0.61 sec.
+02346_text_index_duplicate_tokens:                                      [ OK ] 0.44 sec.
+04103_text_index_alias_direct_read_map:                                 [ OK ] 0.26 sec.
+04041_text_index_direct_read_or_multi_column:                           [ OK ] 0.29 sec.
+02346_text_index_nullable:                                              [ OK ] 1.74 sec.
+02346_text_index_direct_read_nullable:                                  [ OK ] 0.30 sec.
+02346_text_index_bug92921:                                              [ OK ] 0.34 sec.
+02346_text_index_mergeTreeTextIndex_access:                             [ OK ] 3.71 sec.
+04075_text_index_apply_mode_lazy_segment_advance:                       [ OK ] 0.89 sec.
+02346_text_index_posting_list_compression:                              [ OK ] 0.35 sec.
+04102_text_index_alias_direct_read:                                     [ OK ] 0.29 sec.
+04010_text_index_incompelete_granules:                                  [ OK ] 0.74 sec.
+02346_text_index_vertical_merge:                                        [ OK ] 0.39 sec.
+02346_text_index_functions_with_empty_needle:                           [ OK ] 0.34 sec.
+02346_text_index_bug90609:                                              [ OK ] 0.35 sec.
+02346_text_index_direct_read_nullable:                                  [ OK ] 0.36 sec.
+02346_text_index_bug103812:                                             [ OK ] 0.30 sec.
+02346_text_index_functions_with_empty_needle:                           [ OK ] 0.36 sec.
+02346_text_index_creation:                                              [ OK ] 1.25 sec.
+04098_text_index_read_once:                                             [ OK ] 0.34 sec.
+02346_text_index_parallel_replicas:                                     [ OK ] 0.50 sec.
+02346_text_index_function_hasPhrase:                                    [ OK ] 1.00 sec.
+04094_text_index_like_large_postings:                                   [ OK ] 0.29 sec.
+03776_text_index_covered_sparse_grams:                                  [ OK ] 0.40 sec.
+02346_text_index_function_hasAnyAllTokens_partially_materialized:       [ OK ] 0.69 sec.
+02346_text_index_materialization:                                       [ OK ] 0.60 sec.
+02346_text_index_on_subcolumns:                                         [ OK ] 0.65 sec.
+04096_text_index_json_subcolumn:                                        [ OK ] 0.31 sec.
+02346_text_index_vertical_merge:                                        [ OK ] 0.35 sec.
+04102_text_index_hasAny_hasAll:                                         [ OK ] 0.44 sec.
+04050_text_index_map_keys_in_subquery:                                  [ OK ] 0.29 sec.
+02346_text_index_replacingmergetree1:                                   [ OK ] 0.39 sec.
+02346_text_index_qualify_filter_name_mismatch:                          [ OK ] 0.39 sec.
+04075_text_index_apply_mode:                                            [ OK ] 1.31 sec.
+02346_text_index_function_hasPhrase:                                    [ OK ] 1.01 sec.
+02346_text_index_part_format:                                           [ OK ] 0.40 sec.
+02346_text_index_byte_size_reporting:                                   [ OK ] 0.20 sec.
+02346_text_index_bug93432:                                              [ OK ] 0.24 sec.
+04092_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+04042_text_index_prewhere_alias_select:                                 [ OK ] 0.29 sec.
+02346_text_index_mergeTreeTextIndex_access:                             [ OK ] 3.45 sec.
+02346_text_index_mergeTreeTextIndex:                                    [ OK ] 0.44 sec.
+02346_text_index_bug103812:                                             [ OK ] 0.29 sec.
+04075_text_index_linear_scan_block_skip:                                [ OK ] 0.44 sec.
+02346_text_index_tokenizer_partially_materialized:                      [ OK ] 0.39 sec.
+02346_text_index_function_hasPhrase:                                    [ OK ] 0.94 sec.
+02346_text_index_tokenizer_partially_materialized:                      [ OK ] 0.40 sec.
+03165_string_functions_with_token_text_indexes:                         [ OK ] 0.59 sec.
+02346_text_index_summingmergetree:                                      [ OK ] 0.54 sec.
+02346_text_index_detach_attach:                                         [ OK ] 0.34 sec.
+02346_text_index_mergeTreeTextIndex:                                    [ OK ] 0.44 sec.
+02346_text_index_vertical_merge:                                        [ OK ] 0.34 sec.
+02346_text_index_summingmergetree:                                      [ OK ] 0.50 sec.
+04099_text_index_json_all_values_array:                                 [ OK ] 2.80 sec.
+02346_text_index_nullable:                                              [ OK ] 1.31 sec.
+04098_text_index_read_once:                                             [ OK ] 0.34 sec.
+02346_text_index_creation:                                              [ OK ] 1.25 sec.
+04223_text_index_direct_read_like_90802:                                [ OK ] 0.29 sec.
+02346_text_index_materialization:                                       [ OK ] 0.55 sec.
+02346_text_index_bug62681:                                              [ OK ] 0.34 sec.
+02346_text_index_posting_list_compression_data_size_validation:         [ OK ] 0.39 sec.
+04075_text_index_correctness:                                           [ OK ] 0.34 sec.
+02346_text_index_bug59039:                                              [ OK ] 0.24 sec.
+02346_text_index_hint_map:                                              [ OK ] 5.51 sec.
+02346_text_index_hint_map:                                              [ OK ] 6.01 sec.
+02346_text_index_bug62681:                                              [ OK ] 0.24 sec.
+03100_lwu_48_text_index:                                                [ OK ] 0.34 sec.
+02346_text_index_default_granularity:                                   [ OK ] 0.29 sec.
+04093_text_index_separate_analysis:                                     [ OK ] 0.39 sec.
+02346_text_index_parallel_replicas:                                     [ OK ] 0.49 sec.
+02346_text_index_hint:                                                  [ OK ] 0.44 sec.
+04026_prewhere_qualify_text_index:                                      [ OK ] 0.24 sec.
+04044_text_index_hash_token_boundaries:                                 [ OK ] 0.34 sec.
+04249_text_index_lazy_all_duplicate_tokens:                             [ OK ] 0.30 sec.
+02346_text_index_replacingmergetree2:                                   [ OK ] 0.61 sec.
+04258_text_index_lazy_intersect_heap:                                   [ OK ] 0.40 sec.
+03100_lwu_48_text_index:                                                [ OK ] 0.35 sec.
+02346_text_index_hint_map:                                              [ OK ] 5.31 sec.
+04050_text_index_lazy_extreme_selectivity:                              [ OK ] 0.80 sec.
+04075_text_index_apply_mode_lazy_segment_advance:                       [ OK ] 0.84 sec.
+02346_text_index_collapsingmergetree:                                   [ OK ] 0.39 sec.
+02346_text_index_replacingmergetree1:                                   [ OK ] 0.39 sec.
+04098_text_index_read_once:                                             [ OK ] 0.24 sec.
+04082_materialize_skip_indexes_text_index:                              [ OK ] 0.35 sec.
+04075_text_index_apply_mode:                                            [ OK ] 1.10 sec.
+04026_prewhere_qualify_text_index:                                      [ OK ] 0.24 sec.
+02346_text_index_queries:                                               [ OK ] 1.00 sec.
+04003_text_index_search_mode:                                           [ OK ] 0.29 sec.
+04096_text_index_json_subcolumn:                                        [ OK ] 0.24 sec.
+02346_text_index_short_ngrams_and_empty_tokens:                         [ OK ] 1.55 sec.
+04075_text_index_posting_list_format:                                   [ OK ] 0.34 sec.
+04102_text_index_alias_direct_read:                                     [ OK ] 0.24 sec.
+04050_text_index_lazy_extreme_selectivity:                              [ OK ] 0.80 sec.
+04042_text_index_lightweight_delete:                                    [ OK ] 0.90 sec.
+02346_text_index_functions_with_empty_needle:                           [ OK ] 0.34 sec.
+02346_text_index_map_support:                                           [ OK ] 1.70 sec.
+04075_text_index_linear_scan_block_skip:                                [ OK ] 0.55 sec.
+04037_text_index_map_empty_values_in:                                   [ OK ] 0.29 sec.
+02346_text_index_bug87887:                                              [ OK ] 0.29 sec.
+04061_text_index_json_all_values_ngrams:                                [ OK ] 8.44 sec.
+04075_text_index_posting_list_format:                                   [ OK ] 0.29 sec.
+04038_text_index_no_negated_functions:                                  [ OK ] 0.29 sec.
+04098_text_index_read_once:                                             [ OK ] 0.29 sec.
+02346_text_index_bug103812:                                             [ OK ] 0.29 sec.
+02346_text_index_bug88080:                                              [ OK ] 0.19 sec.
+04038_text_index_preprocessor_type_validation:                          [ OK ] 1.54 sec.
+04075_text_index_apply_mode_lazy_segment_advance:                       [ OK ] 0.90 sec.
+02346_text_index_materialize_subcolumns:                                [ OK ] 0.44 sec.
+02346_text_index_bug59039:                                              [ OK ] 0.24 sec.
+02346_text_index_default_granularity:                                   [ OK ] 0.29 sec.
+04061_text_index_json_all_values:                                       [ OK ] 7.59 sec.
+02346_text_index_bug90609:                                              [ OK ] 0.25 sec.
+04063_text_index_in_tuple:                                              [ OK ] 0.24 sec.
+02346_text_index_mark_file_compatibility:                               [ OK ] 0.29 sec.
+04042_text_index_prewhere_alias_select:                                 [ OK ] 0.34 sec.
+02346_text_index_direct_read_crash:                                     [ OK ] 0.39 sec.
+04096_text_index_json_subcolumn:                                        [ OK ] 0.29 sec.
+02346_text_index_mergeTreeTextIndex:                                    [ OK ] 0.39 sec.
+02346_text_index_detach_attach:                                         [ OK ] 0.24 sec.
+02346_text_index_parallel_replicas:                                     [ OK ] 0.49 sec.
+02346_text_index_bug93432:                                              [ OK ] 0.24 sec.
+02346_text_index_coalescingmergetree:                                   [ OK ] 0.34 sec.
+04050_text_index_map_keys_in_subquery:                                  [ OK ] 0.34 sec.
+04141_text_index_alias_lambda_with_constants:                           [ OK ] 0.74 sec.
+02346_text_index_array_support:                                         [ OK ] 0.64 sec.
+04099_text_index_json_all_values_array:                                 [ OK ] 2.80 sec.
+02346_text_index_bug89605:                                              [ OK ] 0.30 sec.
+02346_text_index_array_support:                                         [ OK ] 0.60 sec.
+02346_text_index_bug87887:                                              [ OK ] 0.29 sec.
+04061_text_index_json_all_values_ngrams:                                [ OK ] 8.83 sec.
+03165_string_functions_with_token_text_indexes:                         [ OK ] 0.60 sec.
+04061_text_index_json_all_values:                                       [ OK ] 8.46 sec.
+02346_text_index_bug54541:                                              [ OK ] 0.19 sec.
+04099_text_index_json_all_values_array:                                 [ OK ] 2.70 sec.
+02346_text_index_bug101913:                                             [ OK ] 0.25 sec.
+02346_text_index_qualify_filter_name_mismatch:                          [ OK ] 0.44 sec.
+04075_text_index_posting_list_format:                                   [ OK ] 0.39 sec.
+02346_text_index_preprocessor_partially_materialized:                   [ OK ] 0.39 sec.
+04257_text_index_lazy_profile_events:                                   [ FAIL ] 0.29 sec.
+Reason: result differs with reference:  
+--- /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.reference	2026-05-29 15:40:30.451538872 +0200
++++ /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.538819.stdout	2026-05-30 00:00:10.419449409 +0200
+@@ -5,11 +5,11 @@
+ cardinality eright	300
+ 512
+ 2000
+ 2000
+ 512
+ 300
+ 0
+ 128
+ 512
+ all events fired across tagged queries:
+-1	1	1	1	1	1	1	1	1	1	1
++1	1	1	1	1	1	1	0	1	1	1
+
+
+Settings used in the test: --max_insert_threads 3 --group_by_two_level_threshold 1000000 --group_by_two_level_threshold_bytes 1 --distributed_aggregation_memory_efficient 0 --fsync_metadata 0 --output_format_parallel_formatting 0 --input_format_parallel_parsing 0 --min_chunk_bytes_for_parallel_parsing 11764518 --max_read_buffer_size 597773 --prefer_localhost_replica 0 --max_block_size 89227 --max_joined_block_size_rows 87079 --joined_block_split_single_row 1 --join_output_by_rowlist_perkey_rows_threshold 146 --max_threads 1 --optimize_append_index 0 --use_hedged_requests 0 --optimize_if_chain_to_multiif 1 --optimize_if_transform_strings_to_enum 0 --optimize_read_in_order 0 --optimize_or_like_chain 1 --optimize_substitute_columns 1 --enable_multiple_prewhere_read_steps 1 --read_in_order_two_level_merge_threshold 50 --optimize_aggregation_in_order 1 --aggregation_in_order_max_block_bytes 31935244 --use_uncompressed_cache 0 --min_bytes_to_use_direct_io 2628773262 --min_bytes_to_use_mmap_io 1 --local_filesystem_read_method pread --remote_filesystem_read_method threadpool --local_filesystem_read_prefetch 1 --filesystem_cache_segments_batch_size 1 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 1 --throw_on_error_from_cache_on_write_operations 1 --remote_filesystem_read_prefetch 0 --distributed_cache_discard_connection_if_unread_data 1 --distributed_cache_use_clients_cache_for_write 1 --distributed_cache_use_clients_cache_for_read 1 --allow_prefetched_read_pool_for_remote_filesystem 0 --filesystem_prefetch_max_memory_usage 32Mi --filesystem_prefetches_limit 0 --filesystem_prefetch_min_bytes_for_single_read_task 1Mi --filesystem_prefetch_step_marks 50 --filesystem_prefetch_step_bytes 0 --enable_filesystem_cache 1 --enable_filesystem_cache_on_write_operations 0 --compile_expressions 1 --compile_aggregate_expressions 1 --compile_sort_description 0 --merge_tree_coarse_index_granularity 20 --optimize_distinct_in_order 0 --max_bytes_before_remerge_sort 686768412 --min_compress_block_size 2126962 --max_compress_block_size 1177894 --merge_tree_compact_parts_min_granules_to_multibuffer_read 62 --optimize_sorting_by_input_stream_properties 1 --http_response_buffer_size 1888161 --http_wait_end_of_query False --enable_memory_bound_merging_of_aggregation_results 1 --min_count_to_compile_expression 0 --min_count_to_compile_aggregate_expression 3 --min_count_to_compile_sort_description 0 --session_timezone Africa/Khartoum --use_page_cache_for_disks_without_file_cache True --use_page_cache_for_local_disks True --use_page_cache_for_object_storage False --page_cache_inject_eviction False --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.77 --prefer_external_sort_block_bytes 0 --cross_join_min_rows_to_compress 0 --cross_join_min_bytes_to_compress 1 --min_external_table_block_size_bytes 0 --max_parsing_threads 1 --optimize_functions_to_subcolumns 0 --parallel_replicas_local_plan 0 --query_plan_join_swap_table false --enable_vertical_final 1 --optimize_extract_common_expressions 0 --optimize_rewrite_array_exists_to_has False --optimize_skip_unused_shards False --optimize_trivial_approximate_count_query True --optimize_trivial_insert_select False --optimize_using_constraints True --optimize_syntax_fuse_functions False --optimize_aggregators_of_group_by_keys True --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons False --optimize_group_by_constant_keys True --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup True --optimize_move_to_prewhere True --optimize_multiif_to_if True --optimize_normalize_count_variants True --optimize_on_insert True --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if True --optimize_skip_unused_shards_rewrite_in True --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count True --optimize_use_projections True --optimize_use_implicit_projections True --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 0 --use_query_condition_cache 1 --secondary_indices_enable_bulk_filtering 1 --use_skip_indexes_if_final 0 --use_skip_indexes_on_data_read 1 --optimize_rewrite_like_perfect_affix 1 --enable_lazy_columns_replication 1 --allow_special_serialization_kinds_in_output_formats 1 --use_skip_indexes_for_top_k 1 --use_top_k_dynamic_filtering 1 --query_plan_max_limit_for_top_k_optimization 10 --query_plan_read_in_order_through_join 1 --read_in_order_use_virtual_row 0 --short_circuit_function_evaluation_for_nulls_threshold 0.762349893099465 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 1109250 --query_plan_optimize_join_order_algorithm greedy,dpsize --max_bytes_before_external_join 1000000000 --execute_exists_as_scalar_subquery True --normalize_function_names False --enable_join_runtime_filters True --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions True --query_plan_join_shard_by_pk_ranges False --count_distinct_optimization False --enable_add_distinct_to_in_subqueries True --use_statistics True --use_statistics_cache True --enable_optimize_predicate_expression True --enable_optimize_predicate_expression_to_final_subquery True --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions True --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition True --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 100000 --query_plan_optimize_join_order_limit 10 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint True --optimize_truncate_order_by_after_group_by_keys True --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions True --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down True --enable_join_transitive_predicates True --max_bytes_before_external_sort 0 --max_bytes_before_external_group_by 0 --max_bytes_ratio_before_external_sort 0 --max_bytes_ratio_before_external_group_by 0 --use_skip_indexes_if_final_exact_mode 0
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 0.0 --prefer_fetch_merged_part_size_threshold 10737418240 --vertical_merge_algorithm_min_rows_to_activate 1000000 --vertical_merge_algorithm_min_columns_to_activate 68 --allow_vertical_merges_from_compact_to_wide_parts 1 --min_merge_bytes_to_use_direct_io 10737418240 --index_granularity_bytes 9540425 --merge_max_block_size 21839 --index_granularity 2325 --min_bytes_for_wide_part 1073741824 --compress_marks 0 --compress_primary_key 0 --marks_compress_block_size 51069 --primary_key_compress_block_size 29521 --replace_long_file_name_to_hash 0 --max_file_name_length 0 --min_bytes_for_full_part_storage 0 --compact_parts_max_bytes_to_buffer 385321747 --compact_parts_max_granules_to_buffer 40 --compact_parts_merge_max_bytes_to_prefetch_part 2537964 --cache_populated_by_fetch 1 --concurrent_part_removal_threshold 26 --old_parts_lifetime 480 --prewarm_mark_cache 1 --use_const_adaptive_granularity 0 --enable_index_granularity_compression 0 --enable_block_number_column 1 --enable_block_offset_column 0 --use_primary_key_cache 0 --prewarm_primary_key_cache 1 --object_serialization_version v2 --object_shared_data_serialization_version map --object_shared_data_serialization_version_for_zero_level_parts advanced --object_shared_data_buckets_for_compact_part 17 --object_shared_data_buckets_for_wide_part 22 --dynamic_serialization_version v3 --serialization_info_version with_types --string_serialization_version single_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 1 --min_columns_to_activate_adaptive_write_buffer 300 --reduce_blocking_parts_sleep_ms 1413 --shared_merge_tree_outdated_parts_group_size 2 --shared_merge_tree_max_outdated_parts_to_process_at_once 7 --map_serialization_version basic --map_serialization_version_for_zero_level_parts basic --max_buckets_in_map 49 --map_buckets_strategy linear --map_buckets_min_avg_size 133 --map_buckets_coefficient 0.89 --propagate_types_serialization_versions_to_nested_types 1 --compress_per_column_in_compact_parts 1
+
+Database: test_ph74xrz1
+02346_text_index_mergeTreeTextIndex:                                    [ OK ] 0.39 sec.
+04249_text_index_lazy_all_duplicate_tokens:                             [ OK ] 0.24 sec.
+02346_text_index_part_format:                                           [ OK ] 0.44 sec.
+02346_text_index_materialize_subcolumns:                                [ OK ] 0.49 sec.
+04102_text_index_hasAny_hasAll:                                         [ OK ] 0.44 sec.
+04038_text_index_no_negated_functions:                                  [ OK ] 0.30 sec.
+04030_text_index_condition_logical_error:                               [ OK ] 0.29 sec.
+02346_text_index_on_subcolumns:                                         [ OK ] 0.44 sec.
+02346_text_index_coalescingmergetree:                                   [ OK ] 0.39 sec.
+02346_text_index_match_predicate:                                       [ OK ] 0.29 sec.
+04050_text_index_lazy_extreme_selectivity:                              [ OK ] 0.59 sec.
+03165_string_functions_with_token_text_indexes:                         [ OK ] 0.54 sec.
+02346_text_index_bug62681:                                              [ OK ] 0.24 sec.
+02346_text_index_bug88080:                                              [ OK ] 0.19 sec.
+02346_text_index_nullable:                                              [ OK ] 1.15 sec.
+02346_text_index_on_subcolumns:                                         [ OK ] 0.44 sec.
+04050_text_index_map_keys_in_subquery:                                  [ OK ] 0.29 sec.
+02346_text_index_partially_materialized:                                [ OK ] 0.54 sec.
+04003_text_index_search_mode:                                           [ OK ] 0.29 sec.
+04010_text_index_incompelete_granules:                                  [ OK ] 0.53 sec.
+02346_text_index_function_hasPhrase:                                    [ OK ] 0.94 sec.
+02346_text_index_materialize_subcolumns:                                [ OK ] 0.49 sec.
+02346_text_index_on_subcolumns:                                         [ OK ] 0.49 sec.
+02346_text_index_multiple_blocks:                                       [ OK ] 0.49 sec.
+03776_text_index_covered_sparse_grams:                                  [ OK ] 0.39 sec.
+04257_text_index_lazy_profile_events:                                   [ FAIL ] 0.34 sec.
+Reason: result differs with reference:  
+--- /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.reference	2026-05-29 15:40:30.451538872 +0200
++++ /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.538819.stdout	2026-05-30 00:00:11.064971678 +0200
+@@ -5,11 +5,11 @@
+ cardinality eright	300
+ 512
+ 2000
+ 2000
+ 512
+ 300
+ 0
+ 128
+ 512
+ all events fired across tagged queries:
+-1	1	1	1	1	1	1	1	1	1	1
++1	1	1	1	1	1	0	0	1	1	1
+
+
+Settings used in the test: --max_insert_threads 1 --group_by_two_level_threshold 100452 --group_by_two_level_threshold_bytes 29428769 --distributed_aggregation_memory_efficient 0 --fsync_metadata 0 --output_format_parallel_formatting 1 --input_format_parallel_parsing 1 --min_chunk_bytes_for_parallel_parsing 9571335 --max_read_buffer_size 968939 --prefer_localhost_replica 0 --max_block_size 59910 --max_joined_block_size_rows 12355 --joined_block_split_single_row 0 --join_output_by_rowlist_perkey_rows_threshold 530 --max_threads 1 --optimize_append_index 0 --use_hedged_requests 1 --optimize_if_chain_to_multiif 1 --optimize_if_transform_strings_to_enum 0 --optimize_read_in_order 0 --optimize_or_like_chain 0 --optimize_substitute_columns 1 --enable_multiple_prewhere_read_steps 0 --read_in_order_two_level_merge_threshold 54 --optimize_aggregation_in_order 0 --aggregation_in_order_max_block_bytes 38210255 --use_uncompressed_cache 1 --min_bytes_to_use_direct_io 1 --min_bytes_to_use_mmap_io 8394535684 --local_filesystem_read_method read --remote_filesystem_read_method threadpool --local_filesystem_read_prefetch 0 --filesystem_cache_segments_batch_size 100 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 0 --throw_on_error_from_cache_on_write_operations 0 --remote_filesystem_read_prefetch 1 --distributed_cache_discard_connection_if_unread_data 1 --distributed_cache_use_clients_cache_for_write 0 --distributed_cache_use_clients_cache_for_read 1 --allow_prefetched_read_pool_for_remote_filesystem 1 --filesystem_prefetch_max_memory_usage 32Mi --filesystem_prefetches_limit 0 --filesystem_prefetch_min_bytes_for_single_read_task 1Mi --filesystem_prefetch_step_marks 50 --filesystem_prefetch_step_bytes 100Mi --enable_filesystem_cache 1 --enable_filesystem_cache_on_write_operations 1 --compile_expressions 0 --compile_aggregate_expressions 0 --compile_sort_description 0 --merge_tree_coarse_index_granularity 25 --optimize_distinct_in_order 0 --max_bytes_before_remerge_sort 723497174 --min_compress_block_size 74636 --max_compress_block_size 2560365 --merge_tree_compact_parts_min_granules_to_multibuffer_read 66 --optimize_sorting_by_input_stream_properties 0 --http_response_buffer_size 6886272 --http_wait_end_of_query False --enable_memory_bound_merging_of_aggregation_results 0 --min_count_to_compile_expression 3 --min_count_to_compile_aggregate_expression 3 --min_count_to_compile_sort_description 0 --session_timezone America/Hermosillo --use_page_cache_for_disks_without_file_cache False --use_page_cache_for_local_disks True --use_page_cache_for_object_storage True --page_cache_inject_eviction True --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.51 --prefer_external_sort_block_bytes 1 --cross_join_min_rows_to_compress 1 --cross_join_min_bytes_to_compress 100000000 --min_external_table_block_size_bytes 0 --max_parsing_threads 10 --optimize_functions_to_subcolumns 0 --parallel_replicas_local_plan 0 --query_plan_join_swap_table false --enable_vertical_final 1 --optimize_extract_common_expressions 0 --optimize_rewrite_array_exists_to_has True --optimize_skip_unused_shards False --optimize_trivial_approximate_count_query True --optimize_trivial_insert_select False --optimize_using_constraints False --optimize_syntax_fuse_functions False --optimize_aggregators_of_group_by_keys True --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons True --optimize_group_by_constant_keys True --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup True --optimize_move_to_prewhere True --optimize_multiif_to_if True --optimize_normalize_count_variants True --optimize_on_insert True --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if True --optimize_skip_unused_shards_rewrite_in True --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count True --optimize_use_projections True --optimize_use_implicit_projections False --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 0 --use_query_condition_cache 1 --secondary_indices_enable_bulk_filtering 1 --use_skip_indexes_if_final 0 --use_skip_indexes_on_data_read 1 --optimize_rewrite_like_perfect_affix 0 --enable_lazy_columns_replication 0 --allow_special_serialization_kinds_in_output_formats 1 --use_skip_indexes_for_top_k 0 --use_top_k_dynamic_filtering False --query_plan_max_limit_for_top_k_optimization 100000 --query_plan_read_in_order_through_join 1 --read_in_order_use_virtual_row 0 --short_circuit_function_evaluation_for_nulls_threshold 0.5103840420273651 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 1154668 --query_plan_optimize_join_order_algorithm greedy,dpsize --max_bytes_before_external_join 0 --execute_exists_as_scalar_subquery True --normalize_function_names True --enable_join_runtime_filters True --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions False --query_plan_join_shard_by_pk_ranges False --count_distinct_optimization False --enable_add_distinct_to_in_subqueries False --use_statistics True --use_statistics_cache True --enable_optimize_predicate_expression True --enable_optimize_predicate_expression_to_final_subquery True --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions True --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition True --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 0 --query_plan_optimize_join_order_limit 10 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint False --optimize_truncate_order_by_after_group_by_keys False --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions True --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down True --enable_join_transitive_predicates False --max_bytes_before_external_sort 0 --max_bytes_before_external_group_by 10737418240 --max_bytes_ratio_before_external_sort 0 --max_bytes_ratio_before_external_group_by 0 --use_skip_indexes_if_final_exact_mode 0
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 0.36346610735850204 --prefer_fetch_merged_part_size_threshold 1 --vertical_merge_algorithm_min_rows_to_activate 1 --vertical_merge_algorithm_min_columns_to_activate 16 --allow_vertical_merges_from_compact_to_wide_parts 1 --min_merge_bytes_to_use_direct_io 1 --index_granularity_bytes 4470129 --merge_max_block_size 2713 --index_granularity 49279 --min_bytes_for_wide_part 0 --compress_marks 1 --compress_primary_key 1 --marks_compress_block_size 32886 --primary_key_compress_block_size 10241 --replace_long_file_name_to_hash 1 --max_file_name_length 117 --min_bytes_for_full_part_storage 0 --compact_parts_max_bytes_to_buffer 244089860 --compact_parts_max_granules_to_buffer 46 --compact_parts_merge_max_bytes_to_prefetch_part 307742 --cache_populated_by_fetch 0 --concurrent_part_removal_threshold 100 --old_parts_lifetime 121 --prewarm_mark_cache 0 --use_const_adaptive_granularity 0 --enable_index_granularity_compression 1 --enable_block_number_column 0 --enable_block_offset_column 1 --use_primary_key_cache 0 --prewarm_primary_key_cache 0 --object_serialization_version v2 --object_shared_data_serialization_version map_with_buckets --object_shared_data_serialization_version_for_zero_level_parts map_with_buckets --object_shared_data_buckets_for_compact_part 31 --object_shared_data_buckets_for_wide_part 19 --dynamic_serialization_version v3 --auto_statistics_types uniq --serialization_info_version with_types --string_serialization_version with_size_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 1 --min_columns_to_activate_adaptive_write_buffer 227 --reduce_blocking_parts_sleep_ms 1966 --shared_merge_tree_outdated_parts_group_size 1 --shared_merge_tree_max_outdated_parts_to_process_at_once 7 --map_serialization_version with_buckets --map_serialization_version_for_zero_level_parts basic --max_buckets_in_map 15 --map_buckets_strategy linear --map_buckets_min_avg_size 219 --map_buckets_coefficient 1.32 --propagate_types_serialization_versions_to_nested_types 0 --compress_per_column_in_compact_parts 0
+
+Database: test_9j4ulnsc
+04082_materialize_skip_indexes_text_index:                              [ OK ] 0.34 sec.
+04033_text_index_empty_block_during_merge:                              [ OK ] 0.24 sec.
+02346_text_index_short_ngrams_and_empty_tokens:                         [ OK ] 1.54 sec.
+02346_text_index_replacingmergetree2:                                   [ OK ] 0.49 sec.
+02346_text_index_creation:                                              [ OK ] 1.29 sec.
+04037_text_index_map_empty_values_in:                                   [ OK ] 0.29 sec.
+02346_text_index_match_predicate:                                       [ OK ] 0.24 sec.
+02346_text_index_direct_read_with_query_condition_cache:                [ OK ] 0.24 sec.
+02346_text_index_bug59039:                                              [ OK ] 0.29 sec.
+02346_text_index_lwd:                                                   [ OK ] 0.49 sec.
+02346_text_index_bug92921:                                              [ OK ] 0.39 sec.
+04093_text_index_like_overflow_fallback:                                [ OK ] 0.29 sec.
+02346_text_index_bug88080:                                              [ OK ] 0.19 sec.
+04039_text_index_direct_read_select_alias:                              [ OK ] 0.34 sec.
+03913_text_index_preprocessor_expression:                               [ OK ] 0.64 sec.
+02346_text_index_array_support:                                         [ OK ] 0.65 sec.
+04030_text_index_condition_logical_error:                               [ OK ] 0.34 sec.
+04249_text_index_lazy_all_duplicate_tokens:                             [ OK ] 0.29 sec.
+04041_text_index_direct_read_or_multi_column:                           [ OK ] 0.29 sec.
+02346_text_index_function_ilike:                                        [ OK ] 1.00 sec.
+04038_text_index_preprocessor_type_validation:                          [ OK ] 1.85 sec.
+02346_text_index_coalescingmergetree:                                   [ OK ] 0.39 sec.
+02346_text_index_detach_attach:                                         [ OK ] 0.29 sec.
+04063_text_index_in_tuple:                                              [ OK ] 0.25 sec.
+04094_text_index_like_large_postings:                                   [ OK ] 0.24 sec.
+04075_text_index_linear_scan_block_skip:                                [ OK ] 0.49 sec.
+03100_lwu_48_text_index:                                                [ OK ] 0.29 sec.
+04256_text_index_lazy_apply_with_patterns:                              [ OK ] 0.34 sec.
+04037_text_index_map_empty_values_in:                                   [ OK ] 0.30 sec.
+04061_text_index_json_all_values_ngrams:                                [ OK ] 8.55 sec.
+02346_text_index_bug84805:                                              [ OK ] 0.40 sec.
+04036_text_index_map_keys_values_in:                                    [ OK ] 0.30 sec.
+02346_text_index_bug90778:                                              [ OK ] 0.29 sec.
+02346_text_index_replacingmergetree2:                                   [ OK ] 0.55 sec.
+02346_text_index_queries:                                               [ OK ] 1.04 sec.
+02346_text_index_preprocessor_partially_materialized:                   [ OK ] 0.44 sec.
+02346_text_index_summingmergetree:                                      [ OK ] 0.49 sec.
+04063_text_index_in_tuple:                                              [ OK ] 0.24 sec.
+02346_text_index_functions_with_empty_needle:                           [ OK ] 0.34 sec.
+04256_text_index_lazy_apply_with_patterns:                              [ OK ] 0.29 sec.
+04044_text_index_hash_token_boundaries:                                 [ OK ] 0.24 sec.
+04010_text_index_incompelete_granules:                                  [ OK ] 0.65 sec.
+04061_text_index_json_all_values:                                       [ OK ] 8.26 sec.
+02346_text_index_bug90778:                                              [ OK ] 0.29 sec.
+04099_text_index_json_all_values_array:                                 [ OK ] 2.70 sec.
+02346_text_index_replacingmergetree1:                                   [ OK ] 0.40 sec.
+04039_text_index_map_values_subcolumn:                                  [ OK ] 0.24 sec.
+04042_text_index_lightweight_delete:                                    [ OK ] 0.79 sec.
+04082_materialize_skip_indexes_text_index:                              [ OK ] 0.34 sec.
+02346_text_index_map_support:                                           [ OK ] 1.50 sec.
+02346_text_index_map_support:                                           [ OK ] 1.75 sec.
+02346_text_index_prewhere_support:                                      [ OK ] 5.87 sec.
+04095_text_index_like_overflow_fallback:                                [ OK ] 0.30 sec.
+02346_text_index_duplicate_tokens:                                      [ OK ] 0.39 sec.
+04061_text_index_json_all_values:                                       [ OK ] 7.98 sec.
+04075_text_index_correctness:                                           [ OK ] 0.34 sec.
+02346_text_index_byte_size_reporting:                                   [ OK ] 0.24 sec.
+02346_text_index_lwd:                                                   [ OK ] 0.44 sec.
+02346_text_index_function_hasAnyAllTokens_partially_materialized:       [ OK ] 0.64 sec.
+02346_text_index_function_hasAnyAllTokens_partially_materialized:       [ OK ] 0.54 sec.
+02346_text_index_bug90609:                                              [ OK ] 0.29 sec.
+04257_text_index_lazy_profile_events:                                   [ FAIL ] 0.34 sec.
+Reason: result differs with reference:  
+--- /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.reference	2026-05-29 15:40:30.451538872 +0200
++++ /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.538764.stdout	2026-05-30 00:00:12.587984071 +0200
+@@ -5,11 +5,11 @@
+ cardinality eright	300
+ 512
+ 2000
+ 2000
+ 512
+ 300
+ 0
+ 128
+ 512
+ all events fired across tagged queries:
+-1	1	1	1	1	1	1	1	1	1	1
++1	1	1	1	1	1	1	0	1	1	1
+
+
+Settings used in the test: --max_insert_threads 2 --group_by_two_level_threshold 928327 --group_by_two_level_threshold_bytes 18382925 --distributed_aggregation_memory_efficient 0 --fsync_metadata 0 --output_format_parallel_formatting 1 --input_format_parallel_parsing 0 --min_chunk_bytes_for_parallel_parsing 4756662 --max_read_buffer_size 998438 --prefer_localhost_replica 0 --max_block_size 98735 --max_joined_block_size_rows 39788 --joined_block_split_single_row 1 --join_output_by_rowlist_perkey_rows_threshold 826 --max_threads 2 --optimize_append_index 1 --use_hedged_requests 1 --optimize_if_chain_to_multiif 0 --optimize_if_transform_strings_to_enum 1 --optimize_read_in_order 1 --optimize_or_like_chain 0 --optimize_substitute_columns 0 --enable_multiple_prewhere_read_steps 1 --read_in_order_two_level_merge_threshold 8 --optimize_aggregation_in_order 1 --aggregation_in_order_max_block_bytes 14912511 --use_uncompressed_cache 0 --min_bytes_to_use_direct_io 10737418240 --min_bytes_to_use_mmap_io 10737418240 --local_filesystem_read_method pread --remote_filesystem_read_method threadpool --local_filesystem_read_prefetch 0 --filesystem_cache_segments_batch_size 50 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 1 --throw_on_error_from_cache_on_write_operations 0 --remote_filesystem_read_prefetch 1 --distributed_cache_discard_connection_if_unread_data 0 --distributed_cache_use_clients_cache_for_write 0 --distributed_cache_use_clients_cache_for_read 1 --allow_prefetched_read_pool_for_remote_filesystem 0 --filesystem_prefetch_max_memory_usage 32Mi --filesystem_prefetches_limit 10 --filesystem_prefetch_min_bytes_for_single_read_task 8Mi --filesystem_prefetch_step_marks 50 --filesystem_prefetch_step_bytes 100Mi --enable_filesystem_cache 0 --enable_filesystem_cache_on_write_operations 0 --compile_expressions 1 --compile_aggregate_expressions 0 --compile_sort_description 0 --merge_tree_coarse_index_granularity 7 --optimize_distinct_in_order 1 --max_bytes_before_remerge_sort 754024868 --min_compress_block_size 677438 --max_compress_block_size 1672497 --merge_tree_compact_parts_min_granules_to_multibuffer_read 19 --optimize_sorting_by_input_stream_properties 1 --http_response_buffer_size 8831595 --http_wait_end_of_query True --enable_memory_bound_merging_of_aggregation_results 0 --min_count_to_compile_expression 0 --min_count_to_compile_aggregate_expression 0 --min_count_to_compile_sort_description 3 --session_timezone America/Hermosillo --use_page_cache_for_disks_without_file_cache True --use_page_cache_for_local_disks False --use_page_cache_for_object_storage False --page_cache_inject_eviction False --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.26 --prefer_external_sort_block_bytes 100000000 --cross_join_min_rows_to_compress 0 --cross_join_min_bytes_to_compress 100000000 --min_external_table_block_size_bytes 0 --max_parsing_threads 10 --optimize_functions_to_subcolumns 0 --parallel_replicas_local_plan 0 --query_plan_join_swap_table auto --enable_vertical_final 1 --optimize_extract_common_expressions 0 --optimize_rewrite_array_exists_to_has False --optimize_skip_unused_shards False --optimize_trivial_approximate_count_query False --optimize_trivial_insert_select True --optimize_using_constraints False --optimize_syntax_fuse_functions True --optimize_aggregators_of_group_by_keys True --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons True --optimize_group_by_constant_keys False --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup False --optimize_move_to_prewhere True --optimize_multiif_to_if True --optimize_normalize_count_variants True --optimize_on_insert True --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if True --optimize_skip_unused_shards_rewrite_in True --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count True --optimize_use_projections True --optimize_use_implicit_projections False --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 1 --use_query_condition_cache 0 --secondary_indices_enable_bulk_filtering 0 --use_skip_indexes_if_final 1 --use_skip_indexes_on_data_read 1 --optimize_rewrite_like_perfect_affix 1 --enable_lazy_columns_replication 0 --allow_special_serialization_kinds_in_output_formats 0 --use_skip_indexes_for_top_k 1 --use_top_k_dynamic_filtering 0 --query_plan_max_limit_for_top_k_optimization 1 --query_plan_read_in_order_through_join 0 --read_in_order_use_virtual_row 1 --short_circuit_function_evaluation_for_nulls_threshold 0.22749449832213992 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 861271 --query_plan_optimize_join_order_algorithm greedy,dpsize --max_bytes_before_external_join 0 --execute_exists_as_scalar_subquery True --normalize_function_names True --enable_join_runtime_filters True --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions False --query_plan_join_shard_by_pk_ranges False --count_distinct_optimization False --enable_add_distinct_to_in_subqueries False --use_statistics True --use_statistics_cache True --enable_optimize_predicate_expression True --enable_optimize_predicate_expression_to_final_subquery False --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions True --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition True --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 1000 --query_plan_optimize_join_order_limit 10 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint True --optimize_truncate_order_by_after_group_by_keys True --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions True --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down False --enable_join_transitive_predicates False --max_bytes_before_external_sort 0 --max_bytes_before_external_group_by 0 --max_bytes_ratio_before_external_sort 0.0 --max_bytes_ratio_before_external_group_by 0.0 --use_skip_indexes_if_final_exact_mode 1
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 0.0 --prefer_fetch_merged_part_size_threshold 3499920978 --vertical_merge_algorithm_min_rows_to_activate 506413 --vertical_merge_algorithm_min_columns_to_activate 43 --allow_vertical_merges_from_compact_to_wide_parts 0 --min_merge_bytes_to_use_direct_io 7687765364 --index_granularity_bytes 29043357 --merge_max_block_size 20374 --index_granularity 3614 --min_bytes_for_wide_part 1073741824 --compress_marks 1 --compress_primary_key 0 --marks_compress_block_size 76347 --primary_key_compress_block_size 38004 --replace_long_file_name_to_hash 1 --max_file_name_length 125 --min_bytes_for_full_part_storage 417665414 --compact_parts_max_bytes_to_buffer 148111056 --compact_parts_max_granules_to_buffer 25 --compact_parts_merge_max_bytes_to_prefetch_part 11883730 --cache_populated_by_fetch 0 --concurrent_part_removal_threshold 100 --old_parts_lifetime 10 --prewarm_mark_cache 0 --use_const_adaptive_granularity 1 --enable_index_granularity_compression 0 --enable_block_number_column 1 --enable_block_offset_column 1 --use_primary_key_cache 1 --prewarm_primary_key_cache 0 --object_serialization_version v2 --object_shared_data_serialization_version map_with_buckets --object_shared_data_serialization_version_for_zero_level_parts map_with_buckets --object_shared_data_buckets_for_compact_part 16 --object_shared_data_buckets_for_wide_part 17 --dynamic_serialization_version v3 --auto_statistics_types uniq,countmin,tdigest,minmax --serialization_info_version basic --string_serialization_version single_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 0 --min_columns_to_activate_adaptive_write_buffer 345 --reduce_blocking_parts_sleep_ms 842 --shared_merge_tree_outdated_parts_group_size 1 --shared_merge_tree_max_outdated_parts_to_process_at_once 1 --map_serialization_version basic --map_serialization_version_for_zero_level_parts basic --max_buckets_in_map 77 --map_buckets_strategy sqrt --map_buckets_min_avg_size 385 --map_buckets_coefficient 1.59 --propagate_types_serialization_versions_to_nested_types 0 --compress_per_column_in_compact_parts 1
+
+Database: test_iparcwqb
+02346_text_index_replacingmergetree1:                                   [ OK ] 0.34 sec.
+04033_text_index_empty_block_during_merge:                              [ OK ] 0.24 sec.
+04075_text_index_linear_scan_block_skip:                                [ OK ] 0.59 sec.
+02346_text_index_on_expressions:                                        [ OK ] 0.50 sec.
+02346_text_index_function_like:                                         [ OK ] 0.84 sec.
+04050_text_index_starts_ends_with:                                      [ OK ] 1.00 sec.
+02346_text_index_hint:                                                  [ OK ] 0.39 sec.
+02346_text_index_duplicate_tokens:                                      [ OK ] 0.34 sec.
+02346_text_index_bug89605:                                              [ OK ] 0.29 sec.
+04257_text_index_lazy_profile_events:                                   [ FAIL ] 0.34 sec.
+Reason: result differs with reference:  
+--- /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.reference	2026-05-29 15:40:30.451538872 +0200
++++ /home/anton/work/ClickHouse/tests/queries/0_stateless/04257_text_index_lazy_profile_events.538807.stdout	2026-05-30 00:00:12.868557251 +0200
+@@ -5,11 +5,11 @@
+ cardinality eright	300
+ 512
+ 2000
+ 2000
+ 512
+ 300
+ 0
+ 128
+ 512
+ all events fired across tagged queries:
+-1	1	1	1	1	1	1	1	1	1	1
++1	1	1	1	1	1	1	0	1	1	1
+
+
+Settings used in the test: --max_insert_threads 3 --group_by_two_level_threshold 405547 --group_by_two_level_threshold_bytes 1 --distributed_aggregation_memory_efficient 1 --fsync_metadata 0 --output_format_parallel_formatting 0 --input_format_parallel_parsing 0 --min_chunk_bytes_for_parallel_parsing 15965875 --max_read_buffer_size 607712 --prefer_localhost_replica 1 --max_block_size 25279 --max_joined_block_size_rows 62935 --joined_block_split_single_row 1 --join_output_by_rowlist_perkey_rows_threshold 966 --max_threads 2 --optimize_append_index 0 --use_hedged_requests 1 --optimize_if_chain_to_multiif 1 --optimize_if_transform_strings_to_enum 1 --optimize_read_in_order 1 --optimize_or_like_chain 0 --optimize_substitute_columns 1 --enable_multiple_prewhere_read_steps 1 --read_in_order_two_level_merge_threshold 42 --optimize_aggregation_in_order 1 --aggregation_in_order_max_block_bytes 26973275 --use_uncompressed_cache 0 --min_bytes_to_use_direct_io 10737418240 --min_bytes_to_use_mmap_io 1 --local_filesystem_read_method pread --remote_filesystem_read_method read --local_filesystem_read_prefetch 0 --filesystem_cache_segments_batch_size 100 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 0 --throw_on_error_from_cache_on_write_operations 1 --remote_filesystem_read_prefetch 0 --distributed_cache_discard_connection_if_unread_data 1 --distributed_cache_use_clients_cache_for_write 1 --distributed_cache_use_clients_cache_for_read 1 --allow_prefetched_read_pool_for_remote_filesystem 1 --filesystem_prefetch_max_memory_usage 32Mi --filesystem_prefetches_limit 10 --filesystem_prefetch_min_bytes_for_single_read_task 1Mi --filesystem_prefetch_step_marks 50 --filesystem_prefetch_step_bytes 100Mi --enable_filesystem_cache 1 --enable_filesystem_cache_on_write_operations 0 --compile_expressions 0 --compile_aggregate_expressions 0 --compile_sort_description 0 --merge_tree_coarse_index_granularity 18 --optimize_distinct_in_order 0 --max_bytes_before_remerge_sort 2963675841 --min_compress_block_size 65216 --max_compress_block_size 1584686 --merge_tree_compact_parts_min_granules_to_multibuffer_read 65 --optimize_sorting_by_input_stream_properties 1 --http_response_buffer_size 9516553 --http_wait_end_of_query True --enable_memory_bound_merging_of_aggregation_results 1 --min_count_to_compile_expression 3 --min_count_to_compile_aggregate_expression 0 --min_count_to_compile_sort_description 3 --session_timezone America/Mazatlan --use_page_cache_for_disks_without_file_cache False --use_page_cache_for_local_disks False --use_page_cache_for_object_storage False --page_cache_inject_eviction False --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.02 --prefer_external_sort_block_bytes 100000000 --cross_join_min_rows_to_compress 100000000 --cross_join_min_bytes_to_compress 1 --min_external_table_block_size_bytes 0 --max_parsing_threads 0 --optimize_functions_to_subcolumns 0 --parallel_replicas_local_plan 1 --query_plan_join_swap_table auto --enable_vertical_final 0 --optimize_extract_common_expressions 1 --optimize_rewrite_array_exists_to_has False --optimize_skip_unused_shards False --optimize_trivial_approximate_count_query False --optimize_trivial_insert_select True --optimize_using_constraints False --optimize_syntax_fuse_functions False --optimize_aggregators_of_group_by_keys False --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons True --optimize_group_by_constant_keys True --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup True --optimize_move_to_prewhere True --optimize_multiif_to_if False --optimize_normalize_count_variants True --optimize_on_insert False --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if False --optimize_skip_unused_shards_rewrite_in False --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count False --optimize_use_projections True --optimize_use_implicit_projections True --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 1 --use_query_condition_cache 0 --secondary_indices_enable_bulk_filtering 1 --use_skip_indexes_if_final 1 --use_skip_indexes_on_data_read 1 --optimize_rewrite_like_perfect_affix 0 --enable_lazy_columns_replication 1 --allow_special_serialization_kinds_in_output_formats 0 --use_skip_indexes_for_top_k 0 --use_top_k_dynamic_filtering False --query_plan_max_limit_for_top_k_optimization 1 --query_plan_read_in_order_through_join 0 --read_in_order_use_virtual_row 0 --short_circuit_function_evaluation_for_nulls_threshold 0.346208261064243 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 937194 --query_plan_optimize_join_order_algorithm greedy,dpsize --max_bytes_before_external_join 1000000000 --execute_exists_as_scalar_subquery True --normalize_function_names True --enable_join_runtime_filters True --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions False --query_plan_join_shard_by_pk_ranges True --count_distinct_optimization False --enable_add_distinct_to_in_subqueries True --use_statistics True --use_statistics_cache True --enable_optimize_predicate_expression True --enable_optimize_predicate_expression_to_final_subquery True --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions True --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition False --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 1000 --query_plan_optimize_join_order_limit 64 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint True --optimize_truncate_order_by_after_group_by_keys True --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions False --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down True --enable_join_transitive_predicates False --max_bytes_before_external_sort 10737418240 --max_bytes_before_external_group_by 10737418240 --max_bytes_ratio_before_external_sort 0 --max_bytes_ratio_before_external_group_by 0 --use_skip_indexes_if_final_exact_mode 1
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 1.0 --prefer_fetch_merged_part_size_threshold 10737418240 --vertical_merge_algorithm_min_rows_to_activate 1 --vertical_merge_algorithm_min_columns_to_activate 1 --allow_vertical_merges_from_compact_to_wide_parts 0 --min_merge_bytes_to_use_direct_io 10737418240 --index_granularity_bytes 14975015 --merge_max_block_size 14036 --index_granularity 19213 --min_bytes_for_wide_part 333664650 --compress_marks 0 --compress_primary_key 0 --marks_compress_block_size 15278 --primary_key_compress_block_size 50229 --replace_long_file_name_to_hash 1 --max_file_name_length 26 --min_bytes_for_full_part_storage 536870912 --compact_parts_max_bytes_to_buffer 191392905 --compact_parts_max_granules_to_buffer 177 --compact_parts_merge_max_bytes_to_prefetch_part 23593962 --cache_populated_by_fetch 1 --concurrent_part_removal_threshold 100 --old_parts_lifetime 445 --prewarm_mark_cache 1 --use_const_adaptive_granularity 1 --enable_index_granularity_compression 0 --enable_block_number_column 0 --enable_block_offset_column 1 --use_primary_key_cache 1 --prewarm_primary_key_cache 0 --object_serialization_version v3 --object_shared_data_serialization_version advanced --object_shared_data_serialization_version_for_zero_level_parts map_with_buckets --object_shared_data_buckets_for_compact_part 26 --object_shared_data_buckets_for_wide_part 24 --dynamic_serialization_version v3 --serialization_info_version basic --string_serialization_version with_size_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 1 --min_columns_to_activate_adaptive_write_buffer 718 --reduce_blocking_parts_sleep_ms 1065 --shared_merge_tree_outdated_parts_group_size 2 --shared_merge_tree_max_outdated_parts_to_process_at_once 1 --map_serialization_version basic --map_serialization_version_for_zero_level_parts with_buckets --max_buckets_in_map 72 --map_buckets_strategy sqrt --map_buckets_min_avg_size 274 --map_buckets_coefficient 1.46 --propagate_types_serialization_versions_to_nested_types 1 --compress_per_column_in_compact_parts 0
+
+Database: test_z0uoh71n
+02346_text_index_direct_read_with_query_condition_cache:                [ OK ] 0.31 sec.
+04039_text_index_direct_read_select_alias:                              [ OK ] 0.35 sec.
+04050_text_index_map_keys_in_subquery:                                  [ OK ] 0.29 sec.
+02346_text_index_array_support:                                         [ OK ] 0.64 sec.
+02346_text_index_map_support:                                           [ OK ] 1.60 sec.
+02346_text_index_bug84805:                                              [ OK ] 0.39 sec.
+02346_text_index_posting_list_compression:                              [ OK ] 0.34 sec.
+02346_text_index_hint_map:                                              [ OK ] 5.66 sec.
+02346_text_index_qualify_filter_name_mismatch:                          [ OK ] 0.45 sec.
+02346_text_index_bug84805:                                              [ OK ] 0.34 sec.
+02346_text_index_bug92921:                                              [ OK ] 0.35 sec.
+02346_text_index_multiple_blocks:                                       [ OK ] 0.54 sec.
+02346_text_index_dictionary_frontcoding:                                [ OK ] 0.29 sec.
+02346_text_index_materialization:                                       [ OK ] 0.55 sec.
+04043_text_index_in_with_preprocessor:                                  [ OK ] 0.29 sec.
+04266_text_index_tokens_cardinality_order:                              [ OK ] 1.75 sec.
+04075_text_index_correctness:                                           [ OK ] 0.34 sec.
+02346_text_index_bug101913:                                             [ OK ] 0.29 sec.
+04095_text_index_like_overflow_fallback:                                [ OK ] 0.30 sec.
+02346_text_index_bug90609:                                              [ OK ] 0.29 sec.
+04050_text_index_lazy_extreme_selectivity:                              [ OK ] 0.69 sec.
+02346_text_index_bug54541:                                              [ OK ] 0.29 sec.
+04037_text_index_map_empty_values_in:                                   [ OK ] 0.29 sec.
+04075_text_index_apply_mode_lazy:                                       [ OK ] 0.69 sec.
+02346_text_index_multiple_blocks:                                       [ OK ] 0.55 sec.
+04102_text_index_hasAny_hasAll:                                         [ OK ] 0.39 sec.
+04035_text_index_map_values_in:                                         [ OK ] 0.29 sec.
+02346_text_index_queries:                                               [ OK ] 0.90 sec.
+04041_text_index_direct_read_or_multi_column:                           [ OK ] 0.29 sec.
+04039_text_index_map_values_subcolumn:                                  [ OK ] 0.24 sec.
+02346_text_index_duplicate_tokens:                                      [ OK ] 0.35 sec.
+04223_text_index_direct_read_like_90802:                                [ OK ] 0.24 sec.
+04094_text_index_like_large_postings:                                   [ OK ] 0.29 sec.
+03776_text_index_covered_sparse_grams:                                  [ OK ] 0.44 sec.
+02346_text_index_short_ngrams_and_empty_tokens:                         [ OK ] 1.59 sec.
+04042_text_index_prewhere_alias_select:                                 [ OK ] 0.28 sec.
+02346_text_index_byte_size_reporting:                                   [ OK ] 0.19 sec.
+04261_text_index_partial_mark_read:                                     [ OK ] 0.44 sec.
+02346_text_index_detach_attach:                                         [ OK ] 0.19 sec.
+02346_text_index_match_predicate:                                       [ OK ] 0.34 sec.
+04044_text_index_hash_token_boundaries:                                 [ OK ] 0.29 sec.
+04036_text_index_map_keys_values_in:                                    [ OK ] 0.29 sec.
+02346_text_index_bug90778:                                              [ OK ] 0.19 sec.
+04038_text_index_no_negated_functions:                                  [ OK ] 0.28 sec.
+03165_string_functions_with_token_text_indexes:                         [ OK ] 0.49 sec.
+04063_text_index_in_tuple:                                              [ OK ] 0.25 sec.
+02346_text_index_hint_profileevents:                                    [ OK ] 0.29 sec.
+02346_text_index_direct_read_with_query_condition_cache:                [ OK ] 0.29 sec.
+02346_text_index_bug102497:                                             [ OK ] 0.34 sec.
+02346_text_index_tokenizer_partially_materialized:                      [ OK ] 0.28 sec.
+02346_text_index_posting_list_compression:                              [ OK ] 0.29 sec.
+02346_text_index_bug93432:                                              [ OK ] 0.19 sec.
+02346_text_index_on_expressions:                                        [ OK ] 0.49 sec.
+04035_text_index_map_values_in:                                         [ OK ] 0.29 sec.
+04050_text_index_starts_ends_with:                                      [ OK ] 1.10 sec.
+04075_text_index_apply_mode_lazy_segment_advance:                       [ OK ] 0.84 sec.
+04061_text_index_json_all_values_ngrams:                                [ OK ] 8.67 sec.
+04039_text_index_direct_read_select_alias:                              [ OK ] 0.29 sec.
+02346_text_index_direct_read_nullable:                                  [ OK ] 0.29 sec.
+02346_text_index_parallel_replicas:                                     [ OK ] 0.44 sec.
+04075_text_index_apply_mode_lazy:                                       [ OK ] 0.54 sec.
+02346_text_index_hint:                                                  [ OK ] 0.39 sec.
+04096_text_index_json_subcolumn:                                        [ OK ] 0.29 sec.
+04038_text_index_preprocessor_type_validation:                          [ OK ] 2.05 sec.
+04035_text_index_map_values_in:                                         [ OK ] 0.35 sec.
+02346_text_index_direct_read_crash:                                     [ OK ] 0.34 sec.
+04258_text_index_lazy_intersect_heap:                                   [ OK ] 0.29 sec.
+02346_text_index_bug89605:                                              [ OK ] 0.29 sec.
+02346_text_index_summingmergetree:                                      [ OK ] 0.40 sec.
+04050_text_index_lazy_extreme_selectivity:                              [ OK ] 0.69 sec.
+02346_text_index_nullable:                                              [ OK ] 1.20 sec.
+02346_text_index_short_ngrams_and_empty_tokens:                         [ OK ] 1.50 sec.
+02346_text_index_hint_profileevents:                                    [ OK ] 0.30 sec.
+04141_text_index_alias_lambda_with_constants:                           [ OK ] 0.74 sec.
+04075_text_index_posting_list_format:                                   [ OK ] 0.39 sec.
+02346_text_index_default_granularity:                                   [ OK ] 0.30 sec.
+04075_text_index_apply_mode:                                            [ OK ] 1.14 sec.
+04075_text_index_apply_mode_lazy:                                       [ OK ] 0.70 sec.
+02346_text_index_queries:                                               [ OK ] 1.04 sec.
+02346_text_index_on_expressions:                                        [ OK ] 0.54 sec.
+02346_text_index_on_expressions:                                        [ OK ] 0.50 sec.
+04103_text_index_alias_direct_read_map:                                 [ OK ] 0.29 sec.
+04103_text_index_alias_direct_read_map:                                 [ OK ] 0.29 sec.
+02346_text_index_hint_profileevents:                                    [ OK ] 0.29 sec.
+04261_text_index_partial_mark_read:                                     [ OK ] 0.49 sec.
+02346_text_index_bug59039:                                              [ OK ] 0.19 sec.
+04261_text_index_partial_mark_read:                                     [ OK ] 0.54 sec.
+02346_text_index_bug90778:                                              [ OK ] 0.29 sec.
+02346_text_index_bug84805:                                              [ OK ] 0.34 sec.
+
+14 tests passed. 0 tests skipped. 14.42 s elapsed (Process-18).
+02346_text_index_lwd:                                                   [ OK ] 0.49 sec.
+
+13 tests passed. 0 tests skipped. 14.42 s elapsed (Process-19).
+02346_text_index_part_format:                                           [ OK ] 0.39 sec.
+
+27 tests passed. 0 tests skipped. 14.47 s elapsed (Process-8).
+02346_text_index_bug62681:                                              [ OK ] 0.29 sec.
+
+20 tests passed. 0 tests skipped. 14.46 s elapsed (Process-22).
+04003_text_index_search_mode:                                           [ OK ] 0.24 sec.
+
+15 tests passed. 0 tests skipped. 14.48 s elapsed (Process-25).
+02346_text_index_function_hasPhrase:                                    [ OK ] 0.90 sec.
+
+11 tests passed. 0 tests skipped. 14.56 s elapsed (Process-15).
+04026_prewhere_qualify_text_index:                                      [ OK ] 0.29 sec.
+
+27 tests passed. 0 tests skipped. 14.60 s elapsed (Process-27).
+02346_text_index_dictionary_frontcoding:                                [ OK ] 0.34 sec.
+
+Having 1 errors! 28 tests passed. 0 tests skipped. 14.60 s elapsed (Process-29).
+02346_text_index_function_like:                                         [ OK ] 0.79 sec.
+
+15 tests passed. 0 tests skipped. 14.64 s elapsed (Process-13).
+04036_text_index_map_keys_values_in:                                    [ OK ] 0.34 sec.
+
+26 tests passed. 0 tests skipped. 14.65 s elapsed (Process-17).
+04266_text_index_tokens_cardinality_order:                              [ OK ] 1.54 sec.
+
+Having 2 errors! 19 tests passed. 0 tests skipped. 14.62 s elapsed (Process-31).
+02346_text_index_part_format:                                           [ OK ] 0.39 sec.
+
+24 tests passed. 0 tests skipped. 14.67 s elapsed (Process-14).
+02346_text_index_on_expressions:                                        [ OK ] 0.49 sec.
+
+15 tests passed. 0 tests skipped. 14.68 s elapsed (Process-7).
+02346_text_index_map_support:                                           [ OK ] 1.75 sec.
+
+29 tests passed. 0 tests skipped. 14.68 s elapsed (Process-11).
+03165_string_functions_with_token_text_indexes:                         [ OK ] 0.49 sec.
+
+29 tests passed. 0 tests skipped. 14.67 s elapsed (Process-32).
+02346_text_index_function_like:                                         [ OK ] 0.79 sec.
+
+Having 1 errors! 20 tests passed. 0 tests skipped. 14.77 s elapsed (Process-21).
+03913_text_index_preprocessor_expression:                               [ OK ] 0.49 sec.
+
+14 tests passed. 0 tests skipped. 14.92 s elapsed (Process-26).
+04141_text_index_alias_lambda_with_constants:                           [ OK ] 0.64 sec.
+
+27 tests passed. 0 tests skipped. 14.97 s elapsed (Process-3).
+02346_text_index_short_ngrams_and_empty_tokens:                         [ OK ] 1.20 sec.
+
+20 tests passed. 0 tests skipped. 15.03 s elapsed (Process-28).
+02346_text_index_prewhere_support:                                      [ OK ] 5.30 sec.
+
+12 tests passed. 0 tests skipped. 15.09 s elapsed (Process-23).
+02346_text_index_mergeTreeTextIndex_access:                             [ OK ] 3.50 sec.
+
+24 tests passed. 0 tests skipped. 15.19 s elapsed (Process-24).
+04050_text_index_starts_ends_with:                                      [ OK ] 0.99 sec.
+
+28 tests passed. 0 tests skipped. 15.41 s elapsed (Process-6).
+04061_text_index_json_all_values:                                       [ OK ] 7.47 sec.
+
+18 tests passed. 0 tests skipped. 16.09 s elapsed (Process-9).
+02346_text_index_hint_map:                                              [ OK ] 5.05 sec.
+
+15 tests passed. 0 tests skipped. 16.18 s elapsed (Process-5).
+04099_text_index_json_all_values_array:                                 [ OK ] 2.00 sec.
+
+10 tests passed. 0 tests skipped. 16.26 s elapsed (Process-20).
+02346_text_index_prewhere_support:                                      [ OK ] 4.51 sec.
+
+18 tests passed. 0 tests skipped. 16.99 s elapsed (Process-16).
+02346_text_index_prewhere_support:                                      [ OK ] 4.65 sec.
+
+9 tests passed. 0 tests skipped. 17.02 s elapsed (Process-12).
+02346_text_index_prewhere_support:                                      [ OK ] 4.60 sec.
+
+Having 1 errors! 15 tests passed. 0 tests skipped. 17.13 s elapsed (Process-10).
+04062_text_index_json_all_values_ghdata:                                [ OK ] 10.48 sec.
+
+13 tests passed. 0 tests skipped. 17.17 s elapsed (Process-30).
+04061_text_index_json_all_values_ngrams:                                [ OK ] 7.26 sec.
+
+18 tests passed. 0 tests skipped. 18.06 s elapsed (Process-4).
+Running 31 stateless tests (MainProcess).
+02346_text_index_hits:                                                  [ FAIL ] 0.31 sec.
+Reason: return code:  60
+[anton] 2026.05.30 00:00:19.058219 [ 535302 ] {6a8c5fd1-d827-4611-afd9-95e412f9ddcf} <Error> executeQuery: Code: 60. DB::Exception: Unknown table expression identifier 'test.hits' in scope SELECT CounterID, EventDate, UserID, SearchPhrase, URL FROM test.hits. (UNKNOWN_TABLE) (version 26.6.1.1) (from 127.0.0.1:44270) (comment: 02346_text_index_hits.sql-test_cs7fddl2) (query 7, line 23) (in query: INSERT INTO hits_text SELECT CounterID, EventDate, UserID,SearchPhrase, URL FROM test.hits;), Stack trace (when copying this message, always include the lines below):
+
+0. contrib/llvm-project/libcxx/include/__exception/exception.h:115:14: Poco::Exception::Exception(String&&, int) @ 0x000000001ee71673
+1. src/Common/Exception.cpp:139:7: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000ffcb2e9
+2. src/Common/Exception.h:171:100: DB::Exception::Exception(String&&, int, String, bool) @ 0x000000000952624e
+3. src/Common/Exception.h:57:54: DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000009525d04
+4. src/Common/Exception.h:189:77: DB::Exception::Exception<String const&, String>(int, FormatStringHelperImpl<std::type_identity<String const&>::type, std::type_identity<String>::type>, String const&, String&&) @ 0x000000000a46a436
+5. src/Analyzer/Resolve/QueryAnalyzer.cpp:3793:27: DB::QueryAnalyzer::initializeQueryJoinTreeNode(std::shared_ptr<DB::IQueryTreeNode>&, DB::IdentifierResolveScope&) @ 0x0000000014555bd2
+6. src/Analyzer/Resolve/QueryAnalyzer.cpp:5645:5: DB::QueryAnalyzer::resolveQuery(std::shared_ptr<DB::IQueryTreeNode> const&, DB::IdentifierResolveScope&) @ 0x000000001452b8bb
+7. src/Analyzer/Resolve/QueryAnalyzer.cpp:211:13: DB::QueryAnalyzer::resolve(std::shared_ptr<DB::IQueryTreeNode>&, std::shared_ptr<DB::IQueryTreeNode> const&, std::shared_ptr<DB::Context const>) @ 0x000000001452a6f6
+8. src/Analyzer/Resolve/QueryAnalysisPass.cpp:18:14: DB::QueryAnalysisPass::run(std::shared_ptr<DB::IQueryTreeNode>&, std::shared_ptr<DB::Context const>) @ 0x0000000014529b15
+9. src/Analyzer/QueryTreePassManager.cpp:199:20: DB::QueryTreePassManager::run(std::shared_ptr<DB::IQueryTreeNode>&) @ 0x0000000014584319
+10. src/Interpreters/InterpreterSelectQueryAnalyzer.cpp:255:33: DB::buildQueryTreeAndRunPasses(boost::intrusive_ptr<DB::IAST> const&, DB::SelectQueryOptions const&, std::shared_ptr<DB::Context const> const&, std::shared_ptr<DB::IStorage> const&) @ 0x000000001514183d
+11. src/Interpreters/InterpreterSelectQueryAnalyzer.cpp:273:18: DB::InterpreterSelectQueryAnalyzer::InterpreterSelectQueryAnalyzer(boost::intrusive_ptr<DB::IAST> const&, std::shared_ptr<DB::Context const> const&, DB::SelectQueryOptions const&, std::vector<String, std::allocator<String>> const&, DB::ActionsDAG const*) @ 0x000000001513f79d
+12. src/Interpreters/InterpreterInsertQuery.cpp:629:44: DB::InterpreterInsertQuery::buildInsertSelectPipeline(DB::ASTInsertQuery&, std::shared_ptr<DB::IStorage>) @ 0x00000000150f760c
+13. src/Interpreters/InterpreterInsertQuery.cpp:1077:28: DB::InterpreterInsertQuery::execute() @ 0x00000000150fdc10
+14. src/Interpreters/executeQuery.cpp:1824:40: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, std::unique_ptr<DB::ReadBuffer, std::default_delete<DB::ReadBuffer>>&, boost::intrusive_ptr<DB::IAST>&, std::shared_ptr<DB::ImplicitTransactionControlExecutor>, std::function<void ()>, DB::QueryResultDetails&) @ 0x00000000154e46dc
+15. src/Interpreters/executeQuery.cpp:2196:11: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x00000000154df563
+16. src/Server/TCPHandler.cpp:831:68: DB::TCPHandler::runImpl() @ 0x000000001a0add6a
+17. src/Server/TCPHandler.cpp:3068:9: DB::TCPHandler::run() @ 0x000000001a0ce2a3
+18. base/poco/Net/src/TCPServerConnection.cpp:40:3: Poco::Net::TCPServerConnection::start() @ 0x000000001eee13c7
+19. base/poco/Net/src/TCPServerDispatcher.cpp:115:42: Poco::Net::TCPServerDispatcher::run() @ 0x000000001eee1895
+20. base/poco/Foundation/src/ThreadPool.cpp:207:14: Poco::PooledThread::run() @ 0x000000001eea833f
+21. base/poco/Foundation/src/Thread_POSIX.cpp:341:27: Poco::ThreadImpl::runnableEntry(void*) @ 0x000000001eea6711
+22. __sin_avx @ 0x00000000000a40da
+23. __GI___clone3 @ 0x00000000001377ac
+
+Received exception from server (version 26.6.1):
+Code: 60. DB::Exception: Received from localhost:9000. DB::Exception: Unknown table expression identifier 'test.hits' in scope SELECT CounterID, EventDate, UserID, SearchPhrase, URL FROM test.hits. (UNKNOWN_TABLE)
+(query: INSERT INTO hits_text SELECT CounterID, EventDate, UserID,SearchPhrase, URL FROM test.hits;), result:
+
+
+
+stdout:
+
+
+Settings used in the test: --max_insert_threads 1 --group_by_two_level_threshold 928195 --group_by_two_level_threshold_bytes 1 --distributed_aggregation_memory_efficient 1 --fsync_metadata 1 --output_format_parallel_formatting 0 --input_format_parallel_parsing 0 --min_chunk_bytes_for_parallel_parsing 13091933 --max_read_buffer_size 805836 --prefer_localhost_replica 1 --max_block_size 43308 --max_joined_block_size_rows 18557 --joined_block_split_single_row 0 --join_output_by_rowlist_perkey_rows_threshold 689 --max_threads 1 --optimize_append_index 0 --use_hedged_requests 0 --optimize_if_chain_to_multiif 0 --optimize_if_transform_strings_to_enum 0 --optimize_read_in_order 1 --optimize_or_like_chain 1 --optimize_substitute_columns 1 --enable_multiple_prewhere_read_steps 1 --read_in_order_two_level_merge_threshold 1 --optimize_aggregation_in_order 0 --aggregation_in_order_max_block_bytes 27007815 --use_uncompressed_cache 0 --min_bytes_to_use_direct_io 6835652976 --min_bytes_to_use_mmap_io 2777548688 --local_filesystem_read_method mmap --remote_filesystem_read_method threadpool --local_filesystem_read_prefetch 1 --filesystem_cache_segments_batch_size 10 --read_from_filesystem_cache_if_exists_otherwise_bypass_cache 0 --throw_on_error_from_cache_on_write_operations 0 --remote_filesystem_read_prefetch 0 --distributed_cache_discard_connection_if_unread_data 1 --distributed_cache_use_clients_cache_for_write 0 --distributed_cache_use_clients_cache_for_read 1 --allow_prefetched_read_pool_for_remote_filesystem 0 --filesystem_prefetch_max_memory_usage 128Mi --filesystem_prefetches_limit 10 --filesystem_prefetch_min_bytes_for_single_read_task 16Mi --filesystem_prefetch_step_marks 0 --filesystem_prefetch_step_bytes 100Mi --enable_filesystem_cache 1 --enable_filesystem_cache_on_write_operations 1 --compile_expressions 1 --compile_aggregate_expressions 1 --compile_sort_description 1 --merge_tree_coarse_index_granularity 7 --optimize_distinct_in_order 0 --max_bytes_before_remerge_sort 1007446516 --min_compress_block_size 2898994 --max_compress_block_size 226681 --merge_tree_compact_parts_min_granules_to_multibuffer_read 9 --optimize_sorting_by_input_stream_properties 0 --http_response_buffer_size 978890 --http_wait_end_of_query False --enable_memory_bound_merging_of_aggregation_results 0 --min_count_to_compile_expression 3 --min_count_to_compile_aggregate_expression 3 --min_count_to_compile_sort_description 0 --session_timezone Africa/Khartoum --use_page_cache_for_disks_without_file_cache True --use_page_cache_for_local_disks False --use_page_cache_for_object_storage True --page_cache_inject_eviction True --merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability 0.21 --prefer_external_sort_block_bytes 0 --cross_join_min_rows_to_compress 100000000 --cross_join_min_bytes_to_compress 100000000 --min_external_table_block_size_bytes 100000000 --max_parsing_threads 0 --optimize_functions_to_subcolumns 1 --parallel_replicas_local_plan 1 --query_plan_join_swap_table false --enable_vertical_final 1 --optimize_extract_common_expressions 0 --optimize_rewrite_array_exists_to_has True --optimize_skip_unused_shards True --optimize_trivial_approximate_count_query False --optimize_trivial_insert_select True --optimize_using_constraints False --optimize_syntax_fuse_functions False --optimize_aggregators_of_group_by_keys True --optimize_and_compare_chain True --optimize_arithmetic_operations_in_aggregate_functions True --optimize_count_from_files True --optimize_distributed_group_by_sharding_key True --optimize_empty_string_comparisons True --optimize_group_by_constant_keys True --optimize_group_by_function_keys True --optimize_injective_functions_in_group_by True --optimize_injective_functions_inside_uniq True --optimize_inverse_dictionary_lookup True --optimize_move_to_prewhere False --optimize_multiif_to_if True --optimize_normalize_count_variants True --optimize_on_insert True --optimize_redundant_functions_in_order_by True --optimize_respect_aliases True --optimize_rewrite_aggregate_function_with_if True --optimize_rewrite_regexp_functions True --optimize_rewrite_sum_if_to_count_if True --optimize_skip_unused_shards_rewrite_in False --optimize_time_filter_with_preimage True --optimize_trivial_count_query True --optimize_uniq_to_count True --optimize_use_projections True --optimize_use_implicit_projections True --optimize_use_projection_filtering True --query_plan_optimize_lazy_materialization True --query_plan_optimize_prewhere True --use_async_executor_for_materialized_views 0 --use_query_condition_cache 0 --secondary_indices_enable_bulk_filtering 0 --use_skip_indexes_if_final 0 --use_skip_indexes_on_data_read 0 --optimize_rewrite_like_perfect_affix 1 --enable_lazy_columns_replication 1 --allow_special_serialization_kinds_in_output_formats 0 --use_skip_indexes_for_top_k 1 --use_top_k_dynamic_filtering 1 --query_plan_max_limit_for_top_k_optimization 1 --query_plan_read_in_order_through_join 0 --read_in_order_use_virtual_row 0 --short_circuit_function_evaluation_for_nulls_threshold 0.4496590682843378 --automatic_parallel_replicas_mode 0 --temporary_files_buffer_size 1105434 --query_plan_optimize_join_order_algorithm dpsize,greedy --max_bytes_before_external_join 1000000000 --execute_exists_as_scalar_subquery True --normalize_function_names True --enable_join_runtime_filters True --enable_parallel_blocks_marshalling True --query_plan_reuse_storage_ordering_for_window_functions True --query_plan_join_shard_by_pk_ranges False --count_distinct_optimization True --enable_add_distinct_to_in_subqueries False --use_statistics True --use_statistics_cache True --enable_optimize_predicate_expression True --enable_optimize_predicate_expression_to_final_subquery True --enable_software_prefetch_in_aggregation True --allow_reorder_prewhere_conditions True --query_plan_merge_filters True --query_plan_remove_unused_columns True --query_plan_convert_outer_join_to_inner_join True --query_plan_convert_any_join_to_semi_or_anti_join True --query_plan_merge_filter_into_join_condition True --query_plan_enable_multithreading_after_window_functions True --query_plan_max_limit_for_lazy_materialization 1000 --query_plan_optimize_join_order_limit 10 --query_plan_direct_read_from_text_index True --query_plan_text_index_add_hint True --optimize_truncate_order_by_after_group_by_keys False --enable_automatic_decision_for_merging_across_partitions_for_final True --parallel_non_joined_rows_processing True --use_skip_indexes_for_disjunctions True --use_hash_table_stats_for_join_reordering True --allow_calculating_subcolumns_sizes_for_merge_tree_reading True --use_join_disjunctions_push_down True --enable_join_transitive_predicates False --max_bytes_before_external_sort 0 --max_bytes_before_external_group_by 0 --max_bytes_ratio_before_external_sort 0 --max_bytes_ratio_before_external_group_by 0 --use_skip_indexes_if_final_exact_mode 0
+
+MergeTree settings used in test: --ratio_of_defaults_for_sparse_serialization 1.0 --prefer_fetch_merged_part_size_threshold 10737418240 --vertical_merge_algorithm_min_rows_to_activate 119085 --vertical_merge_algorithm_min_columns_to_activate 100 --allow_vertical_merges_from_compact_to_wide_parts 0 --min_merge_bytes_to_use_direct_io 10414750935 --index_granularity_bytes 7391779 --merge_max_block_size 11160 --index_granularity 61337 --min_bytes_for_wide_part 442443745 --compress_marks 1 --compress_primary_key 0 --marks_compress_block_size 28652 --primary_key_compress_block_size 53112 --replace_long_file_name_to_hash 0 --max_file_name_length 128 --min_bytes_for_full_part_storage 0 --compact_parts_max_bytes_to_buffer 532570451 --compact_parts_max_granules_to_buffer 204 --compact_parts_merge_max_bytes_to_prefetch_part 17623322 --cache_populated_by_fetch 0 --concurrent_part_removal_threshold 100 --old_parts_lifetime 242 --prewarm_mark_cache 0 --use_const_adaptive_granularity 0 --enable_index_granularity_compression 1 --enable_block_number_column 1 --enable_block_offset_column 0 --use_primary_key_cache 0 --prewarm_primary_key_cache 1 --object_serialization_version v3 --object_shared_data_serialization_version map --object_shared_data_serialization_version_for_zero_level_parts map --object_shared_data_buckets_for_compact_part 28 --object_shared_data_buckets_for_wide_part 3 --dynamic_serialization_version v2 --serialization_info_version with_types --string_serialization_version with_size_stream --nullable_serialization_version basic --enable_shared_storage_snapshot_in_query 1 --min_columns_to_activate_adaptive_write_buffer 792 --reduce_blocking_parts_sleep_ms 1787 --shared_merge_tree_outdated_parts_group_size 2 --shared_merge_tree_max_outdated_parts_to_process_at_once 8 --map_serialization_version with_buckets --map_serialization_version_for_zero_level_parts with_buckets --max_buckets_in_map 50 --map_buckets_strategy linear --map_buckets_min_avg_size 537 --map_buckets_coefficient 1.16 --propagate_types_serialization_versions_to_nested_types 0 --compress_per_column_in_compact_parts 0
+
+Database: test_cs7fddl2
+02346_text_index_preprocessor:                                          [ OK ] 1.08 sec.
+02346_text_index_header_cache:                                          [ OK ] 0.33 sec.
+02346_text_index_direct_read:                                           [ OK ] 0.24 sec.
+02346_text_index_postings_cache:                                        [ OK ] 0.35 sec.
+02346_text_index_drop_caches:                                           [ OK ] 0.35 sec.
+02346_text_index_dictionary_cache:                                      [ OK ] 0.29 sec.
+02346_text_index_preprocessor:                                          [ OK ] 1.07 sec.
+02346_text_index_header_cache:                                          [ OK ] 0.23 sec.
+02346_text_index_direct_read:                                           [ OK ] 0.18 sec.
+02346_text_index_postings_cache:                                        [ OK ] 0.23 sec.
+02346_text_index_drop_caches:                                           [ OK ] 0.33 sec.
+02346_text_index_dictionary_cache:                                      [ OK ] 0.23 sec.
+02346_text_index_preprocessor:                                          [ OK ] 0.78 sec.
+02346_text_index_header_cache:                                          [ OK ] 0.23 sec.
+02346_text_index_direct_read:                                           [ OK ] 0.28 sec.
+02346_text_index_postings_cache:                                        [ OK ] 0.23 sec.
+02346_text_index_drop_caches:                                           [ OK ] 0.33 sec.
+02346_text_index_dictionary_cache:                                      [ OK ] 0.30 sec.
+02346_text_index_preprocessor:                                          [ OK ] 1.14 sec.
+02346_text_index_header_cache:                                          [ OK ] 0.29 sec.
+02346_text_index_direct_read:                                           [ OK ] 0.25 sec.
+02346_text_index_postings_cache:                                        [ OK ] 0.31 sec.
+02346_text_index_drop_caches:                                           [ OK ] 0.39 sec.
+02346_text_index_dictionary_cache:                                      [ OK ] 0.36 sec.
+02346_text_index_preprocessor:                                          [ OK ] 0.83 sec.
+02346_text_index_header_cache:                                          [ OK ] 0.23 sec.
+02346_text_index_direct_read:                                           [ OK ] 0.28 sec.
+02346_text_index_postings_cache:                                        [ OK ] 0.28 sec.
+02346_text_index_drop_caches:                                           [ OK ] 0.34 sec.
+02346_text_index_dictionary_cache:                                      [ OK ] 0.23 sec.
+
+Having 1 errors! 30 tests passed. 0 tests skipped. 13.16 s elapsed (MainProcess).
+All tests have finished.

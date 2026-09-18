@@ -1,0 +1,24 @@
+-- both paths score the same rows with bit-identical scores
+mid_pair	200	0	2.9454	4.5512
+sparse_dense	2	0	6.032	6.032
+triple	200	0	2.9454	4.5512
+-- the linear pass scores exactly the intersection rows
+mid_pair	1
+sparse_dense	1
+triple	1
+-- scores of the linear pass: term frequency 2 on the multiples of 80, document length grows with k % 160
+0	4.1223
+40	3.6859
+80	3.7686
+120	2.9454
+160	4.5512
+200	3.6859
+240	3.7686
+280	2.9454
+-- the algorithm chosen per query
+05219_rule_mid_pair_default	1	0
+05219_rule_mid_pair_threshold_1	0	1
+05219_rule_sparse_dense_default	0	1
+05219_rule_sparse_dense_threshold_0	1	0
+05219_rule_triple_default	1	0
+05219_rule_triple_threshold_1	0	1
