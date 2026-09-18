@@ -40,14 +40,24 @@ bool hasRowInRange(const PaddedPODArray<UInt32> & rows, size_t from, size_t begi
     return it != rows.end() && *it <= end;
 }
 
+/// True if the bitmap has a value in the closed range [begin, end]. Allocation-free.
+bool hasRowInRange(const PostingList & postings, size_t begin, size_t end)
+{
+    return roaring::api::roaring_bitmap_intersect_with_range(&postings.roaring, begin, static_cast<UInt64>(end) + 1);
+}
+
+}
+
+bool PostingsApplyTargets::hasReadableRowsTargets() const
+{
+    return !unite.empty()
+        || std::ranges::any_of(intersect, [](const auto & target) { return !target.initialized; })
+        || std::ranges::any_of(intersect_bitmaps, [](const auto & target) { return !target.initialized; });
 }
 
 bool PostingsApplyTargets::needRange(size_t begin, size_t end) const
 {
-    bool has_readable_rows_targets = !unite.empty()
-        || std::ranges::any_of(intersect, [](const auto & target) { return !target.initialized; });
-
-    if (has_readable_rows_targets)
+    if (hasReadableRowsTargets())
     {
         if (!readable_ranges)
             return true;
@@ -63,15 +73,21 @@ bool PostingsApplyTargets::needRange(size_t begin, size_t end) const
             return true;
     }
 
+    for (const auto & target : intersect_bitmaps)
+    {
+        if (target.initialized && hasRowInRange(*target.postings, begin, end))
+            return true;
+    }
+
     return false;
 }
 
 PostingsApplier::PostingsApplier(PostingsApplyTargets & targets_)
     : targets(targets_)
+    , has_readable_rows_targets(targets.hasReadableRowsTargets())
+    , has_bitmap_targets(!targets.unite.empty() || !targets.intersect_bitmaps.empty())
     , intersect_states(targets.intersect.size())
 {
-    has_readable_rows_targets = !targets.unite.empty()
-        || std::ranges::any_of(targets.intersect, [](const auto & target) { return !target.initialized; });
 }
 
 bool PostingsApplier::needBlock(UInt32 begin, UInt32 end)
@@ -96,6 +112,12 @@ bool PostingsApplier::needBlock(UInt32 begin, UInt32 end)
             return true;
     }
 
+    for (const auto & target : targets.intersect_bitmaps)
+    {
+        if (target.initialized && hasRowInRange(*target.postings, begin, end))
+            return true;
+    }
+
     return false;
 }
 
@@ -111,6 +133,12 @@ bool PostingsApplier::exhausted() const
     {
         const auto & target = targets.intersect[i];
         if (target.initialized && intersect_states[i].read_pos < target.rows->size())
+            return false;
+    }
+
+    for (const auto & target : targets.intersect_bitmaps)
+    {
+        if (target.initialized && !target.postings->isEmpty())
             return false;
     }
 
@@ -176,14 +204,14 @@ void PostingsApplier::applyRows(std::span<const UInt32> sorted_rows)
 
 void PostingsApplier::applyBitmap(const PostingList & postings)
 {
+    chassert(!bitmap_applied && num_token_rows == 0);
+    bitmap_applied = true;
+
     /// The readable rows of the token, clipped by a bitmap intersection when needed.
     const PostingList * readable_postings = &postings;
     std::optional<PostingList> clipped_postings;
 
-    bool need_readable_postings = !targets.unite.empty()
-        || std::ranges::any_of(targets.intersect, [](const auto & target) { return !target.initialized; });
-
-    if (need_readable_postings && targets.readable_ranges)
+    if (has_readable_rows_targets && targets.readable_ranges)
     {
         chassert(targets.readable_bitmap);
         clipped_postings = postings & *targets.readable_bitmap;
@@ -200,6 +228,15 @@ void PostingsApplier::applyBitmap(const PostingList & postings)
         }
     }
 
+    /// An initialized intersection holds readable rows only, so the unclipped bitmap gives the same result.
+    for (const auto & target : targets.intersect_bitmaps)
+    {
+        if (target.initialized)
+            *target.postings &= postings;
+        else
+            *target.postings = *readable_postings;
+    }
+
     for (size_t i = 0; i < targets.intersect.size(); ++i)
     {
         const auto & target = targets.intersect[i];
@@ -212,7 +249,7 @@ void PostingsApplier::applyBitmap(const PostingList & postings)
             continue;
         }
 
-        /// The rows are inside the readable ranges already: keep the ones the bitmap contains, compacting in place.
+        /// Keep the rows the bitmap contains, compacting in place.
         roaring::BulkContext context;
         size_t write_pos = 0;
 
@@ -254,7 +291,9 @@ size_t PostingsApplier::clipToReadableRanges(const UInt32 * values, size_t count
 
 void PostingsApplier::applyBlock(const UInt32 * values, size_t count)
 {
-    if (has_readable_rows_targets)
+    chassert(!bitmap_applied);
+
+    if (has_readable_rows_targets || has_bitmap_targets)
     {
         const UInt32 * readable_values = values;
         size_t readable_count = count;
@@ -267,10 +306,11 @@ void PostingsApplier::applyBlock(const UInt32 * values, size_t count)
 
         if (readable_count > 0)
         {
-            if (!targets.unite.empty())
+            /// The rows of an initialized bitmap intersection are readable already, so the clipped rows serve every bitmap target.
+            if (has_bitmap_targets)
             {
-                union_postings.addMany(readable_count, readable_values);
-                num_union_applied += readable_count;
+                token_postings.addMany(readable_count, readable_values);
+                num_token_rows += readable_count;
             }
 
             for (auto & target : targets.intersect)
@@ -336,20 +376,36 @@ void PostingsApplier::finish()
         target.num_applied = target.rows->size();
     }
 
-    for (size_t i = 0; i < targets.unite.size(); ++i)
+    /// The rows collected from the blocks are merged into the bitmap targets at once.
+    /// A token without readable rows leaves nothing in the unions and empties the intersections.
+    if (!bitmap_applied)
     {
-        auto & target = targets.unite[i];
-        target.num_applied += num_union_applied;
+        for (auto & target : targets.intersect_bitmaps)
+        {
+            if (target.initialized)
+                *target.postings &= token_postings;
+            else
+                *target.postings = token_postings;
+        }
 
-        if (num_union_applied == 0)
-            continue;
+        for (size_t i = 0; i < targets.unite.size(); ++i)
+        {
+            auto & target = targets.unite[i];
+            target.num_applied += num_token_rows;
 
-        /// The last target takes the bitmap over when it has nothing folded yet.
-        if (i + 1 == targets.unite.size() && target.postings->isEmpty())
-            *target.postings = std::move(union_postings);
-        else
-            *target.postings |= union_postings;
+            if (num_token_rows == 0)
+                continue;
+
+            /// The last target takes the bitmap over when it has nothing folded yet.
+            if (i + 1 == targets.unite.size() && target.postings->isEmpty())
+                *target.postings = std::move(token_postings);
+            else
+                *target.postings |= token_postings;
+        }
     }
+
+    for (auto & target : targets.intersect_bitmaps)
+        target.num_applied = target.postings->cardinality();
 
     if (num_blocks_decoded)
         ProfileEvents::increment(ProfileEvents::TextIndexAnalyzePostingsBlocksDecoded, num_blocks_decoded);

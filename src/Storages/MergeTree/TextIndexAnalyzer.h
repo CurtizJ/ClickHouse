@@ -41,12 +41,13 @@ public:
         /// Row range folded across observed tokens by the query search mode (intersect for `All`, union for `Any`).
         std::optional<RowsRange> rows_range;
 
-        /// Posting list folded across materialized tokens by the query search mode, clipped to the readable rows.
-        /// `All` and `Phrase` queries fold by intersection into `intersected_postings`: a sorted array of unique
-        /// row ids that never grows beyond the rarest folded token. `Any` queries fold by union into `united_postings`.
-        /// At most one of them is set. The array is shared, so the reader can iterate it without a copy.
-        std::shared_ptr<PaddedPODArray<UInt32>> intersected_postings;
-        std::optional<PostingList> united_postings;
+        /// Posting list folded across materialized tokens by the query search mode (intersection for `All` and
+        /// `Phrase`, union for `Any`), clipped to the readable rows. At most one representation is set:
+        /// `postings_array` holds the intersection of block-compressed posting lists, a sorted array of unique row
+        /// ids that never grows beyond the rarest folded token and that the reader iterates in place; `postings_bitmap`
+        /// holds unions, and intersections of uncompressed posting lists, which are bitmaps on disk already.
+        std::shared_ptr<PaddedPODArray<UInt32>> postings_array;
+        std::optional<PostingList> postings_bitmap;
 
         /// Query can never match (e.g. missing token in `All` mode, empty intersection).
         bool is_failed = false;
@@ -67,7 +68,7 @@ public:
         bool needReadPostings() const { return num_read_postings < tokens.size(); }
 
         /// True if the posting list of at least one token has been folded.
-        bool hasPostings() const { return intersected_postings || united_postings; }
+        bool hasPostings() const { return postings_array || postings_bitmap; }
         /// True if the folded posting list has no rows. Constant time, unlike `getPostingsCardinality` for a bitmap.
         bool hasEmptyPostings() const;
         size_t getPostingsCardinality() const;
@@ -82,8 +83,9 @@ public:
     struct PostingsApplyPlan
     {
         PostingsApplyTargets targets;
-        /// Query hashes parallel to `targets.intersect` and `targets.unite`.
+        /// Query hashes parallel to `targets.intersect`, `targets.intersect_bitmaps` and `targets.unite`.
         std::vector<UInt128> intersect_queries;
+        std::vector<UInt128> intersect_bitmap_queries;
         std::vector<UInt128> unite_queries;
     };
 
@@ -101,6 +103,11 @@ public:
 
     void addMissingToken(std::string_view token);
     void addTokenInfo(std::string_view token, TokenPostingsInfoPtr token_info);
+
+    /// Sets the codec of the posting lists of the granule. Intersections of block-compressed posting lists are
+    /// folded into arrays, which lets the reading skip packed blocks; uncompressed posting lists are bitmaps
+    /// already and are folded with bitmap operations. Must be called before any posting list is folded.
+    void setPostingsCodecType(IPostingListCodec::Type codec_type);
 
     /// Returns the targets that the posting list of `token` must be folded into while it is read.
     /// The targets are empty when no active query needs the token.
@@ -149,6 +156,8 @@ private:
     /* Fields built in the constructor from MergeTreeIndexConditionText. */
 
     TextSearchMode global_search_mode;
+    /// True if the intersections are folded into sorted arrays (block-compressed posting lists), false for bitmaps.
+    bool fold_intersections_into_arrays = false;
     /// One builder per parsed query, keyed by the query's stable hash.
     absl::flat_hash_map<UInt128, QueryBuilder> query_builders;
     /// Active queries that still depend on a given token.

@@ -65,47 +65,47 @@ const PostingList & TextIndexAnalyzer::ReadableRows::getBitmap()
 void TextIndexAnalyzer::QueryBuilder::markFailed()
 {
     is_failed = true;
-    intersected_postings.reset();
-    united_postings.reset();
+    postings_array.reset();
+    postings_bitmap.reset();
     rows_range.reset();
     num_live_tokens = 0;
 }
 
 bool TextIndexAnalyzer::QueryBuilder::hasEmptyPostings() const
 {
-    if (intersected_postings)
-        return intersected_postings->empty();
+    if (postings_array)
+        return postings_array->empty();
 
-    if (united_postings)
-        return united_postings->isEmpty();
+    if (postings_bitmap)
+        return postings_bitmap->isEmpty();
 
     return true;
 }
 
 size_t TextIndexAnalyzer::QueryBuilder::getPostingsCardinality() const
 {
-    if (intersected_postings)
-        return intersected_postings->size();
+    if (postings_array)
+        return postings_array->size();
 
-    if (united_postings)
-        return united_postings->cardinality();
+    if (postings_bitmap)
+        return postings_bitmap->cardinality();
 
     return 0;
 }
 
 bool TextIndexAnalyzer::QueryBuilder::hasPostingsInRange(const RowsRange & range) const
 {
-    if (intersected_postings)
+    if (postings_array)
     {
-        auto it = std::lower_bound(intersected_postings->begin(), intersected_postings->end(), range.begin);
-        return it != intersected_postings->end() && *it <= range.end;
+        auto it = std::lower_bound(postings_array->begin(), postings_array->end(), range.begin);
+        return it != postings_array->end() && *it <= range.end;
     }
 
-    if (united_postings)
+    if (postings_bitmap)
     {
         /// An allocation-free check that the folded posting list has a value in the closed range of rows.
         return roaring::api::roaring_bitmap_intersect_with_range(
-            &united_postings->roaring,
+            &postings_bitmap->roaring,
             range.begin,
             static_cast<UInt64>(range.end) + 1);
     }
@@ -115,19 +115,19 @@ bool TextIndexAnalyzer::QueryBuilder::hasPostingsInRange(const RowsRange & range
 
 PostingList TextIndexAnalyzer::QueryBuilder::getPostingsInRange(const RowsRange & range) const
 {
-    if (intersected_postings)
+    if (postings_array)
     {
-        auto begin = std::lower_bound(intersected_postings->begin(), intersected_postings->end(), range.begin);
-        auto end = std::upper_bound(begin, intersected_postings->end(), range.end);
+        auto begin = std::lower_bound(postings_array->begin(), postings_array->end(), range.begin);
+        auto end = std::upper_bound(begin, postings_array->end(), range.end);
         return PostingList(static_cast<size_t>(end - begin), begin);
     }
 
-    if (united_postings)
+    if (postings_bitmap)
     {
         /// A single run container, so the intersection touches only the containers of the range and never copies the bitmap.
         PostingList range_bitmap;
         range_bitmap.addRangeClosed(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
-        return *united_postings & range_bitmap;
+        return *postings_bitmap & range_bitmap;
     }
 
     return {};
@@ -135,11 +135,11 @@ PostingList TextIndexAnalyzer::QueryBuilder::getPostingsInRange(const RowsRange 
 
 PostingList TextIndexAnalyzer::QueryBuilder::getPostingsAsBitmap() const
 {
-    if (intersected_postings)
-        return PostingList(intersected_postings->size(), intersected_postings->data());
+    if (postings_array)
+        return PostingList(postings_array->size(), postings_array->data());
 
-    if (united_postings)
-        return *united_postings;
+    if (postings_bitmap)
+        return *postings_bitmap;
 
     return {};
 }
@@ -235,6 +235,12 @@ const TextIndexAnalyzer::QueryBuilder & TextIndexAnalyzer::getQueryBuilder(const
     return it->second;
 }
 
+void TextIndexAnalyzer::setPostingsCodecType(IPostingListCodec::Type codec_type)
+{
+    chassert(tokens_with_postings.empty());
+    fold_intersections_into_arrays = codec_type != IPostingListCodec::Type::None;
+}
+
 void TextIndexAnalyzer::addMissingToken(std::string_view token)
 {
     missing_tokens.emplace(token);
@@ -305,20 +311,29 @@ TextIndexAnalyzer::PostingsApplyPlan TextIndexAnalyzer::planApplyPostings(std::s
 
         if (query_builder.query->getSearchMode() == TextSearchMode::Any)
         {
-            if (!query_builder.united_postings)
-                query_builder.united_postings.emplace();
+            if (!query_builder.postings_bitmap)
+                query_builder.postings_bitmap.emplace();
 
-            plan.targets.unite.push_back({.postings = &*query_builder.united_postings});
+            plan.targets.unite.push_back({.postings = &*query_builder.postings_bitmap});
             plan.unite_queries.push_back(query_hash);
+        }
+        else if (fold_intersections_into_arrays)
+        {
+            bool initialized = query_builder.postings_array != nullptr;
+            if (!initialized)
+                query_builder.postings_array = std::make_shared<PaddedPODArray<UInt32>>();
+
+            plan.targets.intersect.push_back({.rows = query_builder.postings_array.get(), .initialized = initialized});
+            plan.intersect_queries.push_back(query_hash);
         }
         else
         {
-            bool initialized = query_builder.intersected_postings != nullptr;
+            bool initialized = query_builder.postings_bitmap.has_value();
             if (!initialized)
-                query_builder.intersected_postings = std::make_shared<PaddedPODArray<UInt32>>();
+                query_builder.postings_bitmap.emplace();
 
-            plan.targets.intersect.push_back({.rows = query_builder.intersected_postings.get(), .initialized = initialized});
-            plan.intersect_queries.push_back(query_hash);
+            plan.targets.intersect_bitmaps.push_back({.postings = &*query_builder.postings_bitmap, .initialized = initialized});
+            plan.intersect_bitmap_queries.push_back(query_hash);
         }
     }
 
@@ -341,7 +356,23 @@ void TextIndexAnalyzer::finishApplyPostings(std::string_view token, const Postin
         ++query_builder.num_read_postings;
 
         /// `All` mode fails as soon as the running intersection of readable postings becomes empty.
-        if (query_builder.intersected_postings->empty())
+        if (query_builder.postings_array->empty())
+            query_builder.markFailed();
+
+        handleFailedQuery(query_hash, query_builder);
+    }
+
+    for (size_t i = 0; i < plan.intersect_bitmap_queries.size(); ++i)
+    {
+        const auto & query_hash = plan.intersect_bitmap_queries[i];
+        auto & query_builder = query_builders.at(query_hash);
+
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        ++query_builder.num_read_postings;
+
+        if (query_builder.postings_bitmap->isEmpty())
             query_builder.markFailed();
 
         handleFailedQuery(query_hash, query_builder);
@@ -359,8 +390,8 @@ void TextIndexAnalyzer::finishApplyPostings(std::string_view token, const Postin
         {
             /// The token has no readable rows: the same as a token missing from the dictionary.
             /// A union never shrinks, so an empty bitmap means that nothing has been folded yet.
-            if (query_builder.united_postings->isEmpty())
-                query_builder.united_postings.reset();
+            if (query_builder.postings_bitmap->isEmpty())
+                query_builder.postings_bitmap.reset();
 
             query_builder.addMissingToken(token);
         }

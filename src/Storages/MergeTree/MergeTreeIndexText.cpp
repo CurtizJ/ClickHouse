@@ -545,6 +545,7 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
     }
 
     auto text_index_header = loadHeader(*index_stream, state);
+    analyzer->setPostingsCodecType(text_index_header->codec_type);
     auto postings_codec = PostingListCodecFactory::createPostingListCodec(text_index_header->codec_type);
     auto postings_serialization = PostingsSerialization(std::move(postings_codec), text_index_header->version);
     serialization_version = text_index_header->version;

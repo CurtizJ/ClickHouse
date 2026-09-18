@@ -821,9 +821,9 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
             /// If there are no cursors for large postings, fill the column directly from the postings.
             if (cursors.empty())
             {
-                if (query_builder.intersected_postings)
+                if (query_builder.postings_array)
                 {
-                    fillColumn(column, *query_builder.intersected_postings, row_offset, num_rows);
+                    fillColumn(column, *query_builder.postings_array, row_offset, num_rows);
                     return;
                 }
 
@@ -834,15 +834,15 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
                     range_posting.addRangeClosed(static_cast<UInt32>(row_offset), range_end);
                 }
 
-                PostingList clipped = *query_builder.united_postings & range_posting;
+                PostingList clipped = *query_builder.postings_bitmap & range_posting;
                 fillColumn(column, clipped, row_offset, num_rows);
                 return;
             }
 
-            if (query_builder.intersected_postings)
+            if (query_builder.postings_array)
             {
                 /// The intersection folded by the analyzer is a sorted array already, so the cursor iterates it in place.
-                prebuilt_cursor = std::make_shared<PostingListCursor>(FlatPostingsPtr(query_builder.intersected_postings));
+                prebuilt_cursor = std::make_shared<PostingListCursor>(FlatPostingsPtr(query_builder.postings_array));
             }
             else
             {
@@ -851,8 +851,8 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
 
                 auto cell = condition_text->postingsCache()->getOrSet(key, [&]
                 {
-                    auto flat = std::make_shared<PaddedPODArray<UInt32>>(query_builder.united_postings->cardinality());
-                    query_builder.united_postings->toUint32Array(flat->data());
+                    auto flat = std::make_shared<PaddedPODArray<UInt32>>(query_builder.postings_bitmap->cardinality());
+                    query_builder.postings_bitmap->toUint32Array(flat->data());
                     return std::make_shared<TextIndexPostingsCacheCell>(std::move(flat));
                 });
 

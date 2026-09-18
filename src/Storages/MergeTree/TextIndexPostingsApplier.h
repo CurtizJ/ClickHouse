@@ -15,12 +15,22 @@ class IPostingListBlockCodec;
 /// keeps only the rows inside `readable_ranges`.
 struct PostingsApplyTargets
 {
-    /// Row ids folded by intersection (`All` and `Phrase` queries): a sorted array of unique row ids
-    /// inside the readable ranges. The token keeps the rows it contains and drops the others.
+    /// Row ids folded by intersection (`All` and `Phrase` queries over block-compressed posting lists):
+    /// a sorted array of unique row ids inside the readable ranges. The token keeps the rows it contains and drops the others.
     struct Intersect
     {
         PaddedPODArray<UInt32> * rows = nullptr;
         /// False until the first token is folded: the readable postings of the token become the initial rows.
+        bool initialized = false;
+        /// Number of rows left after the token was applied.
+        size_t num_applied = 0;
+    };
+
+    /// Row ids folded by intersection into a bitmap (`All` and `Phrase` queries over uncompressed posting lists,
+    /// which are bitmaps already, so the fold stays a bitmap operation).
+    struct IntersectBitmap
+    {
+        PostingList * postings = nullptr;
         bool initialized = false;
         /// Number of rows left after the token was applied.
         size_t num_applied = 0;
@@ -41,12 +51,16 @@ struct PostingsApplyTargets
     const PostingList * readable_bitmap = nullptr;
 
     std::vector<Intersect> intersect;
+    std::vector<IntersectBitmap> intersect_bitmaps;
     std::vector<Unite> unite;
 
-    bool empty() const { return intersect.empty() && unite.empty(); }
+    bool empty() const { return intersect.empty() && intersect_bitmaps.empty() && unite.empty(); }
+
+    /// True if some target takes every readable row of the token: a union target or a not yet initialized intersection.
+    bool hasReadableRowsTargets() const;
 
     /// True if some target can use postings from the closed row range: the range overlaps the readable rows
-    /// and a target takes every readable row, or the rows folded so far by an intersect target fall into it.
+    /// and a target takes every readable row, or the rows folded so far by an intersection fall into it.
     /// Valid before the token is applied.
     bool needRange(size_t begin, size_t end) const;
 };
@@ -65,9 +79,10 @@ public:
     /// Folds a sorted array of unique row ids.
     void applyRows(std::span<const UInt32> sorted_rows);
     /// Folds a bitmap (an uncompressed posting list) with bitmap operations: it is clipped and merged into the
-    /// union targets as a whole, and an initialized intersection keeps the rows the bitmap contains.
+    /// bitmap targets as a whole, and an initialized array intersection keeps the rows the bitmap contains.
     void applyBitmap(const PostingList & postings);
-    /// Drops the rows of the intersect targets that the token did not contain and fills `num_applied` of every target.
+    /// Drops the rows of the intersect targets that the token did not contain, merges the collected rows
+    /// into the bitmap targets and fills `num_applied` of every target.
     void finish();
 
 private:
@@ -82,8 +97,12 @@ private:
 
     PostingsApplyTargets & targets;
 
-    /// True if a target takes every readable row of the token: a union target or a not yet initialized intersect target.
+    /// True if a target takes every readable row of the token: a union target or a not yet initialized intersection.
     bool has_readable_rows_targets = false;
+    /// True if the token is folded into a bitmap by some target, so its rows are collected into `token_postings`.
+    bool has_bitmap_targets = false;
+    /// True once `applyBitmap` has merged the token into the bitmap targets directly.
+    bool bitmap_applied = false;
 
     /// Read and write positions of the in-place compaction of every initialized intersect target.
     struct IntersectState
@@ -100,11 +119,11 @@ private:
     PaddedPODArray<UInt32> decode_buffer;
     PaddedPODArray<UInt32> clip_buffer;
 
-    /// Readable rows of the token for the union targets. They are collected into a fresh bitmap and merged
+    /// Readable rows of the token for the bitmap targets. They are collected into a fresh bitmap and merged
     /// into the targets at `finish`: adding blocks of rows one by one into a bitmap that already holds
     /// the sparse array containers of an earlier token is much slower than a union of two bitmaps.
-    PostingList union_postings;
-    size_t num_union_applied = 0;
+    PostingList token_postings;
+    size_t num_token_rows = 0;
 
     size_t num_blocks_decoded = 0;
     size_t num_blocks_skipped = 0;
