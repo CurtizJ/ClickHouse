@@ -375,8 +375,6 @@ void PostingListCursor::decodeBlock(size_t block_idx)
     index = 0;
 }
 
-/// Lower bound over decoded posting values. The target is usually close to `first`.
-/// Probe at offsets 1, 2, 4, ... and binary-search only the last interval.
 void PostingListCursor::advanceSlow(uint32_t target)
 {
     if (is_embedded)
