@@ -1,0 +1,115 @@
+-- bitpacking
+20
+3
+9
+0
+10
+100000
+20
+20
+10
+20
+20
+2
+3
+500007
+550007
+600007
+650007
+700007
+750007
+800007
+850007
+900007
+950007
+-- pfor
+20
+3
+9
+0
+10
+100000
+20
+20
+10
+20
+20
+2
+3
+500007
+550007
+600007
+650007
+700007
+750007
+800007
+850007
+900007
+950007
+-- none
+20
+3
+9
+0
+10
+100000
+20
+20
+10
+20
+20
+2
+3
+500007
+550007
+600007
+650007
+700007
+750007
+800007
+850007
+900007
+950007
+-- without the index
+20
+3
+9
+0
+10
+100000
+20
+20
+2
+3
+500007
+550007
+600007
+650007
+700007
+750007
+800007
+850007
+900007
+950007
+-- packed blocks decoded and skipped, posting list segments skipped, posting lists read
+05230_case_bitpacking_all_edge	0	0	1	0
+05230_case_bitpacking_all_pk	11	7803	0	2
+05230_case_bitpacking_all_rare	21	7793	0	2
+05230_case_bitpacking_all_raw	9	7804	0	2
+05230_case_bitpacking_all_tiny	3	7810	0	1
+05230_case_bitpacking_any_pk	833	6981	0	2
+05230_case_bitpacking_mixed	7814	0	0	2
+05230_case_none_all_edge	0	0	1	0
+05230_case_none_all_pk	0	0	0	2
+05230_case_none_all_rare	0	0	0	2
+05230_case_none_all_raw	0	0	0	2
+05230_case_none_all_tiny	0	0	0	1
+05230_case_none_any_pk	0	0	0	2
+05230_case_none_mixed	0	0	0	2
+05230_case_pfor_all_edge	0	0	1	0
+05230_case_pfor_all_pk	11	7803	0	2
+05230_case_pfor_all_rare	21	7793	0	2
+05230_case_pfor_all_raw	9	7804	0	2
+05230_case_pfor_all_tiny	3	7810	0	1
+05230_case_pfor_any_pk	833	6981	0	2
+05230_case_pfor_mixed	7814	0	0	2

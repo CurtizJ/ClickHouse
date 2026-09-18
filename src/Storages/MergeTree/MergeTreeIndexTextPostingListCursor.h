@@ -124,13 +124,9 @@ public:
     UInt32 cardinality() const;
 
 private:
-    /// Point `current_segment` at the `segment_idx`-th segment (from the cache or `buildPostingSegment`)
+    /// Point `current_segment` at the `segment_idx`-th segment (from the cache or `readPostingListSegment`)
     /// without decoding block data yet. No-op for shared-array cursors, which already hold the array.
     void prepareSegment(size_t segment_idx);
-
-    /// Reads and parses one compressed segment from `stream` into an immutable `PostingListSegment`.
-    /// Invoked on a cache miss (or directly when no posting cache is available).
-    PostingListSegment buildPostingSegment(size_t segment_idx);
 
     /// Advance to the first doc_id >= target within the current segment.
     /// Uses binary search on `block_last_row_ids` for O(log N) access.

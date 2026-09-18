@@ -154,6 +154,9 @@
     M(TextIndexPhraseFallbacks, "Number of times a phrase query skipped the text index because the phrase was estimated to match more rows than 'text_index_hint_max_selectivity', and was evaluated on the column instead.", ValueType::Number) \
     M(TextIndexReadPostings, "Number of times a posting list has been read from the text index.", ValueType::Number) \
     M(TextIndexUsedEmbeddedPostings, "Number of times a posting list embedded in the dictionary has been used.", ValueType::Number) \
+    M(TextIndexAnalyzePostingsBlocksDecoded, "Number of packed blocks of posting lists decoded while analyzing a granule of a text index.", ValueType::Number) \
+    M(TextIndexAnalyzePostingsBlocksSkipped, "Number of packed blocks of posting lists skipped while analyzing a granule of a text index, because no query could use their rows: the blocks lie outside the readable rows or contain none of the rows folded so far by an 'All' query.", ValueType::Number) \
+    M(TextIndexAnalyzePostingsSegmentsSkipped, "Number of posting list segments not read while analyzing a granule of a text index, because no query could use their rows.", ValueType::Number) \
     M(TextIndexUseHint, "Number of index granules where a direct reading from the text index was added as hint and was used.", ValueType::Number) \
     M(TextIndexDiscardHint, "Number of index granules where a direct reading from the text index was added as hint and was discarded due to low selectivity.", ValueType::Number) \
     M(TextIndexTemporarySegmentsWritten, "Number of temporary segments written while building text indexes.", ValueType::Number) \

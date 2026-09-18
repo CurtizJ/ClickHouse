@@ -42,6 +42,8 @@
 #include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
 #include <Storages/MergeTree/MergeTreeWriterStream.h>
 #include <Storages/MergeTree/TextIndexCache.h>
+#include <Storages/MergeTree/TextIndexPostingsApplier.h>
+#include <Storages/MergeTree/PostingListSegment.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 
 #include <base/arithmeticOverflow.h>
@@ -64,6 +66,7 @@ namespace ProfileEvents
     extern const Event TextIndexTokensCacheNegativeHits;
     extern const Event TextIndexTokensCacheNegativeMisses;
     extern const Event TextIndexDiscardPatternScan;
+    extern const Event TextIndexAnalyzePostingsSegmentsSkipped;
 }
 
 namespace DB
@@ -340,6 +343,17 @@ void PostingsSerialization::deserializeToArray(ReadBuffer & istr, UInt64 header,
     }
 
     resolveCodec(header).decode(istr, row_ids, raw_data_buffer);
+}
+
+void PostingsSerialization::deserializeAndApply(const PostingListSegment & segment, PostingsApplyTargets & targets)
+{
+    /// A posting list is written with a single codec, so the codec is effectively created once per index.
+    if (!block_codec || block_codec->type() != segment.codec_type)
+        block_codec = createPostingListBlockCodec(segment.codec_type);
+
+    PostingsApplier applier(targets);
+    applier.applySegment(segment, *block_codec);
+    applier.finish();
 }
 
 
@@ -848,21 +862,49 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
             tokens_to_read.emplace_back(token, token_info);
     }
 
-    /// Sort tokens by cardinality to read the most rare ones first.
+    /// Sort tokens by cardinality to read the most rare ones first. The rows folded so far by an `All` query
+    /// are pushed down to the reading of the next token, so the rarest token bounds the work for all the others.
     std::ranges::sort(tokens_to_read, [](const auto & lhs, const auto & rhs)
     {
         return lhs.second->cardinality < rhs.second->cardinality;
     });
 
+    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
+    auto * postings_cache = condition_text.postingsCache().get();
+
     for (const auto & [token, token_info] : tokens_to_read)
     {
-        /// Check one more time, because query with this token may have been
-        /// discarded by the analyzer after reading postings for previous tokens.
-        if (analyzer->isTokenNeeded(token))
+        /// Queries with this token may have been failed or bypassed by the analyzer after reading postings for previous tokens.
+        auto plan = analyzer->planApplyPostings(token);
+        if (plan.targets.empty())
+            continue;
+
+        const auto & segment_range = token_info->ranges.front();
+
+        if (!plan.targets.needRange(segment_range.begin, segment_range.end))
         {
-            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
-            analyzer->addPostings(token, *block);
+            /// No query can use a row of the posting list: it lies outside the readable rows and contains
+            /// none of the rows folded so far by the `All` queries. Apply it as an empty posting list.
+            ProfileEvents::increment(ProfileEvents::TextIndexAnalyzePostingsSegmentsSkipped);
+            PostingsApplier(plan.targets).finish();
         }
+        else if ((token_info->header & IsCompressed) && (token_info->header & HasBlockIndex))
+        {
+            /// Decode only the packed blocks that some query can use and fold the rows without a bitmap.
+            /// The segment is shared with the lazy cursors of the reader through the postings cache.
+            auto segment = getPostingListSegment(stream, *token_info, 0, postings_cache, index_id_for_caches, ProfileEvents::TextIndexReadPostings);
+            postings_serialization.deserializeAndApply(*segment, plan.targets);
+        }
+        else
+        {
+            /// Raw and uncompressed posting lists have no packed blocks to skip, so they are read as a whole.
+            auto block = readPostingsBlock(stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+            PostingsApplier applier(plan.targets);
+            applier.applyBitmap(*block);
+            applier.finish();
+        }
+
+        analyzer->finishApplyPostings(token, plan);
 
         if (analyzer->alwaysFalse())
             break;

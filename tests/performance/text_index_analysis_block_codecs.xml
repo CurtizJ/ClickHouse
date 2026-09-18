@@ -1,0 +1,64 @@
+<test>
+  <settings>
+      <use_skip_indexes_on_data_read>1</use_skip_indexes_on_data_read>
+      <query_plan_direct_read_from_text_index>1</query_plan_direct_read_from_text_index>
+      <force_data_skipping_indices>idx_s</force_data_skipping_indices>
+      <query_plan_optimize_count_from_text_index>0</query_plan_optimize_count_from_text_index>
+      <use_text_index_postings_cache>0</use_text_index_postings_cache>
+  </settings>
+
+  <!-- Analysis of a text index granule with block-compressed posting lists: the postings of a common token
+       are decoded only in the packed blocks that intersect the rows folded so far from the rarer tokens
+       or the rows readable after the primary key analysis. One segment per token, so every token is folded
+       during the analysis and not read lazily. -->
+  <create_query>
+    CREATE TABLE t_text_index_analysis_pfor
+    (
+        id UInt64,
+        s String,
+        INDEX idx_s (s) TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'pfor')
+    )
+    ENGINE = MergeTree
+    ORDER BY id
+    SETTINGS index_granularity = 8192, text_index_posting_list_block_size = 1048576
+  </create_query>
+
+  <create_query>
+    CREATE TABLE t_text_index_analysis_bitpacking
+    (
+        id UInt64,
+        s String,
+        INDEX idx_s (s) TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'bitpacking')
+    )
+    ENGINE = MergeTree
+    ORDER BY id
+    SETTINGS index_granularity = 8192, text_index_posting_list_block_size = 1048576
+  </create_query>
+
+  <fill_query>INSERT INTO t_text_index_analysis_pfor SELECT number, concat('common ', 'medium' || intDiv(number, 1000), ' rare' || number, ' bucket' || (number % 100)) FROM numbers(1000000)</fill_query>
+  <fill_query>OPTIMIZE TABLE t_text_index_analysis_pfor FINAL</fill_query>
+  <fill_query>INSERT INTO t_text_index_analysis_bitpacking SELECT * FROM t_text_index_analysis_pfor</fill_query>
+  <fill_query>OPTIMIZE TABLE t_text_index_analysis_bitpacking FINAL</fill_query>
+
+  <!-- A rare token bounds the blocks decoded for the common one. -->
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAllTokens(s, 'common rare123456')</query>
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAllTokens(s, 'common medium789')</query>
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAllTokens(s, 'medium789 rare123456')</query>
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAnyTokens(s, 'medium789 rare123456')</query>
+  <!-- The rows of the rarer token are spread over every block of the common one: nothing to skip, no bitmap either. -->
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAllTokens(s, 'common bucket7')</query>
+  <!-- The primary key bounds the blocks decoded for an `Any` query. -->
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE id &lt; 100000 AND hasAnyTokens(s, 'common bucket7')</query>
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE id &gt;= 900000 AND hasAllTokens(s, 'common bucket7')</query>
+  <!-- A dense single token: every block is decoded into the folded intersection. -->
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasToken(s, 'common')</query>
+  <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAnyTokens(s, 'common bucket7')</query>
+
+  <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasAllTokens(s, 'common rare123456')</query>
+  <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasAllTokens(s, 'common medium789')</query>
+  <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasAllTokens(s, 'common bucket7')</query>
+  <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasToken(s, 'common')</query>
+
+  <drop_query>DROP TABLE IF EXISTS t_text_index_analysis_pfor</drop_query>
+  <drop_query>DROP TABLE IF EXISTS t_text_index_analysis_bitpacking</drop_query>
+</test>
