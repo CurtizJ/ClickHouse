@@ -50,6 +50,18 @@ std::optional<RowsRange> TextIndexAnalyzer::ReadableRows::clipRowsRange(const Ro
     return clipped;
 }
 
+const PostingList & TextIndexAnalyzer::ReadableRows::getBitmap()
+{
+    if (ranges_bitmap.isEmpty())
+    {
+        /// `addRangeClosed` stores contiguous ranges as run containers, so this stays compact (O(number of ranges)).
+        for (const auto & range : ranges)
+            ranges_bitmap.addRangeClosed(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
+    }
+
+    return ranges_bitmap;
+}
+
 void TextIndexAnalyzer::QueryBuilder::markFailed()
 {
     is_failed = true;
@@ -57,6 +69,17 @@ void TextIndexAnalyzer::QueryBuilder::markFailed()
     united_postings.reset();
     rows_range.reset();
     num_live_tokens = 0;
+}
+
+bool TextIndexAnalyzer::QueryBuilder::hasEmptyPostings() const
+{
+    if (intersected_postings)
+        return intersected_postings->empty();
+
+    if (united_postings)
+        return united_postings->isEmpty();
+
+    return true;
 }
 
 size_t TextIndexAnalyzer::QueryBuilder::getPostingsCardinality() const
@@ -101,15 +124,10 @@ PostingList TextIndexAnalyzer::QueryBuilder::getPostingsInRange(const RowsRange 
 
     if (united_postings)
     {
-        PostingList result = *united_postings;
-
-        if (range.begin > 0)
-            result.removeRangeClosed(0, static_cast<UInt32>(range.begin - 1));
-
-        if (range.end < std::numeric_limits<UInt32>::max())
-            result.removeRangeClosed(static_cast<UInt32>(range.end + 1), std::numeric_limits<UInt32>::max());
-
-        return result;
+        /// A single run container, so the intersection touches only the containers of the range and never copies the bitmap.
+        PostingList range_bitmap;
+        range_bitmap.addRangeClosed(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
+        return *united_postings & range_bitmap;
     }
 
     return {};
@@ -274,7 +292,10 @@ TextIndexAnalyzer::PostingsApplyPlan TextIndexAnalyzer::planApplyPostings(std::s
         return plan;
 
     if (readable_rows)
+    {
         plan.targets.readable_ranges = &readable_rows->getRanges();
+        plan.targets.readable_bitmap = &readable_rows->getBitmap();
+    }
 
     for (const auto & query_hash : it->second)
     {

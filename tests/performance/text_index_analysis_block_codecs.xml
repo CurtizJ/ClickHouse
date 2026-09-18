@@ -35,10 +35,25 @@
     SETTINGS index_granularity = 8192, text_index_posting_list_block_size = 1048576
   </create_query>
 
+  <!-- Uncompressed posting lists take the materialize path of the reader: the folded union is clipped per mark. -->
+  <create_query>
+    CREATE TABLE t_text_index_analysis_none
+    (
+        id UInt64,
+        s String,
+        INDEX idx_s (s) TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'none')
+    )
+    ENGINE = MergeTree
+    ORDER BY id
+    SETTINGS index_granularity = 8192, text_index_posting_list_block_size = 1048576
+  </create_query>
+
   <fill_query>INSERT INTO t_text_index_analysis_pfor SELECT number, concat('common ', 'medium' || intDiv(number, 1000), ' rare' || number, ' bucket' || (number % 100)) FROM numbers(1000000)</fill_query>
   <fill_query>OPTIMIZE TABLE t_text_index_analysis_pfor FINAL</fill_query>
   <fill_query>INSERT INTO t_text_index_analysis_bitpacking SELECT * FROM t_text_index_analysis_pfor</fill_query>
   <fill_query>OPTIMIZE TABLE t_text_index_analysis_bitpacking FINAL</fill_query>
+  <fill_query>INSERT INTO t_text_index_analysis_none SELECT * FROM t_text_index_analysis_pfor</fill_query>
+  <fill_query>OPTIMIZE TABLE t_text_index_analysis_none FINAL</fill_query>
 
   <!-- A rare token bounds the blocks decoded for the common one. -->
   <query>SELECT count() FROM t_text_index_analysis_pfor WHERE hasAllTokens(s, 'common rare123456')</query>
@@ -59,6 +74,11 @@
   <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasAllTokens(s, 'common bucket7')</query>
   <query>SELECT count() FROM t_text_index_analysis_bitpacking WHERE hasToken(s, 'common')</query>
 
+  <query>SELECT count() FROM t_text_index_analysis_none WHERE hasAnyTokens(s, 'bucket1 bucket2 bucket3 bucket4 bucket5 bucket6 bucket7 bucket8')</query>
+  <query>SELECT count() FROM t_text_index_analysis_none WHERE hasAllTokens(s, 'common bucket7')</query>
+  <query>SELECT count() FROM t_text_index_analysis_none WHERE id &lt; 100000 AND hasAnyTokens(s, 'common bucket7')</query>
+
   <drop_query>DROP TABLE IF EXISTS t_text_index_analysis_pfor</drop_query>
   <drop_query>DROP TABLE IF EXISTS t_text_index_analysis_bitpacking</drop_query>
+  <drop_query>DROP TABLE IF EXISTS t_text_index_analysis_none</drop_query>
 </test>

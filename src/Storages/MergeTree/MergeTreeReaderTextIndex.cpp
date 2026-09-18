@@ -816,7 +816,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
         {
             cursors.push_back(prebuilt_cursor);
         }
-        else if (query_builder.getPostingsCardinality() > 0)
+        else if (!query_builder.hasEmptyPostings())
         {
             /// If there are no cursors for large postings, fill the column directly from the postings.
             if (cursors.empty())

@@ -4,6 +4,7 @@
 #include <Common/ProfileEvents.h>
 
 #include <algorithm>
+#include <optional>
 
 namespace ProfileEvents
 {
@@ -175,21 +176,55 @@ void PostingsApplier::applyRows(std::span<const UInt32> sorted_rows)
 
 void PostingsApplier::applyBitmap(const PostingList & postings)
 {
-    /// Nothing to clip and nothing to intersect: fold the bitmap as a whole.
-    if (targets.intersect.empty() && !targets.readable_ranges)
+    /// The readable rows of the token, clipped by a bitmap intersection when needed.
+    const PostingList * readable_postings = &postings;
+    std::optional<PostingList> clipped_postings;
+
+    bool need_readable_postings = !targets.unite.empty()
+        || std::ranges::any_of(targets.intersect, [](const auto & target) { return !target.initialized; });
+
+    if (need_readable_postings && targets.readable_ranges)
     {
-        size_t cardinality = postings.cardinality();
-        for (auto & target : targets.unite)
-        {
-            *target.postings |= postings;
-            target.num_applied += cardinality;
-        }
-        return;
+        chassert(targets.readable_bitmap);
+        clipped_postings = postings & *targets.readable_bitmap;
+        readable_postings = &*clipped_postings;
     }
 
-    PaddedPODArray<UInt32> rows(postings.cardinality());
-    postings.toUint32Array(rows.data());
-    applyRows(rows);
+    if (!targets.unite.empty())
+    {
+        size_t cardinality = readable_postings->cardinality();
+        for (auto & target : targets.unite)
+        {
+            *target.postings |= *readable_postings;
+            target.num_applied += cardinality;
+        }
+    }
+
+    for (size_t i = 0; i < targets.intersect.size(); ++i)
+    {
+        const auto & target = targets.intersect[i];
+        auto & rows = *target.rows;
+
+        if (!target.initialized)
+        {
+            rows.resize(readable_postings->cardinality());
+            readable_postings->toUint32Array(rows.data());
+            continue;
+        }
+
+        /// The rows are inside the readable ranges already: keep the ones the bitmap contains, compacting in place.
+        roaring::BulkContext context;
+        size_t write_pos = 0;
+
+        for (UInt32 row : rows)
+        {
+            if (postings.containsBulk(context, row))
+                rows[write_pos++] = row;
+        }
+
+        intersect_states[i].read_pos = rows.size();
+        intersect_states[i].write_pos = write_pos;
+    }
 }
 
 size_t PostingsApplier::clipToReadableRanges(const UInt32 * values, size_t count)

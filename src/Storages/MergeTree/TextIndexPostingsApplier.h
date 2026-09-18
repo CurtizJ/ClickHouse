@@ -37,6 +37,8 @@ struct PostingsApplyTargets
     /// Row ranges still readable after the analysis of the primary key and prior skip indexes,
     /// sorted and disjoint. nullptr: every row is readable.
     const std::vector<RowsRange> * readable_ranges = nullptr;
+    /// The same rows as a bitmap, set together with `readable_ranges`, for clipping a posting list that is a bitmap already.
+    const PostingList * readable_bitmap = nullptr;
 
     std::vector<Intersect> intersect;
     std::vector<Unite> unite;
@@ -62,7 +64,8 @@ public:
     void applySegment(const PostingListSegment & segment, IPostingListBlockCodec & block_codec);
     /// Folds a sorted array of unique row ids.
     void applyRows(std::span<const UInt32> sorted_rows);
-    /// Folds a bitmap.
+    /// Folds a bitmap (an uncompressed posting list) with bitmap operations: it is clipped and merged into the
+    /// union targets as a whole, and an initialized intersection keeps the rows the bitmap contains.
     void applyBitmap(const PostingList & postings);
     /// Drops the rows of the intersect targets that the token did not contain and fills `num_applied` of every target.
     void finish();

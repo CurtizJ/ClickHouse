@@ -21,10 +21,13 @@ public:
         explicit ReadableRows(std::vector<RowsRange> ranges_);
         std::optional<RowsRange> clipRowsRange(const RowsRange & rows_range) const;
         const std::vector<RowsRange> & getRanges() const { return ranges; }
+        /// The same rows as a bitmap of run containers, built on the first call. Used to clip uncompressed posting lists.
+        const PostingList & getBitmap();
 
     private:
         /// Sorted and disjoint.
         std::vector<RowsRange> ranges;
+        PostingList ranges_bitmap;
     };
 
     /// Per-query mutable analysis state. Updated as the dictionary scan delivers
@@ -65,6 +68,8 @@ public:
 
         /// True if the posting list of at least one token has been folded.
         bool hasPostings() const { return intersected_postings || united_postings; }
+        /// True if the folded posting list has no rows. Constant time, unlike `getPostingsCardinality` for a bitmap.
+        bool hasEmptyPostings() const;
         size_t getPostingsCardinality() const;
         /// True if the folded posting list has a row in the closed range.
         bool hasPostingsInRange(const RowsRange & range) const;
