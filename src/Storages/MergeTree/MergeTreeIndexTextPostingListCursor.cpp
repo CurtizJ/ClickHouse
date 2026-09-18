@@ -13,7 +13,6 @@
 #include <config.h>
 #include <algorithm>
 #include <cstring>
-#include <numeric>
 
 namespace ProfileEvents
 {
@@ -359,7 +358,7 @@ void PostingListCursor::decodeBlock(size_t block_idx)
 
     /// The block span comes from the Index Section offsets and must be consumed in full.
     const size_t expected_bytes = block_data.size();
-    const size_t consumed_bytes = block_codec->decodeBlock(block_data, count, out_span);
+    const size_t consumed_bytes = block_codec->decodeBlock(block_data, count, out_span, last_decoded_doc_id);
 
     if (consumed_bytes != expected_bytes)
         throw Exception(ErrorCodes::CORRUPTED_DATA,
@@ -367,9 +366,8 @@ void PostingListCursor::decodeBlock(size_t block_idx)
             "Index Section span is {} bytes",
             block_idx, consumed_bytes, expected_bytes);
 
-    /// Restore absolute row ids from deltas directly in decoded_values.
-    std::inclusive_scan(decoded_values, decoded_values + count, decoded_values, std::plus<uint32_t>{}, last_decoded_doc_id);
-    last_decoded_doc_id = count > 0 ? decoded_values[count - 1] : last_decoded_doc_id;
+    /// The codec restored absolute row ids from `last_decoded_doc_id`; the block's last row id is the base of the next one.
+    last_decoded_doc_id = decoded_values[count - 1];
 
     decoded_count = count;
     index = 0;
@@ -708,10 +706,17 @@ void PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t n
             if (block_idx != current_block || decoded_count == 0)
                 decodeBlock(block_idx);
 
-            const auto * begin_it = gallopingLowerBound(decoded_values_ptr, decoded_values_ptr + decoded_count, static_cast<uint32_t>(row_offset));
-            const auto * end_it = findRowRangeEnd(begin_it, decoded_values_ptr + decoded_count, row_offset, num_rows);
-            size_t begin_idx = static_cast<size_t>(begin_it - decoded_values_ptr);
-            size_t end_idx = static_cast<size_t>(end_it - decoded_values_ptr);
+            /// Only a block straddling a window edge needs a search: the first block of the window may start before
+            /// `row_offset` and the last one may run past its end, every block in between is padded in full.
+            const auto * decoded_end = decoded_values_ptr + decoded_count;
+            size_t begin_idx = 0;
+            if (decoded_values_ptr[0] < row_offset)
+                begin_idx = static_cast<size_t>(gallopingLowerBound(decoded_values_ptr, decoded_end, static_cast<uint32_t>(row_offset)) - decoded_values_ptr);
+
+            size_t end_idx = decoded_count;
+            if (decoded_values_ptr[decoded_count - 1] >= row_offset + num_rows)
+                end_idx = static_cast<size_t>(findRowRangeEnd(decoded_values_ptr + begin_idx, decoded_end, row_offset, num_rows) - decoded_values_ptr);
+
             padColumn<op>(data, decoded_values_ptr, row_offset, begin_idx, end_idx);
         }
     }

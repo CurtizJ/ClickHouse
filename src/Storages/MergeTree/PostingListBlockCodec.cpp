@@ -61,7 +61,7 @@ namespace
             return needed_bytes_with_header;
         }
 
-        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) override
+        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out, uint32_t base) override
         {
             if (in.empty())
                 throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected at least {} bytes, but got {}", 1, in.size());
@@ -83,6 +83,9 @@ namespace
                 bits,
                 consumed_size);
 
+            /// Restore absolute row ids from the unpacked gaps.
+            PFor::applyDelta<uint32_t>(out.data(), static_cast<unsigned>(count), PFor::Delta::d0, base);
+
             /// Total bytes consumed from `in`: the bits byte plus the bit-packed payload.
             return 1 + consumed_size;
         }
@@ -93,8 +96,9 @@ namespace
         IPostingListCodec::Type type() const override { return IPostingListCodec::Type::Bitpacking; }
     };
 
-    /// One PFor block over gaps `SegmentedPostingListCodec` already computed, hence `Delta::none`.
-    /// TODO(ahmadov): move delta into PFor once `deltaApply` stops spilling, today `d0` is slower on exception blocks.
+    /// One PFor block over gaps `SegmentedPostingListCodec` already computed, hence `Delta::none` on encode. Decode runs
+    /// as `Delta::d0` from the caller's base so the absolute row ids come out of the same pass: exception-free full blocks
+    /// take the fused unpack + prefix-sum path, the rest get the SIMD `deltaApply` after patching.
     class PForPostingListBlockCodec : public IPostingListBlockCodec
     {
     public:
@@ -114,13 +118,15 @@ namespace
             return written;
         }
 
-        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) override
+        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out, uint32_t base) override
         {
-            chassert(count > 0 && count <= out.size());
+            chassert(count > 0 && count <= BLOCK_SIZE && count <= out.size());
             const auto * data = reinterpret_cast<const uint8_t *>(in.data());
 
             /// `count` is never zero here, so a zero return means malformed input, not an empty block.
-            const size_t consumed = PFor::decodeBlocks<uint32_t>(data, count, PFor::Delta::none, out.data(), data + in.size());
+            uint32_t prev = base;
+            const size_t consumed = PFor::decodeBlock<uint32_t>(
+                data, static_cast<unsigned>(count), PFor::Delta::d0, out.data(), prev, data + in.size());
             if (consumed == 0)
                 throw Exception(ErrorCodes::CORRUPTED_DATA,
                     "Corrupted data: malformed PFor block of {} values in {} available bytes", count, in.size());

@@ -209,11 +209,10 @@ private:
     /// Also updates current segment metadata (count, max, payload size).
     void encodeBlock(std::span<uint32_t> segment);
 
-    /// Decode one compressed block of `out.size()` row ids into `out` and reconstruct absolute row ids.
+    /// Decode one compressed block of `out.size()` row ids into `out`.
     ///
-    /// - Delegates the block payload to `block_codec` (bitpacking reads a bits-width byte), which fills
-    ///   `out` with delta values
-    /// - inclusive_scan converts deltas -> row ids using `prev_row_id` as initial prefix
+    /// - Delegates the block payload to `block_codec` (bitpacking reads a bits-width byte), which restores
+    ///   absolute row ids from the stored gaps using `prev_row_id` as the base
     /// - Updates prev_row_id to the last decoded row id
     void decodeBlock(std::span<const std::byte> & in, std::span<uint32_t> out);
 

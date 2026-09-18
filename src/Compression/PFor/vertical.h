@@ -117,6 +117,14 @@ inline ALWAYS_INLINE void unpackVertical32(const uint8_t * in, unsigned b, uint3
     }
 }
 
+// Broadcast of the last lane: the running carry for the next 4-lane group. Kept as a vector so the
+// loop-carried dependency is one add plus one shuffle; extracting the lane into a scalar and
+// re-broadcasting it costs a GPR round trip (pextrd + movd) that is several times longer.
+inline ALWAYS_INLINE v4u32 broadcastLast(v4u32 v) noexcept
+{
+    return __builtin_shufflevector(v, v, 3, 3, 3, 3);
+}
+
 // SIMD delta reconstruction (inclusive prefix sum) over a contiguous uint32 residual
 // array, with a running carry across blocks. `plus` is 0 for d0 and 1 for d1 (gap-1).
 // Replaces the scalar prefix-sum: each 4-lane group does a 2-step in-vector scan
@@ -125,7 +133,7 @@ template <uint32_t plus>
 inline ALWAYS_INLINE void deltaDecode32(uint32_t * out, unsigned cnt, uint32_t & carry) noexcept
 {
     const v4u32 plusv = {plus, plus, plus, plus};
-    uint32_t c = carry;
+    v4u32 carryv = {carry, carry, carry, carry};
     unsigned i = 0;
     for (; i + 4 <= cnt; i += 4)
     {
@@ -134,10 +142,11 @@ inline ALWAYS_INLINE void deltaDecode32(uint32_t * out, unsigned cnt, uint32_t &
         x += plusv;
         x += v4u32{0, x[0], x[1], x[2]}; // inclusive prefix sum, step 1
         x += v4u32{0, 0, x[0], x[1]};    // step 2 -> {a, a+b, a+b+c, a+b+c+d}
-        x += v4u32{c, c, c, c};          // add the running carry
+        x += carryv;                     // add the running carry
         std::memcpy(out + i, &x, 16);
-        c = x[3];
+        carryv = broadcastLast(x);
     }
+    uint32_t c = carryv[0];
     for (; i < cnt; ++i) // tail (cnt not a multiple of 4)
     {
         c += out[i] + plus;
@@ -160,7 +169,7 @@ inline ALWAYS_INLINE void unpackVertical32FusedDelta(
     v4u32 acc = {0, 0, 0, 0};
     unsigned bits = 0;
     const uint8_t * p = in;
-    uint32_t c = carry;
+    v4u32 carryv = {carry, carry, carry, carry};
     for (unsigned row = 0; row < 32; ++row)
     {
         v4u32 v;
@@ -182,11 +191,11 @@ inline ALWAYS_INLINE void unpackVertical32FusedDelta(
         v += plusv;
         v += v4u32{0, v[0], v[1], v[2]};
         v += v4u32{0, 0, v[0], v[1]};
-        v += v4u32{c, c, c, c};
+        v += carryv;
         std::memcpy(out + 4u * row, &v, 16);
-        c = v[3];
+        carryv = broadcastLast(v);
     }
-    carry = c;
+    carry = carryv[0];
 }
 
 }
