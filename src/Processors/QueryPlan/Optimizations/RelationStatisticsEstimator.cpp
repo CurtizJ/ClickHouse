@@ -103,7 +103,7 @@ RelationStats estimateAggregatingStepStats(const AggregatingStep & aggregating_s
 /// Rows dropped by a limit are not a value-uniform sample (e.g. a TopN keeps one end of the
 /// sorted range), so the child's value ranges and NULL fraction do not describe the output.
 /// Applied whenever a limit is present: the row estimate cannot prove the limit does not
-/// truncate (e.g. a TopN read is already scaled down by its `__topKFilter` prewhere).
+/// truncate (e.g. a TopN read is already scaled down by its `__topKFilter` read step).
 void clearColumnValueRanges(std::unordered_map<String, ColumnStats> & column_stats)
 {
     for (auto & [_, stats] : column_stats)

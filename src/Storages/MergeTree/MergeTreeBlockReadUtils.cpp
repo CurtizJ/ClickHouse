@@ -472,6 +472,7 @@ MergeTreeReadTaskColumns getReadTaskColumns(
     const PrewhereInfoPtr & prewhere_info,
     const PrewhereExprSteps & mutation_steps,
     const IndexReadTasks & index_read_tasks,
+    const TopKReadFilterPtr & top_k_read_filter,
     const ExpressionActionsSettings & actions_settings,
     const MergeTreeReaderSettings & reader_settings,
     bool with_subcolumns)
@@ -542,12 +543,13 @@ MergeTreeReadTaskColumns getReadTaskColumns(
     for (const auto & step : mutation_steps)
         add_step(*step);
 
-    if (prewhere_info || row_level_filter || !index_read_tasks.empty())
+    if (prewhere_info || row_level_filter || !index_read_tasks.empty() || top_k_read_filter)
     {
         auto prewhere_actions = MergeTreeSelectProcessor::getPrewhereActions(
             row_level_filter,
             prewhere_info,
             index_read_tasks,
+            top_k_read_filter,
             actions_settings,
             reader_settings.enable_multiple_prewhere_read_steps,
             reader_settings.force_short_circuit_execution,
@@ -583,6 +585,7 @@ MergeTreeReadTaskColumns getReadTaskColumnsForMerge(
         /*prewhere_info=*/ nullptr,
         mutation_steps,
         /*index_read_tasks*/ {},
+        /*top_k_read_filter*/ nullptr,
         /*actions_settings=*/ {},
         /*reader_settings=*/ MergeTreeReaderSettings::createFromSettings(),
         storage_snapshot->storage.supportsSubcolumns());

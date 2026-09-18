@@ -673,9 +673,28 @@ void MergeTreeRangeReader::ReadResult::optimize(const FilterWithCachedCount & cu
         return;
 
     NumRows zero_tails;
-    auto total_zero_rows_in_tails = filter.isSparse()
-        ? countZeroTailsFromSparse(*filter.getSparseIndices(), zero_tails, can_read_incomplete_granules_)
-        : countZeroTails(filter.getData(), zero_tails, can_read_incomplete_granules_);
+    size_t total_zero_rows_in_tails = 0;
+
+    /// The number of ones in the filter is cached and is needed below anyway. When it already
+    /// answers the question, do not scan the filter for the zero tails: without ones every granule
+    /// is a zero tail as a whole, with ones only there are no zero tails. The first case is the
+    /// common one for a top-K read once its threshold has settled and whole blocks are rejected.
+    const size_t num_ones = filter.countBytesInFilter();
+    if (num_ones == 0)
+    {
+        zero_tails.assign(rows_per_granule.begin(), rows_per_granule.end());
+        total_zero_rows_in_tails = filter.size();
+    }
+    else if (num_ones == filter.size())
+    {
+        zero_tails.assign(rows_per_granule.size(), 0);
+    }
+    else
+    {
+        total_zero_rows_in_tails = filter.isSparse()
+            ? countZeroTailsFromSparse(*filter.getSparseIndices(), zero_tails, can_read_incomplete_granules_)
+            : countZeroTails(filter.getData(), zero_tails, can_read_incomplete_granules_);
+    }
 
     LOG_TEST(log, "ReadResult::optimize() before: {}", dumpInfo());
 

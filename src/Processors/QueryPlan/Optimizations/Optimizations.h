@@ -83,10 +83,10 @@ struct Optimization
         /// pushed below it.
         bool push_down_volume_reducing_functions = false;
         /// Top-K optimizations rely on a runtime `TopKThresholdTracker` shared between
-        /// `SortingStep` and `ReadFromMergeTree`, and the dynamic-filtering path adds
-        /// an internal `__topKFilter` function that is not registered in `FunctionFactory`.
-        /// Neither can survive serialization to remote workers, so we suppress the
-        /// optimization when the plan is going to be distributed or serialized.
+        /// `SortingStep` and `ReadFromMergeTree` (the read applies `__topKFilter` as its
+        /// first PREWHERE step and skips granules by the threshold). The tracker cannot
+        /// survive serialization to remote workers, so we suppress the optimization when
+        /// the plan is going to be distributed or serialized.
         bool make_distributed_plan = false;
         bool serialize_query_plan = false;
         /// Plan-based parallel replicas also ships plan fragments to the replicas, so the same

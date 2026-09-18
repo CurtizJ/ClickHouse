@@ -27,6 +27,7 @@
 #include <Common/OpenTelemetryTraceContext.h>
 #include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/MergeTreeSplitPrewhereIntoReadSteps.h>
+#include <Functions/FunctionTopKFilter.h>
 
 namespace
 {
@@ -156,6 +157,7 @@ MergeTreeSelectProcessor::MergeTreeSelectProcessor(
     const FilterDAGInfoPtr & row_level_filter_,
     const PrewhereInfoPtr & prewhere_info_,
     const IndexReadTasks & index_read_tasks_,
+    const TopKReadFilterPtr & top_k_read_filter_,
     const ExpressionActionsSettings & actions_settings_,
     const MergeTreeReaderSettings & reader_settings_,
     MergeTreeIndexBuildContextPtr merge_tree_index_build_context_,
@@ -165,11 +167,13 @@ MergeTreeSelectProcessor::MergeTreeSelectProcessor(
     , algorithm(std::move(algorithm_))
     , row_level_filter(row_level_filter_)
     , prewhere_info(prewhere_info_)
+    , top_k_read_filter(top_k_read_filter_)
     , actions_settings(actions_settings_)
     , prewhere_actions(getPrewhereActions(
           row_level_filter,
           prewhere_info,
           index_read_tasks_,
+          top_k_read_filter,
           actions_settings,
           reader_settings_.enable_multiple_prewhere_read_steps,
           reader_settings_.force_short_circuit_execution,
@@ -195,16 +199,63 @@ String MergeTreeSelectProcessor::getName() const
     return fmt::format("MergeTreeSelect(pool: {}, algorithm: {})", pool->getName(), algorithm->getName());
 }
 
+namespace
+{
+
+bool stepRequiresAnyColumn(const PrewhereExprStep & step, const NamesAndTypesList & columns)
+{
+    NameSet required_columns;
+    if (step.actions)
+    {
+        for (const auto & name : step.actions->getActionsDAG().getRequiredColumnsNames())
+            required_columns.insert(name);
+    }
+    else if (!step.filter_column_name.empty())
+    {
+        required_columns.insert(step.filter_column_name);
+    }
+
+    return std::ranges::any_of(columns, [&](const auto & column) { return required_columns.contains(column.name); });
+}
+
+}
+
 PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
     const FilterDAGInfoPtr & row_level_filter,
     const PrewhereInfoPtr & prewhere_info,
     const IndexReadTasks & index_read_tasks,
+    const TopKReadFilterPtr & top_k_read_filter,
     const ExpressionActionsSettings & actions_settings,
     bool enable_multiple_prewhere_read_steps,
     bool force_short_circuit_execution,
     const ColumnsDescription * columns)
 {
     PrewhereExprInfo prewhere_actions;
+
+    /// The top-K filter goes first regardless of the other conditions. It reads one column and,
+    /// once the threshold is established, drops most of the rows, so the steps after it read
+    /// only the granules that can still contribute to the result.
+    if (top_k_read_filter)
+    {
+        ActionsDAG dag({top_k_read_filter->column});
+        auto filter_function = createInternalFunctionTopKFilterResolver(top_k_read_filter->threshold_tracker);
+        const auto & filter_node = dag.addFunction(filter_function, {dag.getInputs().front()}, {});
+        dag.getOutputs().push_back(&filter_node);
+
+        PrewhereExprStep top_k_filter_step
+        {
+            .type = PrewhereExprStep::Filter,
+            .actions = std::make_shared<ExpressionActions>(std::move(dag), actions_settings),
+            .filter_column_name = filter_node.result_name,
+            .remove_filter_column = true,
+            .need_filter = true,
+            .perform_alter_conversions = true,
+            .columns_overwritten_by_chain = {},
+            .mutation_version = std::nullopt,
+        };
+
+        prewhere_actions.steps.emplace_back(std::make_shared<PrewhereExprStep>(std::move(top_k_filter_step)));
+    }
 
     if (row_level_filter)
     {
@@ -223,16 +274,7 @@ PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
         prewhere_actions.steps.emplace_back(std::make_shared<PrewhereExprStep>(std::move(row_level_filter_step)));
     }
 
-    /// Add steps for reading virtual columns for indexes.
-    /// Those must be separate steps, because index readers
-    /// cannot read physical columns from table.
-    for (const auto & [_, index_task] : index_read_tasks)
-    {
-        auto index_read_step = std::make_shared<PrewhereExprStep>();
-        index_read_step->type = PrewhereExprStep::None;
-        index_read_step->actions = std::make_shared<ExpressionActions>(ActionsDAG(index_task.columns), actions_settings);
-        prewhere_actions.steps.emplace_back(std::move(index_read_step));
-    }
+    const size_t first_prewhere_step = prewhere_actions.steps.size();
 
     if (prewhere_info &&
         (!enable_multiple_prewhere_read_steps || !tryBuildPrewhereSteps(prewhere_info, actions_settings, prewhere_actions, force_short_circuit_execution, columns)))
@@ -250,6 +292,33 @@ PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
         };
 
         prewhere_actions.steps.emplace_back(std::make_shared<PrewhereExprStep>(std::move(prewhere_step)));
+    }
+
+    /// Add steps for reading virtual columns for indexes.
+    /// Those must be separate steps, because index readers
+    /// cannot read physical columns from table.
+    ///
+    /// Each step goes right before the first PREWHERE step that consumes its columns, so that the
+    /// filters before it (the top-K filter in particular) reduce the granules the index has to read.
+    /// If no PREWHERE step consumes them (the condition stays in the `Filter` step above the read),
+    /// the step goes after all the filters.
+    for (const auto & [_, index_task] : index_read_tasks)
+    {
+        auto index_read_step = std::make_shared<PrewhereExprStep>();
+        index_read_step->type = PrewhereExprStep::None;
+        index_read_step->actions = std::make_shared<ExpressionActions>(ActionsDAG(index_task.columns), actions_settings);
+
+        auto position = prewhere_actions.steps.end();
+        for (auto it = prewhere_actions.steps.begin() + first_prewhere_step; it != prewhere_actions.steps.end(); ++it)
+        {
+            if (stepRequiresAnyColumn(**it, index_task.columns))
+            {
+                position = it;
+                break;
+            }
+        }
+
+        prewhere_actions.steps.insert(position, std::move(index_read_step));
     }
 
     return prewhere_actions;
@@ -326,11 +395,14 @@ MergeTreeSelectProcessor::readCurrentTask(MergeTreeReadTask & current_task, IMer
     /// On-fly mutations and patch parts filter rows ahead of PREWHERE for the same reason. A row-level
     /// security filter is also prepended before PREWHERE (getPrewhereActions), yet this write keys only
     /// on the query PREWHERE hash, so a mark hidden by a row policy would be wrongly attributed to the
-    /// PREWHERE predicate and read by a later query without that policy.
+    /// PREWHERE predicate and read by a later query without that policy. The top-K filter is prepended
+    /// as well and drops rows by the running threshold, so a mark left without matching rows cannot be
+    /// attributed to the predicate either.
     if (reader_settings.use_query_condition_cache && prewhere_info
         && !current_task.readersChainCanSkipMarksBeforePrewhere()
         && !current_task.appliesMutationsBeforePrewhere()
-        && !row_level_filter)
+        && !row_level_filter
+        && !top_k_read_filter)
         current_task.addPrewhereUnmatchedMarks(res.read_mark_ranges);
 
     return {Chunk(), res.num_read_rows, res.num_read_bytes, false, std::move(res.read_mark_ranges)};
@@ -415,10 +487,12 @@ ChunkAndProgress MergeTreeSelectProcessor::read()
                 /// A row-level security filter is also prepended before PREWHERE, yet this write keys
                 /// only on the query PREWHERE hash, so a mark hidden by a row policy must not be attributed
                 /// to the PREWHERE predicate (a later query without the policy would skip rows it should see).
+                /// The same holds for the top-K filter step, which drops rows by the running threshold.
                 if (reader_settings.use_query_condition_cache && task && prewhere_info
                     && !task->readersChainCanSkipMarksBeforePrewhere()
                     && !task->appliesMutationsBeforePrewhere()
                     && !row_level_filter
+                    && !top_k_read_filter
                     /// QueryConditionCache needs the concrete part's storage UUID; skip for borrowed parts.
                     && task->getInfo().data_part_info->getDataPart())
                 {
@@ -547,6 +621,11 @@ void MergeTreeSelectProcessor::logPredicateStatistics() const
         return;
 
     if (storage_id.database_name.empty())
+        return;
+
+    /// The top-K filter step runs first and keeps only the rows around the running threshold,
+    /// so the selectivity of the other steps would be measured on a biased sample of the rows.
+    if (top_k_read_filter)
         return;
 
     const auto & counters = read_steps_performance_counters.getCounters();

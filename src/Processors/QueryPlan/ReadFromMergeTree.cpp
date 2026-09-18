@@ -74,6 +74,7 @@
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 #include <Storages/StorageSnapshot.h>
 #include <Storages/VirtualColumnUtils.h>
+#include <Functions/FunctionTopKFilter.h>
 #include <Common/CurrentThread.h>
 #include <Common/DateLUT.h>
 #include <Common/JSONBuilder.h>
@@ -168,32 +169,6 @@ bool isNodeDeterministic(const ActionsDAG::Node * node)
     for (const auto * child : node->children)
         if (!isNodeDeterministic(child))
             return false;
-    return true;
-}
-
-/// Like `VirtualColumnUtils::isDeterministic`, but treats `__topKFilter` as deterministic.
-/// Mirrors `isDeterministicAllowingTopKFilter` in `updateQueryConditionCache.cpp` — both
-/// gates must agree, otherwise QCC writes and reads diverge on TopK plans.
-///
-/// Unlike `isNodeDeterministic`, this also rejects non-deterministic `COLUMN` nodes (such
-/// as query-time constants `now()` / `today()`). Without that check, queries whose filter
-/// captures such constants could write QCC entries and reuse them later when the constant's
-/// value has changed.
-bool isDeterministicAllowingTopKFilter(const ActionsDAG::Node * node)
-{
-    for (const auto * child : node->children)
-        if (!isDeterministicAllowingTopKFilter(child))
-            return false;
-
-    if (node->type == ActionsDAG::ActionType::COLUMN)
-        return node->isDeterministic();
-
-    if (node->type != ActionsDAG::ActionType::FUNCTION)
-        return true;
-
-    if (!node->function_base->isDeterministic())
-        return node->function_base->getName() == "__topKFilter";
-
     return true;
 }
 
@@ -670,6 +645,7 @@ Pipe ReadFromMergeTree::readFromPoolParallelReplicas(
         mutations_snapshot,
         shared_virtual_fields,
         index_read_tasks,
+        getTopKReadFilter(),
         storage_snapshot,
         query_info.row_level_filter,
         query_info.prewhere_info,
@@ -702,6 +678,7 @@ Pipe ReadFromMergeTree::readFromPoolParallelReplicas(
             query_info.row_level_filter,
             query_info.prewhere_info,
             index_read_tasks,
+            getTopKReadFilter(),
             actions_settings,
             reader_settings,
             index_build_context,
@@ -771,6 +748,7 @@ Pipe ReadFromMergeTree::readFromPool(
             mutations_snapshot,
             shared_virtual_fields,
             index_read_tasks,
+            getTopKReadFilter(),
             storage_snapshot,
             query_info.row_level_filter,
             query_info.prewhere_info,
@@ -792,6 +770,7 @@ Pipe ReadFromMergeTree::readFromPool(
             mutations_snapshot,
             shared_virtual_fields,
             index_read_tasks,
+            getTopKReadFilter(),
             storage_snapshot,
             query_info.row_level_filter,
             query_info.prewhere_info,
@@ -820,6 +799,7 @@ Pipe ReadFromMergeTree::readFromPool(
             query_info.row_level_filter,
             query_info.prewhere_info,
             index_read_tasks,
+            getTopKReadFilter(),
             actions_settings,
             reader_settings,
             index_build_context,
@@ -898,6 +878,7 @@ Pipe ReadFromMergeTree::readInOrder(
             mutations_snapshot,
             shared_virtual_fields,
             index_read_tasks,
+            getTopKReadFilter(),
             has_hard_limit_below_one_block,
             has_soft_limit_below_one_block,
             storage_snapshot,
@@ -940,6 +921,7 @@ Pipe ReadFromMergeTree::readInOrder(
             mutations_snapshot,
             shared_virtual_fields,
             index_read_tasks,
+            getTopKReadFilter(),
             storage_snapshot,
             query_info.row_level_filter,
             query_info.prewhere_info,
@@ -1003,6 +985,7 @@ Pipe ReadFromMergeTree::readInOrder(
             query_info.row_level_filter,
             query_info.prewhere_info,
             index_read_tasks,
+            getTopKReadFilter(),
             actions_settings,
             reader_settings,
             index_build_context,
@@ -3751,10 +3734,8 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             /// dropped by the running `__topKFilter` threshold, which is not sound to store in the
             /// (threshold-oblivious) QCC. When it is on, salt the key with the TopK plan parameters so
             /// only the same plan reuses them (mirrors the write path in `updateQueryConditionCache`).
-            /// For a non-TopK read `top_k_filter_info` is empty and `isDeterministicAllowingTopKFilter`
-            /// is equivalent to `VirtualColumnUtils::isDeterministic` (no `__topKFilter` can appear).
             const bool skip_top_k = top_k_filter_info && !settings[Setting::use_query_condition_cache_for_top_k];
-            if (outputs.size() == 1 && !skip_top_k && isDeterministicAllowingTopKFilter(outputs.front()))
+            if (outputs.size() == 1 && !skip_top_k && VirtualColumnUtils::isDeterministic(outputs.front()))
             {
                 size_t hash = queryConditionCacheHash(outputs.front()->getHash(), reader_settings.query_condition_cache_settings_salt);
                 if (top_k_filter_info)
@@ -4559,12 +4540,12 @@ QueryPlanStepPtr ReadFromMergeTree::clone() const
     cloned_step->deferred_prewhere_info = deferred_prewhere_info;
     /// Carry over the TopK marker. `tryOptimizeTopK` runs in the first optimization pass, so a clone
     /// made later (`materializeQueryPlanReferences` for a common subplan reference, `cloneSubtree` for a
-    /// parallel-replicas plan fragment) clones a subtree whose filter still contains `__topKFilter` and
-    /// whose sorting step still shares the threshold tracker. Losing `top_k_filter_info` here would turn
-    /// the clone into an apparently plain read: it would consult and populate the query condition cache
-    /// under the unsalted condition hash even though its granule-skip decisions depend on the running
-    /// TopK threshold. `condition_hash` already has the part-set salt folded in by `setTopKColumn`, so
-    /// copy the value instead of calling `setTopKColumn` again (which would fold it in twice).
+    /// parallel-replicas plan fragment) clones a subtree whose sorting step still shares the threshold
+    /// tracker with the read. Losing `top_k_filter_info` here would turn the clone into a plain read: it
+    /// would neither apply the dynamic filter nor skip granules by the threshold, and it would consult
+    /// and populate the query condition cache under the unsalted condition hash. `condition_hash`
+    /// already has the part-set salt folded in by `setTopKColumn`, so copy the value instead of
+    /// calling `setTopKColumn` again (which would fold it in twice).
     cloned_step->top_k_filter_info = top_k_filter_info;
     /// Carry over the text-index read tasks for the same reason. `processAndOptimizeTextIndexFunctions`
     /// runs in the second optimization pass before `materializeQueryPlanReferences`, so a clone can
@@ -5588,7 +5569,9 @@ void ReadFromMergeTree::describeActions(FormatSettings & format_settings) const
     if (format_settings.pretty)
         QueryPlanFormat::formatOutputColumns(format_settings.pretty_names, format_settings.out, *this, prefix);
 
-    if (query_info.prewhere_info || query_info.row_level_filter)
+    const bool has_top_k_read_filter = top_k_filter_info && top_k_filter_info->dynamic_filtering;
+
+    if (query_info.prewhere_info || query_info.row_level_filter || has_top_k_read_filter)
     {
         if (!format_settings.pretty)
         {
@@ -5600,6 +5583,10 @@ void ReadFromMergeTree::describeActions(FormatSettings & format_settings) const
             prefix.push_back(format_settings.indent_char);
         }
     }
+
+    /// The dynamic top-K filter is the first PREWHERE read step, see `MergeTreeSelectProcessor::getPrewhereActions`.
+    if (has_top_k_read_filter)
+        format_settings.out << prefix << "TopK filter column: " << getTopKFilterColumnName(top_k_filter_info->column_name) << '\n';
 
     if (query_info.prewhere_info)
     {
@@ -5709,12 +5696,16 @@ void ReadFromMergeTree::describeActions(JSONBuilder::JSONMap & map) const
         map.add("Read each partition through separate port", true);
 
     std::unique_ptr<JSONBuilder::JSONMap> prewhere_info_map;
-    if (query_info.prewhere_info || query_info.row_level_filter)
+    const bool has_top_k_read_filter = top_k_filter_info && top_k_filter_info->dynamic_filtering;
+    if (query_info.prewhere_info || query_info.row_level_filter || has_top_k_read_filter)
     {
         prewhere_info_map = std::make_unique<JSONBuilder::JSONMap>();
         if (query_info.prewhere_info)
             prewhere_info_map->add("Need filter", query_info.prewhere_info->need_filter);
     }
+
+    if (has_top_k_read_filter)
+        prewhere_info_map->add("TopK filter column", getTopKFilterColumnName(top_k_filter_info->column_name));
 
     if (query_info.prewhere_info)
     {
@@ -6165,6 +6156,20 @@ void ReadFromMergeTree::setTopKColumn(const TopKFilterInfo & top_k_filter_info_)
     size_t combined_hash = top_k_filter_info->condition_hash;
     boost::hash_combine(combined_hash, parts_hash.get64());
     top_k_filter_info->condition_hash = combined_hash;
+}
+
+TopKReadFilterPtr ReadFromMergeTree::getTopKReadFilter() const
+{
+    if (!top_k_filter_info || !top_k_filter_info->dynamic_filtering)
+        return nullptr;
+
+    if (!top_k_filter_info->threshold_tracker)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Top-K dynamic filtering is enabled for the read step, but it has no threshold tracker");
+
+    return std::make_shared<const TopKReadFilter>(TopKReadFilter{
+        .column = NameAndTypePair(top_k_filter_info->column_name, top_k_filter_info->data_type),
+        .threshold_tracker = top_k_filter_info->threshold_tracker,
+    });
 }
 
 bool ReadFromMergeTree::isSkipIndexAvailableForTopK(const String & sort_column) const

@@ -185,4 +185,9 @@ FunctionOverloadResolverPtr createInternalFunctionTopKFilterResolver(TopKThresho
     return std::make_shared<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionTopKFilter>(threshold_tracker_));
 }
 
+String getTopKFilterColumnName(const String & column_name)
+{
+    return fmt::format("{}({})", FunctionTopKFilter::name, column_name);
+}
+
 }

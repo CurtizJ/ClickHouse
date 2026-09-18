@@ -1,0 +1,25 @@
+-- plan: the conditions are in PREWHERE together with the top-K filter
+TopK filter column: __topKFilter(value)
+Prewhere filter column: and(equals(modulo(__table1.value, 7_UInt8), 0_UInt8), notEquals(__table1.`s.size`, 0_UInt8)) (removed)
+-- plan: an explicit PREWHERE keeps the top-K filter
+Filter column: notEquals(__table1.`s.size`, 0_UInt8) (removed)
+TopK filter column: __topKFilter(value)
+Prewhere filter column: equals(modulo(value, 7_UInt8), 0_UInt8) (removed)
+-- results
+1	999999
+8	999992
+15	999985
+22	999978
+29	999971
+1	999999
+8	999992
+15	999985
+22	999978
+29	999971
+1	999999
+8	999992
+15	999985
+22	999978
+29	999971
+-- prewhere rows: with the top-K filter < without it
+1

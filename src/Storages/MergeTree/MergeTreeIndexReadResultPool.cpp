@@ -485,6 +485,7 @@ SingleProjectionIndexReader::SingleProjectionIndexReader(
           nullptr /*row_level_filter*/,
           std::move(prewhere_info),
           IndexReadTasks{} /*index_read_tasks*/,
+          nullptr /*top_k_read_filter*/,
           actions_settings,
           reader_settings))
 {
