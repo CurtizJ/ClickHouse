@@ -504,7 +504,7 @@ IMPLEMENT_SETTING_ENUM(
     ErrorCodes::BAD_ARGUMENTS,
     {{"none", TextIndexPostingListCodec::None},
      {"bitpacking", TextIndexPostingListCodec::Bitpacking},
-     {"pfordelta", TextIndexPostingListCodec::PForDelta}})
+     {"pfor", TextIndexPostingListCodec::PFor}})
 
 IMPLEMENT_SETTING_ENUM(
     MergeTreeTextIndexSerializationVersion,
