@@ -1,0 +1,15 @@
+-- results
+0	1000000
+2	999998
+4	999996
+6	999994
+8	999992
+0	1000000
+2	999998
+4	999996
+6	999994
+8	999992
+-- lazy mode, posting list blocks decoded: with the top-K filter > 0 and < without it
+1	1
+-- materialize mode, posting list blocks read: with the top-K filter > 0 and < without it
+1	1

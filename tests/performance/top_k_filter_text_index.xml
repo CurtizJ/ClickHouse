@@ -1,0 +1,60 @@
+<test>
+    <!-- `ORDER BY ts DESC LIMIT n` with a condition read directly from a text index
+         (`query_plan_direct_read_from_text_index`): the index virtual column is filled by a separate
+         read step that decodes the posting lists of the granules it is asked for.
+
+         The step goes right before the PREWHERE step that consumes the column, after the dynamic top-K
+         filter. The tokens are frequent, so the threshold of `ORDER BY ts DESC` settles quickly and leaves
+         no rows in most granules, and the posting lists are decoded only for the few granules that can
+         still contribute to the result. Previously the index step ran before any filtering and decoded
+         the posting lists of every granule.
+
+         `ts` is uniformly random, so the threshold depends only on the number of matching rows seen so
+         far. Token frequencies: `get` 50%, `post` 30%, `put` 20%; `info` 70%, `warn` 20%, `error` 10%;
+         `timeout` 0.1% (a sparse token: its posting lists are cheap to decode either way, and the
+         threshold of the few matching rows does not skip granules). -->
+
+    <settings>
+        <use_skip_indexes_on_data_read>1</use_skip_indexes_on_data_read>
+        <query_plan_direct_read_from_text_index>1</query_plan_direct_read_from_text_index>
+        <use_top_k_dynamic_filtering>1</use_top_k_dynamic_filtering>
+        <use_query_condition_cache>0</use_query_condition_cache>
+    </settings>
+
+    <create_query>
+        CREATE TABLE t_top_k_text_index
+        (
+            key UInt64,
+            ts DateTime,
+            message String,
+            INDEX idx_message message TYPE text(tokenizer = splitByNonAlpha)
+        )
+        ENGINE = MergeTree ORDER BY key
+        SETTINGS index_granularity = 8192
+    </create_query>
+
+    <fill_query>
+        INSERT INTO t_top_k_text_index
+        SELECT
+            number,
+            toDateTime('2026-01-01 00:00:00') + cityHash64(number, 1) % 31536000,
+            concat(
+                'level=', multiIf(cityHash64(number, 2) % 10 &lt; 7, 'info', cityHash64(number, 2) % 10 &lt; 9, 'warn', 'error'),
+                ' method=', multiIf(cityHash64(number, 3) % 10 &lt; 5, 'get', cityHash64(number, 3) % 10 &lt; 8, 'post', 'put'),
+                ' status=', toString([200, 201, 204, 400, 404, 500, 502, 503][cityHash64(number, 4) % 8 + 1]),
+                ' user=', toString(cityHash64(number, 5) % 10000),
+                ' latency_ms=', toString(cityHash64(number, 6) % 5000),
+                if(cityHash64(number, 7) % 1000 = 0, ' upstream timeout', ''))
+        FROM numbers(50000000)
+        SETTINGS max_insert_threads = 8
+    </fill_query>
+    <fill_query>OPTIMIZE TABLE t_top_k_text_index FINAL</fill_query>
+
+    <query>SELECT key, ts, message FROM t_top_k_text_index WHERE hasToken(message, 'get') ORDER BY ts DESC LIMIT 10</query>
+    <query>SELECT key, ts, message FROM t_top_k_text_index WHERE hasAnyTokens(message, ['get', 'post']) ORDER BY ts DESC LIMIT 10</query>
+    <query>SELECT key, ts, message FROM t_top_k_text_index WHERE hasAnyTokens(message, ['warn', 'error']) ORDER BY ts DESC LIMIT 10</query>
+    <query>SELECT key, ts, message FROM t_top_k_text_index WHERE hasToken(message, 'get') ORDER BY ts DESC LIMIT 10 SETTINGS text_index_posting_list_apply_mode = 'materialize'</query>
+    <query>SELECT key, ts, message FROM t_top_k_text_index WHERE hasToken(message, 'timeout') ORDER BY ts DESC LIMIT 10</query>
+
+    <drop_query>DROP TABLE IF EXISTS t_top_k_text_index</drop_query>
+</test>

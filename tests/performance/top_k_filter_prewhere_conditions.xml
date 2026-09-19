@@ -1,0 +1,62 @@
+<test>
+    <!-- `ORDER BY ts DESC LIMIT n` with a multi-predicate WHERE: a cheap and selective condition on a
+         narrow column (`user_id = 42`, 0.2% of the rows) and a heavy condition on a wide `String`
+         column (`message LIKE '%timeout%'`, 20% of the rows).
+
+         The dynamic top-K filter is the first PREWHERE read step, and the conditions of the query are
+         moved to PREWHERE after it, so they are evaluated only for the rows that can still reach the
+         result. Once the threshold settles, the cheap condition leaves no rows in most granules, and the
+         `message` column is read and the `LIKE` is evaluated for a small fraction of the granules.
+         Previously the conditions stayed in a `Filter` step after the read: `message` was read for every
+         granule with a row above the threshold (all of them, as the threshold alone still keeps tens of
+         rows per granule), and an explicit PREWHERE disabled the dynamic filter entirely.
+
+         `ts` is uniformly random, so the threshold of `ORDER BY ts DESC` depends only on the number of
+         matching rows seen so far, and a minmax index could not skip granules. `request_id` makes the
+         `message` column incompressible enough for its reads to dominate the query. -->
+
+    <settings>
+        <use_top_k_dynamic_filtering>1</use_top_k_dynamic_filtering>
+        <use_query_condition_cache>0</use_query_condition_cache>
+    </settings>
+
+    <create_query>
+        CREATE TABLE t_top_k_prewhere
+        (
+            key UInt64,
+            ts DateTime,
+            user_id UInt32,
+            message String
+        )
+        ENGINE = MergeTree ORDER BY key
+        SETTINGS index_granularity = 8192
+    </create_query>
+
+    <fill_query>
+        INSERT INTO t_top_k_prewhere
+        SELECT
+            number,
+            toDateTime('2026-01-01 00:00:00') + cityHash64(number, 1) % 31536000,
+            cityHash64(number, 2) % 500,
+            concat(
+                ['GET', 'POST', 'PUT', 'DELETE'][cityHash64(number, 3) % 4 + 1],
+                ' /api/v', toString(cityHash64(number, 4) % 3 + 1), '/items/', toString(cityHash64(number, 5) % 1000000),
+                ' status=', toString([200, 201, 204, 400, 404, 500, 502, 503][cityHash64(number, 6) % 8 + 1]),
+                ' latency_ms=', toString(cityHash64(number, 7) % 5000),
+                ' request_id=', lower(hex(cityHash64(number, 8))),
+                if(cityHash64(number, 9) % 5 = 0, ' error=upstream timeout', ' ok'))
+        FROM numbers(20000000)
+        SETTINGS max_insert_threads = 8
+    </fill_query>
+    <fill_query>OPTIMIZE TABLE t_top_k_prewhere FINAL</fill_query>
+
+    <query>SELECT key, ts, message FROM t_top_k_prewhere WHERE user_id = 42 AND message LIKE '%timeout%' ORDER BY ts DESC LIMIT 10</query>
+
+    <!-- An explicit PREWHERE used to disable the dynamic filter. -->
+    <query>SELECT key, ts, message FROM t_top_k_prewhere PREWHERE user_id = 42 WHERE message LIKE '%timeout%' ORDER BY ts DESC LIMIT 10</query>
+
+    <!-- Baseline without the dynamic filter: the conditions are evaluated in PREWHERE for every granule. -->
+    <query>SELECT key, ts, message FROM t_top_k_prewhere WHERE user_id = 42 AND message LIKE '%timeout%' ORDER BY ts DESC LIMIT 10 SETTINGS use_top_k_dynamic_filtering = 0</query>
+
+    <drop_query>DROP TABLE IF EXISTS t_top_k_prewhere</drop_query>
+</test>
