@@ -5463,8 +5463,8 @@ static BoolMask forAnySparseHyperrectangle(
 
     auto result = BoolMask::combine(initial_mask, callback(sparse_hyperrectangle));
 
-    /// isComplete() means that both `can_be_true` = true and ``can_be_false` = true. No `result = BoolMask::combine(result, ...)`
-    /// can change `result` anymore. So, there is no need to continue.
+    /// isComplete() means that both `can_be_true` = true and `can_be_false` = true and the result is not unknown.
+    /// No `result = BoolMask::combine(result, ...)` can change `result` anymore. So, there is no need to continue.
     if (result.isComplete())
         return result;
 
@@ -6266,12 +6266,13 @@ BoolMask KeyCondition::checkInHyperrectangle(
         if (element.argument_num_of_space_filling_curve.has_value())
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
-            /// we cannot process it.
-            rpn_stack.emplace_back(true, true);
+            /// we cannot process it, for this key range as for any other one.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            rpn_stack.emplace_back(true, true);
+            /// The atom cannot be evaluated for any key range, see `BoolMask::always_unknown`.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
                  || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)
@@ -6710,12 +6711,13 @@ BoolMask KeyCondition::checkInHyperrectangle(
         if (element.argument_num_of_space_filling_curve.has_value())
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
-            /// we cannot process it.
-            rpn_stack.emplace_back(true, true);
+            /// we cannot process it, for this key range as for any other one.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            rpn_stack.emplace_back(true, true);
+            /// The atom cannot be evaluated for any key range, see `BoolMask::always_unknown`.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
               || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)

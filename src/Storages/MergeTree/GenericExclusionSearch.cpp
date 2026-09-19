@@ -52,12 +52,29 @@ void splitRange(MarkRange range, size_t coarse_index_granularity, Consume && con
     consume(MarkRange(range.begin, end));
 }
 
+/// Whether a range is accepted whole. That is the case when every row matches, when the range is a
+/// single mark, and when the result is unknown (see `BoolMask::always_unknown`): no subrange of an unknown
+/// range could be excluded, so splitting it further would only spend steps. The exception is the
+/// collection of exact ranges: a subrange of an unknown range may still fully match (e.g. for
+/// `or(unknown, x)` where `x` holds on the subrange), and splitting is what finds it.
+bool isAcceptedWhole(const MarkRange & range, const BoolMask & mask, bool collect_exact_ranges)
+{
+    if (!mask.can_be_false)
+        return true;
+
+    if (mask.always_unknown && !collect_exact_ranges)
+        return true;
+
+    return range.end == range.begin + 1;
+}
+
 /// The classic exhaustive algorithm. The stack holds the mark ranges that still have to be
 /// analyzed, disjoint and ordered so that the leftmost one is on top (at the back). Each iteration
 /// pops the leftmost range and asks the check callback about it. A range where no row can match the
-/// condition is discarded. A range where every row matches, or a range of a single mark, is added
-/// to the result. Any other range may contain both matching and non-matching rows, so it is split
-/// into smaller subranges, which are pushed onto the stack for the same treatment.
+/// condition is discarded. A range where every row matches, a range where the result is unknown, or
+/// a range of a single mark, is added to the result. Any other range may contain both matching and
+/// non-matching rows, so it is split into smaller subranges, which are pushed onto the stack for the
+/// same treatment.
 void searchUnlimited(
     const MarkRanges & initial_ranges,
     const MarkRangeCheck & check_in_range,
@@ -81,7 +98,7 @@ void searchUnlimited(
                 continue;
 
             bool exact = !mask.can_be_false;
-            if (exact || range.end == range.begin + 1)
+            if (isAcceptedWhole(range, mask, collect_exact_ranges))
             {
                 appendWithMaxGap(result.ranges, range, search_settings.min_marks_for_seek);
 
@@ -143,7 +160,7 @@ void searchLimited(
             continue;
 
         bool exact = !mask.can_be_false;
-        if (exact || range.end == range.begin + 1)
+        if (isAcceptedWhole(range, mask, collect_exact_ranges))
         {
             accepted.push_back(range);
             if (collect_exact_ranges && exact)

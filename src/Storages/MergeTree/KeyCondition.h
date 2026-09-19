@@ -134,6 +134,7 @@ public:
     using UpdatePartialDisjunctionResultFn = std::function<void (size_t position, bool result, bool is_unknown)>;
 
     /// Whether the condition and its negation are feasible in the direct product of single column ranges specified by `hyperrectangle`.
+    /// A result that depends only on atoms the analysis cannot evaluate (`FUNCTION_UNKNOWN`) is marked with `BoolMask::always_unknown`.
     BoolMask checkInHyperrectangle(
         const Hyperrectangle & hyperrectangle,
         const DataTypes & data_types,
