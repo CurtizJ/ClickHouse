@@ -15,6 +15,7 @@ public:
         MutationsSnapshotPtr mutations_snapshot_,
         VirtualFields shared_virtual_fields_,
         const IndexReadTasks & index_read_tasks_,
+        const TopKReadFilterPtr & top_k_read_filter_,
         const StorageSnapshotPtr & storage_snapshot_,
         const FilterDAGInfoPtr & row_level_filter_,
         const PrewhereInfoPtr & prewhere_info_,

@@ -123,6 +123,7 @@ public:
         const FilterDAGInfoPtr & row_level_filter_,
         const PrewhereInfoPtr & prewhere_info_,
         const IndexReadTasks & index_read_tasks_,
+        const TopKReadFilterPtr & top_k_read_filter_,
         const ExpressionActionsSettings & actions_settings_,
         const MergeTreeReaderSettings & reader_settings_,
         MergeTreeIndexBuildContextPtr merge_tree_index_build_context_ = {},
@@ -150,10 +151,14 @@ public:
 
     const MergeTreeReaderSettings & getSettings() const { return reader_settings; }
 
+    /// Builds the PREWHERE read steps in their execution order: the top-K filter (if any), the row-level
+    /// filter, the PREWHERE conditions, and the index read steps, each right before the first step that
+    /// consumes its columns (or after all the filters when only the following `Filter` step consumes them).
     static PrewhereExprInfo getPrewhereActions(
         const FilterDAGInfoPtr & row_level_filter,
         const PrewhereInfoPtr & prewhere_info,
         const IndexReadTasks & index_read_tasks,
+        const TopKReadFilterPtr & top_k_read_filter,
         const ExpressionActionsSettings & actions_settings,
         bool enable_multiple_prewhere_read_steps,
         bool force_short_circuit_execution,
@@ -176,6 +181,7 @@ private:
 
     const FilterDAGInfoPtr row_level_filter;
     const PrewhereInfoPtr prewhere_info;
+    const TopKReadFilterPtr top_k_read_filter;
     const ExpressionActionsSettings actions_settings;
     const PrewhereExprInfo prewhere_actions;
 

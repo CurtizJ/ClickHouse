@@ -1608,53 +1608,6 @@ UInt64 MergeTreeDataSelectExecutor::getSkipIndexProfiledConditionHash(UInt64 con
     return hash.get64();
 }
 
-static bool isTopKFilterFunction(const ActionsDAG::Node * node)
-{
-    return node->type == ActionsDAG::ActionType::FUNCTION
-        && node->function_base
-        && node->function_base->getName() == "__topKFilter";
-}
-
-/// TopK dynamic filtering can push `__topKFilter` into the WHERE `ActionsDAG` as
-/// `and(__topKFilter(...), <predicate>)`. Plain `SELECT ... WHERE <predicate>` entries
-/// are keyed on `<predicate>` alone, so strip internal TopK nodes before probing reuse.
-static std::optional<size_t> getTopKReusePredicateOnlyConditionHash(const ActionsDAG::Node * node)
-{
-    if (!node)
-        return std::nullopt;
-
-    if (node->type == ActionsDAG::ActionType::FUNCTION
-        && node->function_base && node->function_base->getName() == "and")
-    {
-        std::vector<const ActionsDAG::Node *> where_children;
-        where_children.reserve(node->children.size());
-        for (const auto * child : node->children)
-        {
-            if (!isTopKFilterFunction(child))
-                where_children.push_back(child);
-        }
-
-        if (where_children.empty())
-            return std::nullopt;
-
-        /// The common TopK shape is `and(__topKFilter(...), <WHERE-root>)`, where the WHERE root is a
-        /// single (possibly nested `and`) node, so stripping the internal `__topKFilter` leaves exactly
-        /// one child whose hash reproduces the key a plain `SELECT ... WHERE <predicate>` wrote. But the
-        /// top-level `and` can also be flattened (`and(__topKFilter, a, b, ...)`), leaving several
-        /// children with no single node to hash; in that case we cannot reproduce a plain-WHERE key, so
-        /// skip the cross-query reuse (a plain multi-conjunct `WHERE` is keyed on its own single
-        /// `and(a, b, ...)` node, which we do not have here).
-        if (where_children.size() != 1)
-            return std::nullopt;
-        return where_children.front()->getHash();
-    }
-
-    if (isTopKFilterFunction(node))
-        return std::nullopt;
-
-    return node->getHash();
-}
-
 void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
     RangesInDataParts & parts_with_ranges,
     const SelectQueryInfo & select_query_info,
@@ -1679,11 +1632,11 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
 
     /// The query condition cache for `ORDER BY ... LIMIT n` (TopK) reads is gated behind the
     /// `use_query_condition_cache_for_top_k` setting (enabled by default). When it is off, skip the
-    /// consult entirely for any read stamped as TopK — including shapes where no `__topKFilter` node
-    /// is folded into the filter DAG (skip-index-only TopK, or a query with a PREWHERE), whose plain
-    /// condition hash would otherwise still hit entries primed by an ordinary `SELECT ... WHERE`.
-    /// The write sides are gated symmetrically (see updateQueryConditionCache, setTopKColumn and
-    /// selectRangesToRead), so with the gate off a TopK read neither reads nor writes the cache.
+    /// consult entirely for any read stamped as TopK: the top-K filter is a read step and not a part
+    /// of the filter DAG, so the plain condition hash of such a read would otherwise still hit entries
+    /// primed by an ordinary `SELECT ... WHERE`. The write sides are gated symmetrically (see
+    /// updateQueryConditionCache, setTopKColumn and selectRangesToRead), so with the gate off a TopK
+    /// read neither reads nor writes the cache.
     if (top_k_filter_info && !settings[Setting::use_query_condition_cache_for_top_k])
         return;
 
@@ -1704,8 +1657,8 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
     /// (use_skip_indexes = 0 still reusing row-level entries) working while preventing the
     /// skip-index poisoning of issue #108519. TopK WHERE reads (which only get here when
     /// `use_query_condition_cache_for_top_k` is on, see the gate above) also consult the
-    /// `topk_reuse_predicate_only_hash` so plain `SELECT ... WHERE` entries can be reused;
-    /// TopK-salted entries are not read otherwise.
+    /// predicate-only hash so plain `SELECT ... WHERE` entries can be reused; TopK-salted
+    /// entries are not read otherwise.
 
     struct Stats
     {
@@ -1719,28 +1672,17 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
     {
         /// `size_t` (not `UInt64`) so `boost::hash_combine` binds on platforms where
         /// they differ (e.g. Apple, where `size_t` is `unsigned long` but `UInt64` is `unsigned long long`).
-        size_t condition_hash = queryConditionCacheHash(dag->getHash(), settings_salt);
-        size_t topk_reuse_predicate_only_hash = 0;
-        bool has_topk_reuse_predicate_only_hash = false;
-        if (apply_top_k_salt && top_k_filter_info && top_k_filter_info->where_clause)
-        {
-            /// Only reuse when stripping actually recovered a predicate-only hash. Otherwise the hash
-            /// would still carry `__topKFilter` (matching neither a plain `WHERE` entry nor the salted
-            /// TopK entry), so probing it would just be wasted cache lookups per part.
-            if (auto stripped = getTopKReusePredicateOnlyConditionHash(dag))
-            {
-                topk_reuse_predicate_only_hash = queryConditionCacheHash(*stripped, settings_salt);
-                has_topk_reuse_predicate_only_hash = true;
-            }
-        }
+        const size_t predicate_only_hash = queryConditionCacheHash(dag->getHash(), settings_salt);
+        size_t condition_hash = predicate_only_hash;
 
         /// Mirror the salting done by `updateQueryConditionCache` on the WHERE write path: when the
         /// read goes through a TopK filter, the cached granule decisions are valid only for the same
         /// TopK plan, so the WHERE cache key must be partitioned by the TopK parameters. The PREWHERE
-        /// write path in `MergeTreeSelectProcessor::read` does not (yet) apply this salt, so we must
-        /// not apply it on the PREWHERE read path either — otherwise the keys diverge and the lookup
-        /// always misses.
-        if (apply_top_k_salt && top_k_filter_info)
+        /// write path in `MergeTreeSelectProcessor::read` does not write under a TopK read at all, so
+        /// we must not apply the salt on the PREWHERE read path either — otherwise the keys diverge
+        /// and the lookup always misses.
+        const bool top_k_salted = apply_top_k_salt && top_k_filter_info.has_value();
+        if (top_k_salted)
             boost::hash_combine(condition_hash, top_k_filter_info->condition_hash);
 
         /// The skip-index-analysis exclusions written by ReadFromMergeTree are stored under a key
@@ -1748,9 +1690,13 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
         /// condition hash the write side used, so only a query that ran the same set of indexes
         /// consults them. See getSkipIndexProfiledConditionHash and issue #108519.
         UInt64 profiled_condition_hash = getSkipIndexProfiledConditionHash(condition_hash, indexes);
-        const bool also_probe_topk_reuse_predicate_only_hash = has_topk_reuse_predicate_only_hash;
-        const UInt64 topk_reuse_predicate_only_profiled_hash = also_probe_topk_reuse_predicate_only_hash
-            ? getSkipIndexProfiledConditionHash(topk_reuse_predicate_only_hash, indexes) : 0;
+
+        /// A TopK read may also reuse the entries a plain `SELECT ... WHERE` with the same predicate
+        /// wrote: they state that the predicate matches no row of a granule, which holds under any
+        /// threshold. The top-K filter is not a part of the DAG, so the plain hash is the same.
+        const bool also_probe_predicate_only_hash = top_k_salted;
+        const UInt64 predicate_only_profiled_hash = also_probe_predicate_only_hash
+            ? getSkipIndexProfiledConditionHash(predicate_only_hash, indexes) : 0;
 
         Stats stats;
 
@@ -1779,15 +1725,15 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
             /// the hit/miss ourselves and suppress the per-read events on every lookup.
             auto row_level_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, condition_hash, /*increment_profile_events=*/false);
             auto skip_index_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, profiled_condition_hash, /*increment_profile_events=*/false);
-            std::optional<QueryConditionCache::MatchingMarks> topk_reuse_predicate_only_row_level_marks_opt;
-            std::optional<QueryConditionCache::MatchingMarks> topk_reuse_predicate_only_skip_index_marks_opt;
-            if (also_probe_topk_reuse_predicate_only_hash)
+            std::optional<QueryConditionCache::MatchingMarks> predicate_only_row_level_marks_opt;
+            std::optional<QueryConditionCache::MatchingMarks> predicate_only_skip_index_marks_opt;
+            if (also_probe_predicate_only_hash)
             {
-                topk_reuse_predicate_only_row_level_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, topk_reuse_predicate_only_hash, /*increment_profile_events=*/false);
-                topk_reuse_predicate_only_skip_index_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, topk_reuse_predicate_only_profiled_hash, /*increment_profile_events=*/false);
+                predicate_only_row_level_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, predicate_only_hash, /*increment_profile_events=*/false);
+                predicate_only_skip_index_marks_opt = query_condition_cache->read(storage_id.uuid, data_part->name, predicate_only_profiled_hash, /*increment_profile_events=*/false);
             }
             if (!row_level_marks_opt && !skip_index_marks_opt
-                && !topk_reuse_predicate_only_row_level_marks_opt && !topk_reuse_predicate_only_skip_index_marks_opt)
+                && !predicate_only_row_level_marks_opt && !predicate_only_skip_index_marks_opt)
             {
                 ProfileEvents::increment(ProfileEvents::QueryConditionCacheMisses);
                 ++it;
@@ -1800,8 +1746,8 @@ void MergeTreeDataSelectExecutor::filterPartsByQueryConditionCache(
             merge_opt_marks(matching_marks, skip_index_marks_opt);
             /// TopK WHERE reads may also hit predicate-only entries written by plain
             /// `SELECT ... WHERE`; AND-merge them with the TopK-salted verdicts above.
-            merge_opt_marks(matching_marks, topk_reuse_predicate_only_row_level_marks_opt);
-            merge_opt_marks(matching_marks, topk_reuse_predicate_only_skip_index_marks_opt);
+            merge_opt_marks(matching_marks, predicate_only_row_level_marks_opt);
+            merge_opt_marks(matching_marks, predicate_only_skip_index_marks_opt);
 
             MarkRanges ranges;
             const auto & part = it->data_part;

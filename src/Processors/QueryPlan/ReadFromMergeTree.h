@@ -102,6 +102,10 @@ struct TopKFilterInfo
     /// query condition cache key so that QCC entries written under a TopK plan are partitioned
     /// by the TopK parameters and don't bleed across plans with different LIMIT, sort key, etc.
     UInt64 condition_hash = 0;
+
+    /// Whether the read applies the dynamic filter `__topKFilter(column_name)` as its first PREWHERE
+    /// step (see `ReadFromMergeTree::getTopKReadFilter`). Otherwise only the skip index is used.
+    bool dynamic_filtering = false;
 };
 
 struct LazyMaterializingRows;
@@ -299,6 +303,10 @@ public:
     /// so the get/set pair lets another step reading the same table (e.g. one built by lazy FINAL) reproduce them.
     const IndexReadTasks & getIndexReadTasks() const { return index_read_tasks; }
     void setIndexReadTasks(IndexReadTasks index_read_tasks_) { index_read_tasks = std::move(index_read_tasks_); }
+
+    /// The top-K dynamic filter the readers apply as their first PREWHERE step, or null if the read
+    /// is not stamped for dynamic filtering by `tryOptimizeTopK` (see `TopKFilterInfo::dynamic_filtering`).
+    TopKReadFilterPtr getTopKReadFilter() const;
 
     /// True if a coordinator-side snapshot boundary is pinned (e.g. select_sequential_consistency).
     /// Such a read cannot be distributed: a worker reads from its own snapshot and cannot reproduce it.

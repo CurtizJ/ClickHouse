@@ -17,6 +17,7 @@ public:
         MutationsSnapshotPtr mutations_snapshot_,
         VirtualFields shared_virtual_fields_,
         const IndexReadTasks & index_read_tasks_,
+        const TopKReadFilterPtr & top_k_read_filter_,
         bool has_hard_limit_below_one_block_,
         bool has_soft_limit_below_one_block_,
         const StorageSnapshotPtr & storage_snapshot_,

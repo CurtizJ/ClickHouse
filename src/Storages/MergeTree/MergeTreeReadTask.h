@@ -81,6 +81,21 @@ struct IndexReadTask
 using IndexReadTasks = std::map<String, IndexReadTask>;
 using IndexReadColumns = std::map<String, VirtualColumnsDescription>;
 
+struct TopKThresholdTracker;
+using TopKThresholdTrackerPtr = std::shared_ptr<TopKThresholdTracker>;
+
+/// Dynamic filter of `ORDER BY <column> LIMIT n` queries (see `tryOptimizeTopK`).
+/// It is always the first PREWHERE step: the sort column is compared with the running top-K
+/// threshold, which the sorting step publishes through the shared tracker, so the other
+/// PREWHERE steps and the main read see only the rows that can still reach the result.
+struct TopKReadFilter
+{
+    NameAndTypePair column;
+    TopKThresholdTrackerPtr threshold_tracker;
+};
+
+using TopKReadFilterPtr = std::shared_ptr<const TopKReadFilter>;
+
 struct MergeTreeReadTaskColumns
 {
     /// Column names to read during WHERE

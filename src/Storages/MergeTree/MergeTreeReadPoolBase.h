@@ -37,6 +37,7 @@ public:
         MutationsSnapshotPtr mutations_snapshot_,
         VirtualFields shared_virtual_fields_,
         const IndexReadTasks & index_read_tasks_,
+        const TopKReadFilterPtr & top_k_read_filter_,
         const StorageSnapshotPtr & storage_snapshot_,
         const FilterDAGInfoPtr & row_level_filter_,
         const PrewhereInfoPtr & prewhere_info_,
@@ -78,6 +79,7 @@ protected:
     const MutationsSnapshotPtr mutations_snapshot;
     const VirtualFields shared_virtual_fields;
     const IndexReadTasks index_read_tasks;
+    const TopKReadFilterPtr top_k_read_filter;
     const FilterDAGInfoPtr row_level_filter;
     const PrewhereInfoPtr prewhere_info;
     const ExpressionActionsSettings actions_settings;

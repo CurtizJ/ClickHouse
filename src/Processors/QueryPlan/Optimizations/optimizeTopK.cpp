@@ -12,22 +12,18 @@
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Common/logger_useful.h>
 #include <Common/SipHash.h>
-#include <Functions/FunctionFactory.h>
-#include <Functions/IFunctionAdaptors.h>
-#include <Functions/FunctionTopKFilter.h>
 
 namespace DB::QueryPlanOptimizations
 {
 
-size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings & settings)
+size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes*/, const Optimization::ExtraSettings & settings)
 {
-    /// The dynamic-filtering path injects an internal `__topKFilter` function that
-    /// is created on demand with a runtime threshold tracker and is not registered
-    /// in `FunctionFactory`. The skip-index-on-data-read path likewise relies on a
-    /// `TopKThresholdTracker` shared between `SortingStep` and `ReadFromMergeTree`.
-    /// None of this can be transmitted to remote workers, so when the plan is
-    /// going to be distributed, the remote node would fail to deserialize the
-    /// plan with `Unknown function __topKFilter` (or run with stale state).
+    /// Both top-K paths rely on a runtime `TopKThresholdTracker` shared between
+    /// `SortingStep` and `ReadFromMergeTree`: the dynamic filter compares the sort
+    /// column with it in the first PREWHERE read step, the skip-index path uses it to
+    /// skip granules while reading. The tracker cannot be transmitted to remote
+    /// workers, so when the plan is going to be distributed, a remote node would
+    /// read without the threshold and return excess rows.
     if (settings.make_distributed_plan)
         return 0;
 
@@ -184,7 +180,6 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
     const bool sort_column_is_variable_length = !sort_column.type->haveMaximumSizeOfValue();
     const auto * sort_column_tuple_type = typeid_cast<const DataTypeTuple *>(sort_column.type.get());
     bool use_dynamic_filtering = settings.use_top_k_dynamic_filtering
-        && !read_from_mergetree_step->getPrewhereInfo()
         && !isDynamic(sort_column.type)
         && !isVariant(sort_column.type)
         && (!sort_column_tuple_type || !sort_column_tuple_type->getElements().empty())
@@ -193,7 +188,7 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
     /// When read-in-order optimization is enabled and the sort column is a prefix
     /// of the storage's sorting key, the engine will read data in sorted order.
     /// TopK dynamic filtering is counterproductive in this case: once the threshold
-    /// is established, the prewhere rejects all subsequent rows (they are beyond
+    /// is established, the filter rejects all subsequent rows (they are beyond
     /// the threshold in sorted order), preventing the LIMIT from triggering early
     /// pipeline cancellation, and causing a full table scan instead.
     if (use_dynamic_filtering && settings.read_in_order)
@@ -212,57 +207,21 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
         sorting_step->setTopKThresholdTracker(threshold_tracker);
     }
 
-    bool added_step = false;
-
-    if (use_dynamic_filtering)
-    {
-        auto new_prewhere_info = std::make_shared<PrewhereInfo>();
-        NameAndTypePair sort_column_name_and_type(sort_column_name, sort_column.type);
-        new_prewhere_info->prewhere_actions = ActionsDAG({sort_column_name_and_type});
-
-        /// Cannot use get() because need to pass an argument to constructor
-        /// auto filter_function = FunctionFactory::instance().get("__topKFilter",nullptr);
-        auto filter_function =  DB::createInternalFunctionTopKFilterResolver(threshold_tracker);
-        const auto & prewhere_node = new_prewhere_info->prewhere_actions.addFunction(
-                filter_function, {new_prewhere_info->prewhere_actions.getInputs().front()}, {});
-        new_prewhere_info->prewhere_actions.getOutputs().push_back(&prewhere_node);
-        new_prewhere_info->prewhere_column_name = prewhere_node.result_name;
-        new_prewhere_info->remove_prewhere_column = true;
-        new_prewhere_info->need_filter = true;
-
-        auto initial_header = read_from_mergetree_step->getOutputHeader();
-
-        LOG_TRACE(getLogger("optimizeTopK"), "New Prewhere {}", new_prewhere_info->prewhere_actions.dumpDAG());
-        read_from_mergetree_step->updatePrewhereInfo(new_prewhere_info);
-
-        auto updated_header = read_from_mergetree_step->getOutputHeader();
-        if (!blocksHaveEqualStructure(*initial_header, *updated_header))
-        {
-            auto dag = ActionsDAG::makeConvertingActions(
-                updated_header->getColumnsWithTypeAndName(),
-                initial_header->getColumnsWithTypeAndName(),
-                ActionsDAG::MatchColumnsMode::Name, read_from_mergetree_step->getContext());
-
-            auto converting_step = std::make_unique<ExpressionStep>(updated_header, std::move(dag));
-            auto & converting_node = nodes.emplace_back();
-            converting_node.step = std::move(converting_step);
-
-            node->children.push_back(&converting_node);
-            std::swap(node->step, converting_node.step);
-            added_step = true;
-        }
-    }
-
+    /// The dynamic filter is not a part of the plan: `ReadFromMergeTree` builds it from the stamp
+    /// below as the first PREWHERE read step (`MergeTreeSelectProcessor::getPrewhereActions`), so
+    /// the conditions of the query are moved to PREWHERE as usual and are evaluated after it.
+    ///
     ///TopKThresholdTracker acts as a link between 3 components
     ///                                MergeTreeReaderIndex::canSkipMark() (skip whole granule using minmax index)
     ///                                  /
     ///         PartialSortingTransform/MergeSortingTransform --> ("publish" threshold value as sorting progresses)
     ///                                  \
-    ///                                __topKFilter() (Prewhere filtering)
+    ///                                __topKFilter() (the first PREWHERE read step)
 
     if (use_skip_index || use_dynamic_filtering)
     {
         TopKFilterInfo info{sort_column_name, sort_column.type, num_sort_columns, n, sort_col_desc.direction, where_clause, threshold_tracker, /*condition_hash=*/ 0};
+        info.dynamic_filtering = use_dynamic_filtering;
 
         /// Compute a deterministic hash from the planning-time parameters. Used by
         /// `updateQueryConditionCache` to partition QCC entries by TopK plan, so the same
@@ -283,7 +242,7 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, 
         read_from_mergetree_step->setTopKColumn(info);
     }
 
-    return added_step ? 1 : 0;
+    return 0;
 }
 
 }

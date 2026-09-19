@@ -40,6 +40,7 @@ MergeTreeReadPoolBase::MergeTreeReadPoolBase(
     MutationsSnapshotPtr mutations_snapshot_,
     VirtualFields shared_virtual_fields_,
     const IndexReadTasks & index_read_tasks_,
+    const TopKReadFilterPtr & top_k_read_filter_,
     const StorageSnapshotPtr & storage_snapshot_,
     const FilterDAGInfoPtr & row_level_filter_,
     const PrewhereInfoPtr & prewhere_info_,
@@ -55,6 +56,7 @@ MergeTreeReadPoolBase::MergeTreeReadPoolBase(
     , mutations_snapshot(std::move(mutations_snapshot_))
     , shared_virtual_fields(std::move(shared_virtual_fields_))
     , index_read_tasks(index_read_tasks_)
+    , top_k_read_filter(top_k_read_filter_)
     , row_level_filter(row_level_filter_)
     , prewhere_info(prewhere_info_)
     , actions_settings(actions_settings_)
@@ -281,6 +283,7 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
         prewhere_info,
         read_task_info.mutation_steps,
         index_read_tasks,
+        top_k_read_filter,
         actions_settings,
         reader_settings,
         /*with_subcolumns=*/ true);
