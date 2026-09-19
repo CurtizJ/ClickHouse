@@ -53,13 +53,19 @@ void splitRange(MarkRange range, size_t coarse_index_granularity, Consume && con
 }
 
 /// Whether a range is accepted whole. That is the case when every row matches, when the range is a
-/// single mark, and when the result is unknown (see `BoolMask::unknown`): no subrange of an unknown
+/// single mark, and when the result is unknown (see `BoolMask::always_unknown`): no subrange of an unknown
 /// range could be excluded, so splitting it further would only spend steps. The exception is the
 /// collection of exact ranges: a subrange of an unknown range may still fully match (e.g. for
 /// `or(unknown, x)` where `x` holds on the subrange), and splitting is what finds it.
 bool isAcceptedWhole(const MarkRange & range, const BoolMask & mask, bool collect_exact_ranges)
 {
-    return !mask.can_be_false || (mask.unknown && !collect_exact_ranges) || range.end == range.begin + 1;
+    if (!mask.can_be_false)
+        return true;
+
+    if (mask.always_unknown && !collect_exact_ranges)
+        return true;
+
+    return range.end == range.begin + 1;
 }
 
 /// The classic exhaustive algorithm. The stack holds the mark ranges that still have to be

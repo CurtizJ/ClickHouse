@@ -651,13 +651,13 @@ TEST(GenericExclusionSearch, ConservativeOracle)
 TEST(GenericExclusionSearch, UnknownResultAcceptedWhole)
 {
     /// The key part of the condition holds on the first and on the last quarter of the marks and fails
-    /// on the second one; the other operand cannot be evaluated at all (`BoolMask::unknown`).
+    /// on the second one; the other operand cannot be evaluated at all (`BoolMask::always_unknown`).
     const size_t num_marks = 64;
     std::vector<bool> key_matching(num_marks);
     for (size_t mark = 0; mark != num_marks; ++mark)
         key_matching[mark] = mark < 16 || mark >= 32;
     auto key_part = oracleFromFlags(key_matching);
-    const BoolMask unknown(true, true, /*unknown=*/ true);
+    const BoolMask unknown = BoolMask::createAlwaysUnknown();
 
     GenericExclusionSearchSettings settings{.coarse_index_granularity = 8, .max_steps = 0, .min_marks_for_seek = 0};
 

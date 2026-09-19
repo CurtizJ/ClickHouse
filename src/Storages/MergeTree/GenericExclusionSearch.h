@@ -54,7 +54,7 @@ struct GenericExclusionSearchResult
 };
 
 /// Returns a BoolMask telling whether the condition can be true and whether it can be false for the
-/// rows of the given mark range. A result marked `BoolMask::unknown` is accepted whole like a range
+/// rows of the given mark range. A result marked `BoolMask::always_unknown` is accepted whole like a range
 /// where every row matches, because none of its subranges could be excluded.
 using MarkRangeCheck = std::function<BoolMask(const MarkRange &)>;
 

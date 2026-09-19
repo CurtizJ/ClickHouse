@@ -6267,12 +6267,12 @@ BoolMask KeyCondition::checkInHyperrectangle(
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
             /// we cannot process it, for this key range as for any other one.
-            rpn_stack.emplace_back(true, true, /*unknown=*/ true);
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            /// The atom cannot be evaluated for any key range, see `BoolMask::unknown`.
-            rpn_stack.emplace_back(true, true, /*unknown=*/ true);
+            /// The atom cannot be evaluated for any key range, see `BoolMask::always_unknown`.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
                  || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)
@@ -6712,12 +6712,12 @@ BoolMask KeyCondition::checkInHyperrectangle(
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
             /// we cannot process it, for this key range as for any other one.
-            rpn_stack.emplace_back(true, true, /*unknown=*/ true);
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            /// The atom cannot be evaluated for any key range, see `BoolMask::unknown`.
-            rpn_stack.emplace_back(true, true, /*unknown=*/ true);
+            /// The atom cannot be evaluated for any key range, see `BoolMask::always_unknown`.
+            rpn_stack.push_back(BoolMask::createAlwaysUnknown());
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
               || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)
