@@ -5538,7 +5538,8 @@ BoolMask KeyCondition::checkInRange(
     const FieldRef * right_keys,
     const DataTypes & data_types,
     BoolMask initial_mask,
-    const Hyperrectangle * key_bounds) const
+    const Hyperrectangle * key_bounds,
+    UnknownAtoms unknown_atoms) const
 {
     chassert(key_order.compareTuples(left_keys, right_keys, used_key_size) <= 0);
 
@@ -5550,7 +5551,12 @@ BoolMask KeyCondition::checkInRange(
     return forAnyHyperrectangle(used_key_size, left_keys, right_keys, true, true, key_ranges, data_types, key_order, 0, initial_mask, key_bounds,
         [&] (const Hyperrectangle & key_ranges_hyperrectangle)
     {
-        return checkInHyperrectangle(key_ranges_hyperrectangle, data_types);
+        return checkInHyperrectangle(
+            key_ranges_hyperrectangle,
+            data_types,
+            /*column_index_to_column_bf=*/ {},
+            /*update_partial_disjunction_result_fn=*/ nullptr,
+            unknown_atoms);
     });
 }
 
@@ -5562,7 +5568,8 @@ BoolMask KeyCondition::checkInRange(
     const DataTypes & sparse_data_types,
     const std::vector<UInt8> & equal_boundaries_mask,
     BoolMask initial_mask,
-    const Hyperrectangle * key_bounds) const
+    const Hyperrectangle * key_bounds,
+    UnknownAtoms unknown_atoms) const
 {
     const size_t sparse_keys_size = sparse_key_indices.size();
 
@@ -5622,7 +5629,7 @@ BoolMask KeyCondition::checkInRange(
         key_bounds,
         [&](const Hyperrectangle & key_ranges_hyperrectangle)
         {
-            return checkInHyperrectangle(key_col_to_sparse_pos, key_ranges_hyperrectangle, sparse_data_types);
+            return checkInHyperrectangle(key_col_to_sparse_pos, key_ranges_hyperrectangle, sparse_data_types, unknown_atoms);
         });
 }
 
@@ -6244,13 +6251,79 @@ bool KeyCondition::mayReadNullKeyValue(
     return false;
 }
 
+namespace
+{
+
+/// For every element of the RPN, whether it is evaluated under an odd number of `FUNCTION_NOT` operators.
+/// The operands of an element precede it in the RPN, so the walk starts at the root (the last element) and
+/// goes backwards, handing every element the parity it inherits from the operators above it.
+template <typename Negated>
+void collectNegatedRPNElements(const KeyCondition::RPN & rpn, Negated & negated)
+{
+    negated.assign(rpn.size(), false);
+
+    /// The parities owed to the elements still to be visited, the one of the next element on top.
+    absl::InlinedVector<bool, 16> pending;
+    pending.push_back(false);
+
+    for (size_t i = rpn.size(); i > 0;)
+    {
+        --i;
+        chassert(!pending.empty());
+
+        const bool is_negated = pending.back();
+        pending.pop_back();
+        negated[i] = is_negated;
+
+        switch (rpn[i].function)
+        {
+            case KeyCondition::RPNElement::FUNCTION_NOT:
+                pending.push_back(!is_negated);
+                break;
+            case KeyCondition::RPNElement::FUNCTION_AND:
+            case KeyCondition::RPNElement::FUNCTION_OR:
+                pending.push_back(is_negated);
+                pending.push_back(is_negated);
+                break;
+            default:
+                break;
+        }
+    }
+
+    chassert(pending.empty());
+}
+
+/// The mask of the atom at RPN position `idx` that the analysis cannot evaluate. `negated` is consulted only when
+/// unknown atoms are assumed true and has to be filled by `collectNegatedRPNElements` in that case.
+template <typename Negated>
+BoolMask unknownAtomMask(KeyCondition::UnknownAtoms unknown_atoms, const Negated & negated, size_t idx)
+{
+    if (unknown_atoms == KeyCondition::UnknownAtoms::Strict)
+        return BoolMask(true, true);
+
+    /// The atom is assumed true after the `not` operators above it are applied, so a negated atom is assumed false.
+    /// For an operand of `and` and `or` this leaves `can_be_true` as it is in the strict mode, because both
+    /// operators compute it from the `can_be_true` of their operands only.
+    return negated[idx] ? BoolMask(false, true) : BoolMask(true, false);
+}
+
+}
+
 BoolMask KeyCondition::checkInHyperrectangle(
     const Hyperrectangle & hyperrectangle,
     const DataTypes & data_types,
     const ColumnIndexToBloomFilter & column_index_to_column_bf,
-    const UpdatePartialDisjunctionResultFn & update_partial_disjunction_result_fn) const
+    const UpdatePartialDisjunctionResultFn & update_partial_disjunction_result_fn,
+    UnknownAtoms unknown_atoms) const
 {
+    /// The callback reports the plain truth of every atom, which the assumption about unknown atoms would distort.
+    chassert(!update_partial_disjunction_result_fn || unknown_atoms == UnknownAtoms::Strict);
+
     absl::InlinedVector<BoolMask, 16> rpn_stack;
+
+    absl::InlinedVector<bool, 16> negated;
+    if (unknown_atoms == UnknownAtoms::AssumeTrue)
+        collectNegatedRPNElements(rpn, negated);
 
     auto curve_type = [&](size_t key_column_pos)
     {
@@ -6260,18 +6333,19 @@ BoolMask KeyCondition::checkInHyperrectangle(
         return SpaceFillingCurveType::Unknown;
     };
 
-    size_t element_idx = 0;
-    for (const auto & element : rpn)
+    for (size_t element_idx = 0; element_idx < rpn.size(); ++element_idx)
     {
+        const auto & element = rpn[element_idx];
+
         if (element.argument_num_of_space_filling_curve.has_value())
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
             /// we cannot process it.
-            rpn_stack.emplace_back(true, true);
+            rpn_stack.push_back(unknownAtomMask(unknown_atoms, negated, element_idx));
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            rpn_stack.emplace_back(true, true);
+            rpn_stack.push_back(unknownAtomMask(unknown_atoms, negated, element_idx));
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
                  || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)
@@ -6668,10 +6742,7 @@ BoolMask KeyCondition::checkInHyperrectangle(
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected function type in KeyCondition::RPNElement");
 
         if (update_partial_disjunction_result_fn)
-        {
             update_partial_disjunction_result_fn(element_idx, rpn_stack.back().can_be_true, (element.function == RPNElement::FUNCTION_UNKNOWN));
-            ++element_idx;
-        }
     }
 
     if (rpn_stack.size() != 1)
@@ -6686,9 +6757,14 @@ BoolMask KeyCondition::checkInHyperrectangle(
 BoolMask KeyCondition::checkInHyperrectangle(
     const std::vector<int> & key_col_to_sparse_pos,
     const Hyperrectangle & sparse_hyperrectangle,
-    const DataTypes & sparse_data_types) const
+    const DataTypes & sparse_data_types,
+    UnknownAtoms unknown_atoms) const
 {
     absl::InlinedVector<BoolMask, 16> rpn_stack;
+
+    absl::InlinedVector<bool, 16> negated;
+    if (unknown_atoms == UnknownAtoms::AssumeTrue)
+        collectNegatedRPNElements(rpn, negated);
 
     auto get_sparse_info = [&](size_t key_column) -> std::pair<bool, size_t>
     {
@@ -6705,17 +6781,19 @@ BoolMask KeyCondition::checkInHyperrectangle(
         return SpaceFillingCurveType::Unknown;
     };
 
-    for (const auto & element : rpn)
+    for (size_t element_idx = 0; element_idx < rpn.size(); ++element_idx)
     {
+        const auto & element = rpn[element_idx];
+
         if (element.argument_num_of_space_filling_curve.has_value())
         {
             /// If a condition on argument of a space filling curve wasn't collapsed into FUNCTION_ARGS_IN_HYPERRECTANGLE,
             /// we cannot process it.
-            rpn_stack.emplace_back(true, true);
+            rpn_stack.push_back(unknownAtomMask(unknown_atoms, negated, element_idx));
         }
         else if (element.function == RPNElement::FUNCTION_UNKNOWN)
         {
-            rpn_stack.emplace_back(true, true);
+            rpn_stack.push_back(unknownAtomMask(unknown_atoms, negated, element_idx));
         }
         else if (element.function == RPNElement::FUNCTION_IN_RANGE
               || element.function == RPNElement::FUNCTION_NOT_IN_RANGE)
