@@ -647,3 +647,43 @@ TEST(GenericExclusionSearch, ConservativeOracle)
                 EXPECT_TRUE(matching[mark]);
     }
 }
+
+TEST(GenericExclusionSearch, UnknownResultAcceptedWhole)
+{
+    /// The key part of the condition holds on the first and on the last quarter of the marks and fails
+    /// on the second one; the other operand cannot be evaluated at all (`BoolMask::unknown`).
+    const size_t num_marks = 64;
+    std::vector<bool> key_matching(num_marks);
+    for (size_t mark = 0; mark != num_marks; ++mark)
+        key_matching[mark] = mark < 16 || mark >= 32;
+    auto key_part = oracleFromFlags(key_matching);
+    const BoolMask unknown(true, true, /*unknown=*/ true);
+
+    GenericExclusionSearchSettings settings{.coarse_index_granularity = 8, .max_steps = 0, .min_marks_for_seek = 0};
+
+    /// `and(key, unknown)`: a range where the key part holds is unknown as a whole. No subrange of it
+    /// could be excluded, so it is accepted at once instead of being split down to single marks.
+    MarkRangeCheck conjunction = [&](const MarkRange & range) { return key_part(range) & unknown; };
+    auto result = genericExclusionSearch(makeRanges({{0, num_marks}}), conjunction, settings, false);
+    EXPECT_EQ(result.ranges, makeRanges({{0, 16}, {32, num_marks}}));
+    /// The root is split into eight ranges of eight marks, each of which is excluded or accepted whole.
+    EXPECT_EQ(result.num_steps, 9u);
+
+    /// An unknown range is never exact, and while exact ranges are collected the search does not stop
+    /// on it: the accepted marks are the same, but they are found mark by mark.
+    auto with_exact = genericExclusionSearch(makeRanges({{0, num_marks}}), conjunction, settings, true);
+    EXPECT_EQ(with_exact.ranges, result.ranges);
+    EXPECT_TRUE(with_exact.exact_ranges.empty());
+    EXPECT_GT(with_exact.num_steps, result.num_steps);
+
+    /// `or(key, unknown)` can be true anywhere, so nothing is excluded and the whole extent is accepted
+    /// in one step. The subranges where the key part holds are exact, and only the split finds them.
+    MarkRangeCheck disjunction = [&](const MarkRange & range) { return key_part(range) | unknown; };
+    result = genericExclusionSearch(makeRanges({{0, num_marks}}), disjunction, settings, false);
+    EXPECT_EQ(result.ranges, makeRanges({{0, num_marks}}));
+    EXPECT_EQ(result.num_steps, 1u);
+
+    with_exact = genericExclusionSearch(makeRanges({{0, num_marks}}), disjunction, settings, true);
+    EXPECT_EQ(with_exact.ranges, makeRanges({{0, num_marks}}));
+    EXPECT_EQ(with_exact.exact_ranges, makeRanges({{0, 16}, {32, num_marks}}));
+}

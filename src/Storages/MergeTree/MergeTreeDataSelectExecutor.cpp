@@ -2327,8 +2327,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
     std::vector<FieldRef> part_offset_left(2);
     std::vector<FieldRef> part_offset_right(2);
 
-    auto check_in_range = [&](
-        const MarkRange & range, BoolMask initial_mask = {}, KeyCondition::UnknownAtoms unknown_atoms = KeyCondition::UnknownAtoms::Strict)
+    auto check_in_range = [&](const MarkRange & range, BoolMask initial_mask = {})
     {
         auto check_key_condition = [&]() -> BoolMask
         {
@@ -2393,8 +2392,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                     sparse_key_types,
                     equal_boundaries_mask,
                     initial_mask,
-                    &index_bounds,
-                    unknown_atoms);
+                    &index_bounds);
             }
 
             if (range.end == marks_count)
@@ -2433,8 +2431,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
                     }
                 }
             }
-            return key_condition.checkInRange(
-                used_key_size, index_left.data(), index_right.data(), key_types, initial_mask, &index_bounds, unknown_atoms);
+            return key_condition.checkInRange(used_key_size, index_left.data(), index_right.data(), key_types, initial_mask, &index_bounds);
         };
 
         auto check_part_offset_condition = [&]()
@@ -2454,7 +2451,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
             part_offset_right[1] = part->name;
 
             return part_offset_condition->checkInRange(
-                2, part_offset_left.data(), part_offset_right.data(), part_offset_types, initial_mask, /*key_bounds=*/ nullptr, unknown_atoms);
+                2, part_offset_left.data(), part_offset_right.data(), part_offset_types, initial_mask);
         };
 
         auto check_total_offset_condition = [&]()
@@ -2470,7 +2467,7 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
             part_offset_left[0] = begin + part_starting_offset_in_query;
             part_offset_right[0] = end + part_starting_offset_in_query;
             return total_offset_condition->checkInRange(
-                1, part_offset_left.data(), part_offset_right.data(), part_offset_types, initial_mask, /*key_bounds=*/ nullptr, unknown_atoms);
+                1, part_offset_left.data(), part_offset_right.data(), part_offset_types, initial_mask);
         };
 
         BoolMask result(true, false);
@@ -2512,17 +2509,9 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
             .min_marks_for_seek = min_marks_for_seek,
         };
 
-        /// The search splits a range until the condition is either impossible or certain on it. An atom that
-        /// the key analysis cannot evaluate (e.g. a condition on a non-key column) is never certain, so with
-        /// such an atom every range that may match would be split down to single marks, although the atom
-        /// cannot exclude any of them. Assuming unknown atoms true stops the split once the key part of the
-        /// condition is certain; the excluded ranges stay the same. The assumption is not compatible with exact
-        /// ranges, which promise that every row matches the whole condition.
-        const auto unknown_atoms = exact_ranges ? KeyCondition::UnknownAtoms::Strict : KeyCondition::UnknownAtoms::AssumeTrue;
-
         auto search_result = genericExclusionSearch(
             part_ranges,
-            [&](const MarkRange & mark_range) { return check_in_range(mark_range, BoolMask(), unknown_atoms); },
+            [&](const MarkRange & mark_range) { return check_in_range(mark_range, BoolMask()); },
             search_settings,
             exact_ranges != nullptr);
 

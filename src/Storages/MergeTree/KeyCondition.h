@@ -133,30 +133,13 @@ public:
     /// granule is computed in MergeTreeDataSelectExecutor::mergePartialResultsForDisjunctions()
     using UpdatePartialDisjunctionResultFn = std::function<void (size_t position, bool result, bool is_unknown)>;
 
-    /// How the atoms that the analysis cannot evaluate (`FUNCTION_UNKNOWN`, e.g. a condition on a column that is
-    /// not part of the key) contribute to the result of `checkInRange` and `checkInHyperrectangle`.
-    enum class UnknownAtoms : uint8_t
-    {
-        /// An unknown atom can be both true and false in every key range. `and(range, unknown)` is therefore never
-        /// "definitely true": `can_be_false` is reliable and may be used to collect exact ranges.
-        Strict,
-        /// An unknown atom is assumed true, as if it were not part of the condition (a negated atom is assumed
-        /// false, so that its negation is true). The `can_be_true` component is the same as in `Strict`, so the
-        /// key ranges that can be excluded do not change. The `can_be_false` component only tells whether the part
-        /// of the condition that the key analysis can evaluate holds on the whole range, and it stays false on
-        /// every subrange of such a range. It must not be used to claim that every row of the range matches the
-        /// condition, i.e. for exact ranges. Used by the generic exclusion search to stop splitting a range as
-        /// soon as no subrange of it could be excluded.
-        AssumeTrue,
-    };
-
     /// Whether the condition and its negation are feasible in the direct product of single column ranges specified by `hyperrectangle`.
+    /// A result that depends only on atoms the analysis cannot evaluate (`FUNCTION_UNKNOWN`) is marked with `BoolMask::unknown`.
     BoolMask checkInHyperrectangle(
         const Hyperrectangle & hyperrectangle,
         const DataTypes & data_types,
         const ColumnIndexToBloomFilter & column_index_to_column_bf = {},
-        const UpdatePartialDisjunctionResultFn & update_partial_disjunction_result_fn = nullptr,
-        UnknownAtoms unknown_atoms = UnknownAtoms::Strict) const;
+        const UpdatePartialDisjunctionResultFn & update_partial_disjunction_result_fn = nullptr) const;
 
     /// Optimized overload. Instead of all/prefix of key columns, any subsequence of key column information (in order) can be given.
     /// `key_col_to_sparse_pos` maps key index to position in `sparse_hyperrectangle`, or -1 if not tracked.
@@ -165,8 +148,7 @@ public:
     BoolMask checkInHyperrectangle(
         const std::vector<int> & key_col_to_sparse_pos,
         const Hyperrectangle & sparse_hyperrectangle,
-        const DataTypes & sparse_data_types,
-        UnknownAtoms unknown_atoms = UnknownAtoms::Strict) const;
+        const DataTypes & sparse_data_types) const;
 
     /// Whether the condition and its negation are (independently) feasible in the key range.
     /// left_key and right_key must contain all fields in the sort_descr in the appropriate order.
@@ -175,15 +157,13 @@ public:
     /// one of the resulting mask components (see BoolMask::consider_only_can_be_XXX).
     /// key_bounds - optional per-column bounds the key values are known to lie within (e.g. the part's
     /// partition minmax). A key without a bound defaults to (-inf, +inf).
-    /// unknown_atoms - see `UnknownAtoms`.
     BoolMask checkInRange(
         size_t key_size,
         const FieldRef * left_keys,
         const FieldRef * right_keys,
         const DataTypes & data_types,
         BoolMask initial_mask = BoolMask(false, false),
-        const Hyperrectangle * key_bounds = nullptr,
-        UnknownAtoms unknown_atoms = UnknownAtoms::Strict) const;
+        const Hyperrectangle * key_bounds = nullptr) const;
 
     /// Optimized overload. Instead of all/prefix of key columns, any subsequence of key column information (in order) can be given.
     /// However, `equal_boundaries_mask` must have the information about all/prefix keys. `equal_boundaries_mask` specifies whether ith key's
@@ -208,8 +188,7 @@ public:
         const DataTypes & sparse_data_types,
         const std::vector<UInt8> & equal_boundaries_mask,
         BoolMask initial_mask,
-        const Hyperrectangle * key_bounds = nullptr,
-        UnknownAtoms unknown_atoms = UnknownAtoms::Strict) const;
+        const Hyperrectangle * key_bounds = nullptr) const;
 
     const KeyOrder & getKeyOrder() const { return key_order; }
 
