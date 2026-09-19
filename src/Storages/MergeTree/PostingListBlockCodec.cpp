@@ -1,7 +1,9 @@
 #include <Storages/MergeTree/PostingListBlockCodec.h>
 
+#include <Compression/PFor.h>
 #include <Storages/MergeTree/BitpackingBlockCodec.h>
 #include <Common/Exception.h>
+#include <Common/PODArray.h>
 
 namespace DB
 {
@@ -32,7 +34,7 @@ namespace
     class BitpackingPostingListBlockCodec : public IPostingListBlockCodec
     {
     public:
-        size_t encodeBlock(std::span<uint32_t> deltas, std::string & out) override
+        size_t encodeBlock(std::span<uint32_t> deltas, PODArray<char> & out) override
         {
             auto [needed_bytes_without_header, max_bits] = BitpackingBlockCodec::calculateNeededBytesAndMaxBits(deltas);
             size_t needed_bytes_with_header = needed_bytes_without_header + 1;
@@ -59,7 +61,7 @@ namespace
             return needed_bytes_with_header;
         }
 
-        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) override
+        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out, uint32_t base) override
         {
             if (in.empty())
                 throw Exception(ErrorCodes::CORRUPTED_DATA, "Corrupted data: expected at least {} bytes, but got {}", 1, in.size());
@@ -81,6 +83,9 @@ namespace
                 bits,
                 consumed_size);
 
+            /// Restore absolute row ids from the unpacked gaps.
+            PFor::applyDelta<uint32_t>(out.data(), static_cast<unsigned>(count), PFor::Delta::d0, base);
+
             /// Total bytes consumed from `in`: the bits byte plus the bit-packed payload.
             return 1 + consumed_size;
         }
@@ -89,6 +94,53 @@ namespace
         size_t maxBlockBytes() const override { return 1 + sizeof(uint32_t) * BLOCK_SIZE + 16; }
 
         IPostingListCodec::Type type() const override { return IPostingListCodec::Type::Bitpacking; }
+    };
+
+    /// One PFor block over gaps `SegmentedPostingListCodec` already computed, hence `Delta::none` on encode. Decode runs
+    /// as `Delta::d0` from the caller's base so the absolute row ids come out of the same pass: exception-free full blocks
+    /// take the fused unpack + prefix-sum path, the rest get the SIMD `deltaApply` after patching.
+    class PForPostingListBlockCodec : public IPostingListBlockCodec
+    {
+    public:
+        size_t encodeBlock(std::span<uint32_t> deltas, PODArray<char> & out) override
+        {
+            /// `MAX_BLOCK_BYTES` bounds one block, so an oversized input would overrun the reserved tail.
+            if (deltas.empty() || deltas.size() > BLOCK_SIZE)
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "PFor block must hold 1 to {} values, got {}", BLOCK_SIZE, deltas.size());
+
+            /// The encoded size is only known afterwards; `PODArray::resize` does not zero-fill, so grow to the bound and shrink.
+            const size_t offset = out.size();
+            out.resize(offset + MAX_BLOCK_BYTES);
+            const size_t written = PFor::encodeBlocks<uint32_t>(deltas, PFor::Delta::none, reinterpret_cast<uint8_t *>(out.data() + offset));
+            chassert(written > 0 && written <= MAX_BLOCK_BYTES);
+            out.resize(offset + written);
+            return written;
+        }
+
+        size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out, uint32_t base) override
+        {
+            chassert(count > 0 && count <= BLOCK_SIZE && count <= out.size());
+            const auto * data = reinterpret_cast<const uint8_t *>(in.data());
+
+            /// `count` is never zero here, so a zero return means malformed input, not an empty block.
+            uint32_t prev = base;
+            const size_t consumed = PFor::decodeBlock<uint32_t>(
+                data, static_cast<unsigned>(count), PFor::Delta::d0, out.data(), prev, data + in.size());
+            if (consumed == 0)
+                throw Exception(ErrorCodes::CORRUPTED_DATA,
+                    "Corrupted data: malformed PFor block of {} values in {} available bytes", count, in.size());
+
+            in = in.subspan(consumed);
+            return consumed;
+        }
+
+        size_t maxBlockBytes() const override { return MAX_BLOCK_BYTES; }
+
+        IPostingListCodec::Type type() const override { return IPostingListCodec::Type::PFor; }
+
+    private:
+        static constexpr size_t MAX_BLOCK_BYTES = PFor::maxCompressedBytes<uint32_t>(BLOCK_SIZE);
     };
 
 }
@@ -101,6 +153,8 @@ std::unique_ptr<IPostingListBlockCodec> createPostingListBlockCodec(IPostingList
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Posting list codec 'None' has no per-block codec");
         case IPostingListCodec::Type::Bitpacking:
             return std::make_unique<BitpackingPostingListBlockCodec>();
+        case IPostingListCodec::Type::PFor:
+            return std::make_unique<PForPostingListBlockCodec>();
     }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown posting list codec type: {}", static_cast<int>(type));

@@ -1,7 +1,10 @@
 #pragma once
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/TextIndexPostingsApplier.h>
 #include <absl/container/flat_hash_map.h>
+
+#include <span>
 
 namespace DB
 {
@@ -17,10 +20,12 @@ public:
     public:
         explicit ReadableRows(std::vector<RowsRange> ranges_);
         std::optional<RowsRange> clipRowsRange(const RowsRange & rows_range) const;
-        PostingList clipPostings(const PostingList & postings);
-        size_t getSizeInBytes() const;
+        const std::vector<RowsRange> & getRanges() const { return ranges; }
+        /// The same rows as a bitmap of run containers, built on the first call. Used to clip uncompressed posting lists.
+        const PostingList & getBitmap();
 
     private:
+        /// Sorted and disjoint.
         std::vector<RowsRange> ranges;
         PostingList ranges_bitmap;
     };
@@ -35,8 +40,14 @@ public:
         TokenToPostingsInfosMap tokens;
         /// Row range folded across observed tokens by the query search mode (intersect for `All`, union for `Any`).
         std::optional<RowsRange> rows_range;
-        /// Posting list folded across materialized tokens by the query search mode.
-        std::optional<PostingList> postings;
+
+        /// Posting list folded across materialized tokens by the query search mode (intersection for `All` and
+        /// `Phrase`, union for `Any`), clipped to the readable rows. At most one representation is set:
+        /// `postings_array` holds the intersection of block-compressed posting lists, a sorted array of unique row
+        /// ids that never grows beyond the rarest folded token and that the reader iterates in place; `postings_bitmap`
+        /// holds unions, and intersections of uncompressed posting lists, which are bitmaps on disk already.
+        std::shared_ptr<PaddedPODArray<UInt32>> postings_array;
+        std::optional<PostingList> postings_bitmap;
 
         /// Query can never match (e.g. missing token in `All` mode, empty intersection).
         bool is_failed = false;
@@ -44,7 +55,7 @@ public:
         bool is_bypassed = false;
         /// The dictionary scan stopped early, so the matched tokens are incomplete and nothing can be pruned.
         bool is_analysis_incomplete = false;
-        /// Number of tokens whose posting list has already been folded into `postings`.
+        /// Number of tokens whose posting list has already been folded.
         size_t num_read_postings = 0;
         /// Declared tokens (`query->getTokens`) that may still contribute to an `Any` query.
         size_t num_live_tokens = 0;
@@ -54,8 +65,28 @@ public:
         void addMissingToken(std::string_view token);
         void addTokenInfo(std::string_view token, TokenPostingsInfoPtr token_info, RowsRange token_rows_range);
         void addRowsRange(RowsRange token_rows_range);
-        void addPostings(const PostingList & token_postings);
         bool needReadPostings() const { return num_read_postings < tokens.size(); }
+
+        /// True if the posting list of at least one token has been folded.
+        bool hasPostings() const { return postings_array || postings_bitmap; }
+        /// True if the folded posting list has no rows. Constant time, unlike `getPostingsCardinality` for a bitmap.
+        bool hasEmptyPostings() const;
+        size_t getPostingsCardinality() const;
+        /// True if the folded posting list has a row in the closed range.
+        bool hasPostingsInRange(const RowsRange & range) const;
+        /// The folded posting list clipped to the closed range.
+        PostingList getPostingsInRange(const RowsRange & range) const;
+        PostingList getPostingsAsBitmap() const;
+    };
+
+    /// Plan for folding the posting list of a token into every active query that references it.
+    struct PostingsApplyPlan
+    {
+        PostingsApplyTargets targets;
+        /// Query hashes parallel to `targets.intersect`, `targets.intersect_bitmaps` and `targets.unite`.
+        std::vector<UInt128> intersect_queries;
+        std::vector<UInt128> intersect_bitmap_queries;
+        std::vector<UInt128> unite_queries;
     };
 
     explicit TextIndexAnalyzer(const MergeTreeIndexConditionText & condition_text);
@@ -72,7 +103,22 @@ public:
 
     void addMissingToken(std::string_view token);
     void addTokenInfo(std::string_view token, TokenPostingsInfoPtr token_info);
-    void addPostings(std::string_view token, const PostingList & postings);
+
+    /// Sets the codec of the posting lists of the granule. Intersections of block-compressed posting lists are
+    /// folded into arrays, which lets the reading skip packed blocks; uncompressed posting lists are bitmaps
+    /// already and are folded with bitmap operations. Must be called before any posting list is folded.
+    void setPostingsCodecType(IPostingListCodec::Type codec_type);
+
+    /// Returns the targets that the posting list of `token` must be folded into while it is read.
+    /// The targets are empty when no active query needs the token.
+    PostingsApplyPlan planApplyPostings(std::string_view token);
+    /// Completes the fold after the posting list of `token` has been applied to `plan.targets`: marks the token
+    /// as read, fails the `All` queries whose intersection became empty and treats the token as missing
+    /// for the `Any` queries it contributed no readable row to.
+    void finishApplyPostings(std::string_view token, const PostingsApplyPlan & plan);
+    /// Folds an already deserialized posting list of `token` (embedded, raw or uncompressed).
+    void applyPostings(std::string_view token, std::span<const UInt32> sorted_postings);
+    void applyPostings(std::string_view token, const PostingList & postings);
 
     /// Pushes the row ranges still readable after the analysis of the primary key and prior skip indexes.
     void setReadableRows(std::vector<RowsRange> readable_ranges);
@@ -94,6 +140,10 @@ private:
     template <typename Operation>
     void processTokenOperation(std::string_view token, Operation && operation);
 
+    /// Detaches a query that has just failed from its tokens. One failed query in `All` global
+    /// mode proves the whole conjunction false in this part, so it fails all the other queries too.
+    void handleFailedQuery(const UInt128 & query_hash, const QueryBuilder & query_builder);
+
     /// Removes the query from `queries_by_token` for all affected tokens, so they stop passing `isTokenNeeded`.
     void detachQueryFromTokens(const UInt128 & query_hash, const QueryBuilder & query_builder);
 
@@ -106,6 +156,8 @@ private:
     /* Fields built in the constructor from MergeTreeIndexConditionText. */
 
     TextSearchMode global_search_mode;
+    /// True if the intersections are folded into sorted arrays (block-compressed posting lists), false for bitmaps.
+    bool fold_intersections_into_arrays = false;
     /// One builder per parsed query, keyed by the query's stable hash.
     absl::flat_hash_map<UInt128, QueryBuilder> query_builders;
     /// Active queries that still depend on a given token.

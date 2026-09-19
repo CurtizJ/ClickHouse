@@ -1,32 +1,35 @@
 #pragma once
 
 #include <Storages/MergeTree/IPostingListCodec.h>
+#include <Common/PODArray_fwd.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
-#include <string>
 
 namespace DB
 {
 
 /// Per-block payload codec for the segmented posting-list framework (see SegmentedPostingListCodec).
 ///
-/// Encodes / decodes ONE block (1..BLOCK_SIZE delta values) including any codec-specific framing.
+/// Encodes / decodes ONE block (1..BLOCK_SIZE row ids stored as gaps) including any codec-specific framing.
 /// The surrounding segment / Index Section layout is identical across codecs; only the per-block payload differs:
 ///   - Bitpacking: [1 byte bits][bitpacked payload]
+///   - PFor:  [PFor block]
 class IPostingListBlockCodec
 {
 public:
     virtual ~IPostingListBlockCodec() = default;
 
     /// Append one encoded block of `deltas` (1..BLOCK_SIZE values) to `out`. Returns the number of bytes appended.
-    virtual size_t encodeBlock(std::span<uint32_t> deltas, std::string & out) = 0;
+    virtual size_t encodeBlock(std::span<uint32_t> deltas, PODArray<char> & out) = 0;
 
-    /// Decode one block of `count` (1..BLOCK_SIZE) delta values from `in` into `out` (which must hold at least
-    /// `count` slots), advancing `in` past the consumed bytes. Returns the number of bytes consumed.
-    virtual size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out) = 0;
+    /// Decode one block of `count` (1..BLOCK_SIZE) row ids from `in` into `out` (which must hold at least `count`
+    /// slots), advancing `in` past the consumed bytes. The block stores gaps; `base` is the row id preceding the
+    /// block, and the decoded values are absolute: `out[0] = base + gap[0]`, `out[i] = out[i - 1] + gap[i]`.
+    /// Returns the number of bytes consumed.
+    virtual size_t decodeBlock(std::span<const std::byte> & in, size_t count, std::span<uint32_t> out, uint32_t base) = 0;
 
     /// Upper bound on the encoded size of one block (1..BLOCK_SIZE delta values), in bytes.
     virtual size_t maxBlockBytes() const = 0;

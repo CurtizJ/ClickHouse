@@ -455,17 +455,11 @@ bool queryMayBeTrueInRange(
     if (!query_builder.rows_range->intersectWith(*current_range))
         return false;
 
-    if (!query_builder.postings.has_value())
+    if (!query_builder.hasPostings())
         return true;
 
     if (search_mode == TextSearchMode::All || !query_builder.needReadPostings())
-    {
-        /// An allocation-free check that the folded posting list has a value in the closed range of rows.
-        return roaring::api::roaring_bitmap_intersect_with_range(
-            &query_builder.postings->roaring,
-            current_range->begin,
-            static_cast<UInt64>(current_range->end) + 1);
-    }
+        return query_builder.hasPostingsInRange(*current_range);
 
     return true;
 }

@@ -15,7 +15,7 @@ using detail::BLOCK;
 
 /// Worst-case compressed byte count for `count` values of type T.
 template <typename T>
-inline size_t maxCompressedBytes(size_t count) noexcept
+inline constexpr size_t maxCompressedBytes(size_t count) noexcept
 {
     return sizeof(T) * count + 2 * (count / BLOCK + 1) + 16;
 }
@@ -32,6 +32,27 @@ template <typename T>
 inline size_t decodeBlocks(const uint8_t * in, size_t count, Delta mode, T * out, const uint8_t * end = nullptr) noexcept
 {
     return detail::bulkDecode<T>(in, count, mode, out, end);
+}
+
+/// Decode one block of `count` (1..BLOCK) values, threading the delta carry through `prev`: the value preceding the
+/// block on input, the block's last value on output (untouched for Delta::none). Returns bytes consumed; 0 on corrupt
+/// input when `end` is set.
+template <typename T>
+inline size_t decodeBlock(const uint8_t * in, unsigned count, Delta mode, T * out, T & prev, const uint8_t * end = nullptr) noexcept
+{
+    chassert(count > 0 && count <= BLOCK);
+    return detail::blockDecode<T>(in, count, out, mode, prev, end);
+}
+
+/// Reconstruct absolute values in place from residuals of `mode` (a no-op for Delta::none), threading the running
+/// carry through `prev`.
+template <typename T>
+inline void applyDelta(T * out, unsigned count, Delta mode, T & prev) noexcept
+{
+    if (mode == Delta::d1)
+        detail::deltaApply<T, 1>(out, count, prev);
+    else if (mode == Delta::d0)
+        detail::deltaApply<T, 0>(out, count, prev);
 }
 
 /// Self-describing compress into a caller buffer (>= maxCompressedBytes<T>): [varint count][u8 flags][block stream].

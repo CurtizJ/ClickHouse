@@ -2,6 +2,7 @@
 
 #include <Core/SettingsEnums.h>
 #include <Storages/MergeTree/IPostingListCodec.h>
+#include <Storages/MergeTree/PostingListBlockCodec.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Columns/IColumn.h>
@@ -178,6 +179,8 @@ struct SortedToken
 };
 using SortedTokens = std::vector<SortedToken>;
 struct TokenPostingsInfo;
+struct PostingListSegment;
+struct PostingsApplyTargets;
 
 /// Posting lists up to this cardinality are serialized as raw VarUInt values:
 /// the minimal size of a serialized Roaring Bitmap is 48 bytes, so tiny lists don't use it.
@@ -226,6 +229,12 @@ struct PostingsSerialization
 
     PostingListPtr deserializeToBitmap(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
     void deserializeToArray(ReadBuffer & istr, UInt64 header, UInt64 cardinality, PaddedPODArray<UInt32> & row_ids);
+
+    /// Folds a compressed segment of a posting list into `targets` while decoding it: only the packed blocks
+    /// that some target can use are decoded (see `PostingsApplyTargets`), and the rows are applied directly
+    /// to the targets instead of being materialized as a bitmap. Requires the segment to have a block index.
+    void deserializeAndApply(const PostingListSegment & segment, PostingsApplyTargets & targets);
+
     const IPostingListCodec * getPostingListCodec() const { return posting_list_codec.get(); }
 
 private:
@@ -237,6 +246,8 @@ private:
     /// Reusable buffers to avoid repeated heap allocations during serialization/deserialization.
     PaddedPODArray<UInt32> raw_postings_buffer;
     PaddedPODArray<char> raw_data_buffer;
+    /// Per-block payload codec of the segments passed to `deserializeAndApply`, reused across calls.
+    std::unique_ptr<IPostingListBlockCodec> block_codec;
 };
 
 /// Closed range of rows.

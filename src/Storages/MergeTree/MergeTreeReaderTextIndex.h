@@ -13,6 +13,8 @@
 #include <absl/container/flat_hash_set.h>
 #include <roaring/roaring.hh>
 
+#include <span>
+
 namespace DB
 {
 
@@ -79,6 +81,8 @@ private:
     void classifyVirtualColumns();
     void initializePostingStreams();
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
+    /// The same from a sorted array of row ids, of which only the rows in [row_offset, row_offset + num_rows) are filled.
+    void fillColumn(IColumn & column, std::span<const UInt32> sorted_rows, size_t row_offset, size_t num_rows);
     void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
 
     /// Fills a virtual column for an abandoned pattern query by evaluating the virtual column's

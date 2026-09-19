@@ -50,36 +50,104 @@ std::optional<RowsRange> TextIndexAnalyzer::ReadableRows::clipRowsRange(const Ro
     return clipped;
 }
 
-PostingList TextIndexAnalyzer::ReadableRows::clipPostings(const PostingList & postings)
+const PostingList & TextIndexAnalyzer::ReadableRows::getBitmap()
 {
     if (ranges_bitmap.isEmpty())
     {
-        /// Lazily build the single combined bitmap of readable rows used to clip token postings.
         /// `addRangeClosed` stores contiguous ranges as run containers, so this stays compact (O(number of ranges)).
         for (const auto & range : ranges)
             ranges_bitmap.addRangeClosed(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
     }
 
-    return postings & ranges_bitmap;
-}
-
-size_t TextIndexAnalyzer::ReadableRows::getSizeInBytes() const
-{
-    return ranges.capacity() * sizeof(RowsRange) + ranges_bitmap.getSizeInBytes();
+    return ranges_bitmap;
 }
 
 void TextIndexAnalyzer::QueryBuilder::markFailed()
 {
     is_failed = true;
-    postings.reset();
+    postings_array.reset();
+    postings_bitmap.reset();
     rows_range.reset();
     num_live_tokens = 0;
+}
+
+bool TextIndexAnalyzer::QueryBuilder::hasEmptyPostings() const
+{
+    if (postings_array)
+        return postings_array->empty();
+
+    if (postings_bitmap)
+        return postings_bitmap->isEmpty();
+
+    return true;
+}
+
+size_t TextIndexAnalyzer::QueryBuilder::getPostingsCardinality() const
+{
+    if (postings_array)
+        return postings_array->size();
+
+    if (postings_bitmap)
+        return postings_bitmap->cardinality();
+
+    return 0;
+}
+
+bool TextIndexAnalyzer::QueryBuilder::hasPostingsInRange(const RowsRange & range) const
+{
+    if (postings_array)
+    {
+        auto it = std::lower_bound(postings_array->begin(), postings_array->end(), range.begin);
+        return it != postings_array->end() && *it <= range.end;
+    }
+
+    if (postings_bitmap)
+    {
+        /// An allocation-free check that the folded posting list has a value in the closed range of rows.
+        return roaring::api::roaring_bitmap_intersect_with_range(
+            &postings_bitmap->roaring,
+            range.begin,
+            static_cast<UInt64>(range.end) + 1);
+    }
+
+    return false;
+}
+
+PostingList TextIndexAnalyzer::QueryBuilder::getPostingsInRange(const RowsRange & range) const
+{
+    if (postings_array)
+    {
+        auto begin = std::lower_bound(postings_array->begin(), postings_array->end(), range.begin);
+        auto end = std::upper_bound(begin, postings_array->end(), range.end);
+        return PostingList(static_cast<size_t>(end - begin), begin);
+    }
+
+    if (postings_bitmap)
+    {
+        /// A single run container, so the intersection touches only the containers of the range and never copies the bitmap.
+        PostingList range_bitmap;
+        range_bitmap.addRangeClosed(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
+        return *postings_bitmap & range_bitmap;
+    }
+
+    return {};
+}
+
+PostingList TextIndexAnalyzer::QueryBuilder::getPostingsAsBitmap() const
+{
+    if (postings_array)
+        return PostingList(postings_array->size(), postings_array->data());
+
+    if (postings_bitmap)
+        return *postings_bitmap;
+
+    return {};
 }
 
 void TextIndexAnalyzer::QueryBuilder::markBypassed()
 {
     is_bypassed = true;
-    /// Keep `postings` and `rows_range` for index analysis in `mayBeTrueOnGranule`.
+    /// Keep the folded postings and `rows_range` for index analysis in `mayBeTrueOnGranule`.
     /// Bypassing a query makes sense only for direct read optimization.
 }
 
@@ -136,26 +204,6 @@ void TextIndexAnalyzer::QueryBuilder::addRowsRange(RowsRange token_rows_range)
     }
 }
 
-void TextIndexAnalyzer::QueryBuilder::addPostings(const PostingList & token_postings)
-{
-    if (is_failed)
-        return;
-
-    ++num_read_postings;
-
-    if (!postings)
-        postings = token_postings;
-    else if (query->getSearchMode() == TextSearchMode::Any)
-        *postings |= token_postings;
-    else
-        *postings &= token_postings;
-
-    /// `All` mode fails as soon as the running intersection of readable postings becomes empty.
-    bool need_all_tokens = query->getSearchMode() == TextSearchMode::All || query->getSearchMode() == TextSearchMode::Phrase;
-    if (need_all_tokens && postings->isEmpty())
-        markFailed();
-}
-
 TextIndexAnalyzer::TextIndexAnalyzer(const MergeTreeIndexConditionText & condition_text)
 {
     global_search_mode = condition_text.getGlobalSearchMode();
@@ -185,6 +233,12 @@ const TextIndexAnalyzer::QueryBuilder & TextIndexAnalyzer::getQueryBuilder(const
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Query builder not found for text search query with function '{}'", query.getFunctionName());
 
     return it->second;
+}
+
+void TextIndexAnalyzer::setPostingsCodecType(IPostingListCodec::Type codec_type)
+{
+    chassert(tokens_with_postings.empty());
+    fold_intersections_into_arrays = codec_type != IPostingListCodec::Type::None;
 }
 
 void TextIndexAnalyzer::addMissingToken(std::string_view token)
@@ -230,42 +284,152 @@ void TextIndexAnalyzer::addTokenInfo(std::string_view token, TokenPostingsInfoPt
 
     if (!token_info->embedded_postings.empty())
     {
-        PostingList embedded(token_info->embedded_postings.size(), token_info->embedded_postings.data());
-        addPostings(token, embedded);
+        applyPostings(token, std::span<const UInt32>(token_info->embedded_postings.data(), token_info->embedded_postings.size()));
         ProfileEvents::increment(ProfileEvents::TextIndexUsedEmbeddedPostings);
     }
 }
 
-void TextIndexAnalyzer::addPostings(std::string_view token, const PostingList & postings)
+TextIndexAnalyzer::PostingsApplyPlan TextIndexAnalyzer::planApplyPostings(std::string_view token)
 {
-    tokens_with_postings.emplace(token);
+    PostingsApplyPlan plan;
 
-    /// Clip the postings to the readable rows once.
-    std::optional<PostingList> clipped_postings;
-    const auto * postings_ptr = &postings;
+    auto it = queries_by_token.find(token);
+    if (it == queries_by_token.end())
+        return plan;
 
     if (readable_rows)
     {
-        clipped_postings = readable_rows->clipPostings(postings);
-
-        if (clipped_postings->isEmpty())
-        {
-            processTokenOperation(token, [&](QueryBuilder & query_builder)
-            {
-                query_builder.addMissingToken(token);
-            });
-
-            queries_by_token.erase(token);
-            return;
-        }
-
-        postings_ptr = &*clipped_postings;
+        plan.targets.readable_ranges = &readable_rows->getRanges();
+        plan.targets.readable_bitmap = &readable_rows->getBitmap();
     }
 
-    processTokenOperation(token, [&](QueryBuilder & query_builder)
+    for (const auto & query_hash : it->second)
     {
-        query_builder.addPostings(*postings_ptr);
-    });
+        auto & query_builder = query_builders.at(query_hash);
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        if (query_builder.query->getSearchMode() == TextSearchMode::Any)
+        {
+            if (!query_builder.postings_bitmap)
+                query_builder.postings_bitmap.emplace();
+
+            plan.targets.unite.push_back({.postings = &*query_builder.postings_bitmap});
+            plan.unite_queries.push_back(query_hash);
+        }
+        else if (fold_intersections_into_arrays)
+        {
+            bool initialized = query_builder.postings_array != nullptr;
+            if (!initialized)
+                query_builder.postings_array = std::make_shared<PaddedPODArray<UInt32>>();
+
+            plan.targets.intersect.push_back({.rows = query_builder.postings_array.get(), .initialized = initialized});
+            plan.intersect_queries.push_back(query_hash);
+        }
+        else
+        {
+            bool initialized = query_builder.postings_bitmap.has_value();
+            if (!initialized)
+                query_builder.postings_bitmap.emplace();
+
+            plan.targets.intersect_bitmaps.push_back({.postings = &*query_builder.postings_bitmap, .initialized = initialized});
+            plan.intersect_bitmap_queries.push_back(query_hash);
+        }
+    }
+
+    return plan;
+}
+
+void TextIndexAnalyzer::finishApplyPostings(std::string_view token, const PostingsApplyPlan & plan)
+{
+    tokens_with_postings.emplace(token);
+
+    for (size_t i = 0; i < plan.intersect_queries.size(); ++i)
+    {
+        const auto & query_hash = plan.intersect_queries[i];
+        auto & query_builder = query_builders.at(query_hash);
+
+        /// A query failed earlier in this loop (through `markAllQueriesFailed`) is already detached.
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        ++query_builder.num_read_postings;
+
+        /// `All` mode fails as soon as the running intersection of readable postings becomes empty.
+        if (query_builder.postings_array->empty())
+            query_builder.markFailed();
+
+        handleFailedQuery(query_hash, query_builder);
+    }
+
+    for (size_t i = 0; i < plan.intersect_bitmap_queries.size(); ++i)
+    {
+        const auto & query_hash = plan.intersect_bitmap_queries[i];
+        auto & query_builder = query_builders.at(query_hash);
+
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        ++query_builder.num_read_postings;
+
+        if (query_builder.postings_bitmap->isEmpty())
+            query_builder.markFailed();
+
+        handleFailedQuery(query_hash, query_builder);
+    }
+
+    for (size_t i = 0; i < plan.unite_queries.size(); ++i)
+    {
+        const auto & query_hash = plan.unite_queries[i];
+        auto & query_builder = query_builders.at(query_hash);
+
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        if (plan.targets.unite[i].num_applied == 0)
+        {
+            /// The token has no readable rows: the same as a token missing from the dictionary.
+            /// A union never shrinks, so an empty bitmap means that nothing has been folded yet.
+            if (query_builder.postings_bitmap->isEmpty())
+                query_builder.postings_bitmap.reset();
+
+            query_builder.addMissingToken(token);
+        }
+        else
+        {
+            ++query_builder.num_read_postings;
+        }
+
+        handleFailedQuery(query_hash, query_builder);
+    }
+}
+
+void TextIndexAnalyzer::applyPostings(std::string_view token, std::span<const UInt32> sorted_postings)
+{
+    auto plan = planApplyPostings(token);
+
+    if (!plan.targets.empty())
+    {
+        PostingsApplier applier(plan.targets);
+        applier.applyRows(sorted_postings);
+        applier.finish();
+    }
+
+    finishApplyPostings(token, plan);
+}
+
+void TextIndexAnalyzer::applyPostings(std::string_view token, const PostingList & postings)
+{
+    auto plan = planApplyPostings(token);
+
+    if (!plan.targets.empty())
+    {
+        PostingsApplier applier(plan.targets);
+        applier.applyBitmap(postings);
+        applier.finish();
+    }
+
+    finishApplyPostings(token, plan);
 }
 
 void TextIndexAnalyzer::setReadableRows(std::vector<RowsRange> readable_ranges)
@@ -340,8 +504,8 @@ double TextIndexAnalyzer::estimateQueryCardinality(const QueryBuilder & query_bu
             /// |intersection| ≈ |C_read| * prod(|Ai|/n) over tokens whose postings are still unread.
             /// When no postings have been read yet, treat the read intersection as the universe (n).
             /// In log-space: log = log(|C_read|) + sum(log(|Ai|)) - num_unread * log(n).
-            double log_cardinality = query_builder.postings
-                ? std::log(static_cast<double>(query_builder.postings->cardinality()))
+            double log_cardinality = query_builder.hasPostings()
+                ? std::log(static_cast<double>(query_builder.getPostingsCardinality()))
                 : std::log(n);
 
             size_t num_unread = 0;
@@ -364,8 +528,8 @@ double TextIndexAnalyzer::estimateQueryCardinality(const QueryBuilder & query_bu
         case TextSearchMode::Any:
         {
             /// |union| ≈ n * (1 - (1 - |C_read|/n) * prod(1 - |Ai|/n)) over tokens whose postings are still unread.
-            double not_in_any = query_builder.postings
-                ? 1.0 - static_cast<double>(query_builder.postings->cardinality()) / n
+            double not_in_any = query_builder.hasPostings()
+                ? 1.0 - static_cast<double>(query_builder.getPostingsCardinality()) / n
                 : 1.0;
 
             /// A pattern query declares no tokens, it owns the ones the dictionary scan matched.
@@ -432,7 +596,7 @@ void TextIndexAnalyzer::analyzeCardinalitiesAndBypassHints(double selectivity_th
         else
         {
             /// Drop the query from `queries_by_token` so pattern discovery and `isTokenNeeded`
-            /// stop reactivating it; `postings`/`rows_range` are preserved for `mayBeTrueOnGranule`.
+            /// stop reactivating it; the folded postings and `rows_range` are preserved for `mayBeTrueOnGranule`.
             query_builder.markBypassed();
             ProfileEvents::increment(ProfileEvents::TextIndexDiscardHint);
 
@@ -486,17 +650,21 @@ void TextIndexAnalyzer::processTokenOperation(std::string_view token, Operation 
             continue;
 
         operation(query_builder);
-
-        if (query_builder.is_failed)
-        {
-            detachQueryFromTokens(query_hash, query_builder);
-
-            /// One failed query in `All` global mode proves the whole conjunction false in this
-            /// part; the remaining queries cannot contribute to the result, so fail them all.
-            if (global_search_mode == TextSearchMode::All)
-                markAllQueriesFailed();
-        }
+        handleFailedQuery(query_hash, query_builder);
     }
+}
+
+void TextIndexAnalyzer::handleFailedQuery(const UInt128 & query_hash, const QueryBuilder & query_builder)
+{
+    if (!query_builder.is_failed)
+        return;
+
+    detachQueryFromTokens(query_hash, query_builder);
+
+    /// One failed query in `All` global mode proves the whole conjunction false in this
+    /// part; the remaining queries cannot contribute to the result, so fail them all.
+    if (global_search_mode == TextSearchMode::All)
+        markAllQueriesFailed();
 }
 
 }

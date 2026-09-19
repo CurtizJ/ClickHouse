@@ -507,8 +507,9 @@ TEST(PostingListCodecTest, MixedRandomMonotonicLarger)
 
 /// `bits == 0` stores no payload, so a decoder is tempted to return without touching `out`.
 /// Callers must not be required to pre-clear: PostingListCursor::decodeBlock decodes into a
-/// persistent, reused buffer and then runs an in-place inclusive_scan over it, so a value left over
-/// from an earlier block becomes a bogus absolute row id and a posting is silently dropped.
+/// persistent, reused buffer and the block codec then restores absolute row ids in place from the
+/// gaps, so a value left over from an earlier block becomes a bogus absolute row id and a posting is
+/// silently dropped.
 TEST(PostingListCodecTest, DecodeZeroBitsWritesZeros)
 {
     /// Covers the full-block (groups) path, the tail path, and both combined.
