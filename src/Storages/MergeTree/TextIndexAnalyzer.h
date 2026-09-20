@@ -158,6 +158,10 @@ private:
     static void markPatternCandidateTokens(
         const OptimizedRegularExpression & pattern, const ColumnString & tokens, PaddedPODArray<UInt8> & candidate_marks);
 
+    /// Detaches a query that has just failed from its tokens. One failed query in `All` global
+    /// mode proves the whole conjunction false in this part, so it fails all the other queries too.
+    void handleFailedQuery(const UInt128 & query_hash, const QueryBuilder & query_builder);
+
     /// Removes the query from `queries_by_token` for all affected tokens, so they stop passing `isTokenNeeded`.
     void detachQueryFromTokens(const UInt128 & query_hash, const QueryBuilder & query_builder);
 

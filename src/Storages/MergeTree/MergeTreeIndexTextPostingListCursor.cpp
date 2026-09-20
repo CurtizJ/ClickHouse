@@ -518,10 +518,16 @@ bool PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t n
             if (block_idx != current_block || decoded_count == 0)
                 decodeBlock(block_idx);
 
-            const auto * begin_it = gallopingLowerBound(decoded_values_ptr, decoded_values_ptr + decoded_count, static_cast<uint32_t>(row_offset));
-            const auto * end_it = findRowRangeEnd(begin_it, decoded_values_ptr + decoded_count, row_offset, num_rows);
-            size_t begin_idx = static_cast<size_t>(begin_it - decoded_values_ptr);
-            size_t end_idx = static_cast<size_t>(end_it - decoded_values_ptr);
+            /// Only a block straddling a window edge needs a search: the first block of the window may start before
+            /// `row_offset` and the last one may run past its end, every block in between is padded in full.
+            const auto * decoded_end = decoded_values_ptr + decoded_count;
+            size_t begin_idx = 0;
+            if (decoded_values_ptr[0] < row_offset)
+                begin_idx = static_cast<size_t>(gallopingLowerBound(decoded_values_ptr, decoded_end, static_cast<uint32_t>(row_offset)) - decoded_values_ptr);
+
+            size_t end_idx = decoded_count;
+            if (decoded_values_ptr[decoded_count - 1] >= row_offset + num_rows)
+                end_idx = static_cast<size_t>(findRowRangeEnd(decoded_values_ptr + begin_idx, decoded_end, row_offset, num_rows) - decoded_values_ptr);
 
             /// No doc_ids of this block fall into the window. The block has a doc_id >= row_offset (`block_last`),
             /// so that doc_id is past the window, and so is everything in the following blocks and segments.
