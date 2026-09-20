@@ -22,6 +22,7 @@ namespace ProfileEvents
     extern const Event TextIndexLazySegmentsBuilt;
     extern const Event TextIndexLazyBruteForceIntersections;
     extern const Event TextIndexLazyLeapfrogIntersections;
+    extern const Event TextIndexLazyBruteForceEarlyExits;
     extern const Event TextIndexLazySegmentsSkippedDense;
     extern const Event TextIndexLazySegmentsSkippedResolved;
     extern const Event TextIndexLazyBlocksSkippedResolved;
@@ -391,31 +392,34 @@ inline bool canSkipRegion(const UInt8 * data, size_t count)
 
 } // anonymous namespace
 
-void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
+bool PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
 {
     requireRowOffsetRepresentable(row_offset);
 
     if (is_embedded)
-        linearEmbedded<PadOp::Or>(data, row_offset, num_rows);
-    else
-        linearSegments<PadOp::Or>(data, row_offset, num_rows);
+        return linearEmbedded<PadOp::Or>(data, row_offset, num_rows);
+
+    return linearSegments<PadOp::Or>(data, row_offset, num_rows);
 }
 
-void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_rows)
+bool PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_rows)
 {
     requireRowOffsetRepresentable(row_offset);
 
     if (is_embedded)
-        linearEmbedded<PadOp::And>(data, row_offset, num_rows);
-    else
-        linearSegments<PadOp::And>(data, row_offset, num_rows);
+        return linearEmbedded<PadOp::And>(data, row_offset, num_rows);
+
+    return linearSegments<PadOp::And>(data, row_offset, num_rows);
 }
 
 template <PadOp op>
-void PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t num_rows)
+bool PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t num_rows)
 {
     if (info->ranges.empty() || total_segments == 0)
-        return;
+        return false;
+
+    /// Whether at least one byte of `data` was written, i.e. the posting list has doc_ids in the window.
+    bool set_any_bytes = false;
 
     for (size_t i = current_segment_idx; i < total_segments; ++i)
     {
@@ -465,6 +469,7 @@ void PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t n
                 {
                     ++counters.segments_skipped_dense;
                     padDenseRange<op>(data + (clip_begin - row_offset), clip_end - clip_begin);
+                    set_any_bytes = true;
                     continue;
                 }
             }
@@ -513,27 +518,29 @@ void PostingListCursor::linearSegments(UInt8 * data, size_t row_offset, size_t n
             if (block_idx != current_block || decoded_count == 0)
                 decodeBlock(block_idx);
 
-            /// Only a block straddling a window edge needs a search: the first block of the window may start before
-            /// `row_offset` and the last one may run past its end, every block in between is padded in full.
-            const auto * decoded_end = decoded_values_ptr + decoded_count;
-            size_t begin_idx = 0;
-            if (decoded_values_ptr[0] < row_offset)
-                begin_idx = static_cast<size_t>(gallopingLowerBound(decoded_values_ptr, decoded_end, static_cast<uint32_t>(row_offset)) - decoded_values_ptr);
+            const auto * begin_it = gallopingLowerBound(decoded_values_ptr, decoded_values_ptr + decoded_count, static_cast<uint32_t>(row_offset));
+            const auto * end_it = findRowRangeEnd(begin_it, decoded_values_ptr + decoded_count, row_offset, num_rows);
+            size_t begin_idx = static_cast<size_t>(begin_it - decoded_values_ptr);
+            size_t end_idx = static_cast<size_t>(end_it - decoded_values_ptr);
 
-            size_t end_idx = decoded_count;
-            if (decoded_values_ptr[decoded_count - 1] >= row_offset + num_rows)
-                end_idx = static_cast<size_t>(findRowRangeEnd(decoded_values_ptr + begin_idx, decoded_end, row_offset, num_rows) - decoded_values_ptr);
+            /// No doc_ids of this block fall into the window. The block has a doc_id >= row_offset (`block_last`),
+            /// so that doc_id is past the window, and so is everything in the following blocks and segments.
+            if (begin_idx == end_idx)
+                return set_any_bytes;
 
             padColumn<op>(data, decoded_values_ptr, row_offset, begin_idx, end_idx);
+            set_any_bytes = true;
         }
     }
+
+    return set_any_bytes;
 }
 
 template <PadOp op>
-void PostingListCursor::linearEmbedded(UInt8 * data, size_t row_offset, size_t num_rows)
+bool PostingListCursor::linearEmbedded(UInt8 * data, size_t row_offset, size_t num_rows)
 {
     if (decoded_count == 0)
-        return;
+        return false;
 
     /// Dense shortcut: if every row in the range is in the posting list,
     /// pad the entire clipped region at once without binary search.
@@ -551,7 +558,7 @@ void PostingListCursor::linearEmbedded(UInt8 * data, size_t row_offset, size_t n
         {
             ++counters.segments_skipped_dense;
             padDenseRange<op>(data + (clip_begin - row_offset), clip_end - clip_begin);
-            return;
+            return true;
         }
     }
 
@@ -559,7 +566,13 @@ void PostingListCursor::linearEmbedded(UInt8 * data, size_t row_offset, size_t n
     const auto * end_it = findRowRangeEnd(begin_it, decoded_values_ptr + decoded_count, row_offset, num_rows);
     size_t begin_idx = static_cast<size_t>(begin_it - decoded_values_ptr);
     size_t end_idx = static_cast<size_t>(end_it - decoded_values_ptr);
+
+    /// No doc_ids in the window.
+    if (begin_idx == end_idx)
+        return false;
+
     padColumn<op>(data, decoded_values_ptr, row_offset, begin_idx, end_idx);
+    return true;
 }
 
 namespace
@@ -811,10 +824,6 @@ void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cu
     intersectLeapfrogHeap(out, cursors, row_offset, effective_end);
 }
 
-/// Brute-force intersection via bitmap counting.
-/// First cursor sets bits (linearOr), remaining cursors increment counters (linearAnd),
-/// then a final pass converts count == n into 1, everything else into 0.
-
 #if USE_MULTITARGET_CODE
 DECLARE_X86_64_V3_SPECIFIC_CODE(
 void finalizeCounters(UInt8 * out, size_t num_rows, UInt8 target)
@@ -849,18 +858,33 @@ void finalizeCounters(UInt8 * out, size_t num_rows, UInt8 target)
         out[i] = (out[i] == target);
 }
 
+
+/// Brute-force intersection via bitmap counting. The cursors are sorted by ascending cardinality.
+/// First cursor sets bits (linearOr), remaining cursors increment counters (linearAnd),
+/// then a final pass converts count == n into 1, everything else into 0.
 void intersectBruteForce(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t num_rows)
 {
-    cursors[0]->linearOr(out, row_offset, num_rows);
+    if (!cursors[0]->linearOr(out, row_offset, num_rows))
+    {
+        ProfileEvents::increment(ProfileEvents::TextIndexLazyBruteForceEarlyExits);
+        return;
+    }
 
     for (size_t i = 1; i < cursors.size(); ++i)
-        cursors[i]->linearAnd(out, row_offset, num_rows);
+    {
+        if (!cursors[i]->linearAnd(out, row_offset, num_rows))
+        {
+            ProfileEvents::increment(ProfileEvents::TextIndexLazyBruteForceEarlyExits);
+            memset(out, 0, num_rows);
+            return;
+        }
+    }
 
     size_t n = cursors.size();
     if (n > 1)
     {
-        UInt8 n8 = static_cast<UInt8>(n);
-        finalizeCounters(out, num_rows, n8);
+        chassert(n <= 256);
+        finalizeCounters(out, num_rows, static_cast<UInt8>(n));
     }
 }
 
@@ -934,19 +958,21 @@ void lazyIntersectPostingLists(
         use_brute_force = min_density * static_cast<double>(BLOCK_SIZE) >= max_density;
     }
 
-    /// n < 256: brute-force uses UInt8 counters per row — would overflow with 256+ cursors.
-    if (n < 256 && use_brute_force)
-    {
-        ProfileEvents::increment(ProfileEvents::TextIndexLazyBruteForceIntersections);
-        intersectBruteForce(out, cursors, row_offset, num_rows);
-        return;
-    }
-
-    /// Sort cursors by ascending cardinality so the sparsest cursor leads the leapfrog.
+    /// Sort cursors by ascending cardinality. The sparsest cursor leads the leapfrog. In the brute-force
+    /// intersection it is scanned first: it is the most likely to have no rows in the window (early exit),
+    /// and it leaves the largest all-zero regions, which the denser cursors then skip without decoding.
     auto sorted_cursors = cursors;
     std::ranges::sort(sorted_cursors,
         [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
         { return a->cardinality() < b->cardinality(); });
+
+    /// n < 256: brute-force uses UInt8 counters per row — would overflow with 256+ cursors.
+    if (n < 256 && use_brute_force)
+    {
+        ProfileEvents::increment(ProfileEvents::TextIndexLazyBruteForceIntersections);
+        intersectBruteForce(out, sorted_cursors, row_offset, num_rows);
+        return;
+    }
 
     for (size_t i = 0; i < n; ++i)
     {
