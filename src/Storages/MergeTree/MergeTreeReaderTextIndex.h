@@ -31,8 +31,11 @@ using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<
 ///
 /// E.g. `__text_index_<name>_hasToken` column created for `hasToken` function.
 ///
-/// It also fills the `_bm25_score` virtual column (the BM25 relevance score) when the query reads it:
-/// per-row scores are summed from posting-list scoring cursors over the query's scoring tokens.
+/// It also fills the BM25 score virtual columns (`__text_index_<name>_bm25_<hash>`, `Float32`) of the
+/// scoring predicates of a query computing `bm25()`: the BM25 score of the predicate's tokens for the
+/// rows the predicate matches and 0 elsewhere. The planner assembles `bm25()` from these columns.
+/// The match column of a scoring predicate is filled in the same pass over the scoring cursors as its
+/// score column, so the postings of the predicate are decoded once.
 class MergeTreeReaderTextIndex : public IMergeTreeReader
 {
 public:
@@ -98,11 +101,13 @@ private:
 
     PostingListCursorPtr makeLazyCursor(std::string_view token, const TokenPostingsInfo & token_info);
 
-    /// Fills the `_bm25_score` column for rows [row_offset, row_offset + num_rows).
-    void fillColumnScores(IColumn & column, size_t from_mark, size_t row_offset, size_t num_rows);
+    /// Fills the score column `column_idx` for rows [row_offset, row_offset + num_rows) of `from_mark`, and the
+    /// match column of the same predicate (`score_match_column`) in the same pass over the scoring cursors.
+    void fillColumnScores(MutableColumns & res_columns, size_t column_idx, size_t from_mark, size_t row_offset, size_t num_rows);
 
-    /// Builds one scoring cursor per scoring token present in this part (see `score_cursors`).
-    void initializeScoreCursors();
+    /// Builds the scoring cursors of every score column (see `score_leaves`).
+    void initializeScoreLeaves();
+    std::shared_ptr<PostingListScoringCursor> makeScoringCursor(const String & token, const TokenPostingsInfo & token_info);
 
     /// Fills a phrase virtual column from positional data (.pos), computing matching documents
     /// via phrase intersection (cached per granule).
@@ -178,12 +183,27 @@ private:
     /// Query-global BM25 state (statistics and per-token weights); null when the query reads no scores.
     BM25StatePtr bm25_score_state;
 
-    /// One scoring cursor per scoring token present in this part's dictionary, sorted by ascending cardinality.
-    std::vector<ScoreCursor> score_cursors;
+    /// Per column: true for a BM25 score column, false for a match column.
+    std::vector<bool> is_score_column;
+    /// Per score column: the match column of the same predicate, filled in the same pass (see `classifyVirtualColumns`).
+    std::vector<size_t> score_match_column;
+    /// Per match column: true when its score column fills it, so the posting-list paths skip it.
+    std::vector<bool> filled_with_score;
 
-    bool score_cursors_initialized = false;
-    /// True when every scoring token is present in this part.
-    bool score_all_tokens_present = false;
+    /// Scoring state of one score column (one scoring predicate of the query).
+    struct ScoreLeaf
+    {
+        /// One cursor per distinct token of the predicate present in this part, sorted by ascending cardinality.
+        std::vector<ScoreCursor> cursors;
+        /// `hasAllTokens` uses the intersection scorer, `hasToken` / `hasAnyTokens` the union scorer.
+        bool intersect = false;
+        /// False when the predicate matches no row of the part (a required token is absent): the column stays 0.
+        bool can_match = false;
+    };
+
+    /// Parallel to `columns_to_read`; empty for match columns.
+    std::vector<ScoreLeaf> score_leaves;
+    bool score_leaves_initialized = false;
     /// Reads the part's `.dl` document lengths for the rows of the current read step.
     std::unique_ptr<TextIndexDocLengthsReader> score_doc_lengths;
 };

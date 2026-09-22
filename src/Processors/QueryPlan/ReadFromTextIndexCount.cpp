@@ -79,7 +79,7 @@ public:
                 block_idx,
                 serialization,
                 index_id,
-                /*with_scoring=*/ false).postings;
+                /*with_term_frequencies=*/ false).postings;
 
             if (block)
                 postings |= *block;

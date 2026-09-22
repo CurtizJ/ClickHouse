@@ -158,11 +158,7 @@ void IMergeTreeReader::fillVirtualColumns(Columns & columns, size_t rows) const
 
         Field field;
 
-        /// The `_bm25_score` column is filled by the text index reader when a scoring
-        /// read task is attached; without one the relevance of every row is zero.
-        if (it->name == BM25ScoreColumn::name)
-            field = Float32(0);
-        else if (auto field_it = virtual_fields.find(it->name); field_it != virtual_fields.end())
+        if (auto field_it = virtual_fields.find(it->name); field_it != virtual_fields.end())
             field = field_it->second;
         else
             field = getFieldForConstVirtualColumn(it->name, *data_part);

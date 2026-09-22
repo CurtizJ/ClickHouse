@@ -511,18 +511,17 @@ public:
 
     const TextIndexScoringStats & getTextIndexScoringStats() const { return scoring_stats; }
     TextIndexScoringKind getTextIndexScoringKind() const { return scoring_kind; }
-    bool isScoringEnabled() const { return scoring_enabled; }
 
     struct PostingsBlock
     {
         PostingListPtr postings;
-        /// Filled only when the block is read for scoring.
+        /// Set only when the block is read with the term frequencies.
         ScoringPostingsPtr scoring;
     };
 
-    /// Reads a single posting-list block, through the postings cache.
-    /// If `with_scoring` is true, the row ids are also returned as a flat sorted array, together with
-    /// the per-row term frequencies (when the posting list stores them) deserialized in the same pass.
+    /// Reads a single posting-list block, through the postings cache. With `with_term_frequencies`, the block
+    /// is decoded to the flat array of row ids with their per-row term frequencies (the input of BM25 scoring)
+    /// and the bitmap is derived from it in the same pass.
     static PostingsBlock readPostingsBlock(
         MergeTreeIndexReaderStream & stream,
         MergeTreeIndexDeserializationState & state,
@@ -530,10 +529,10 @@ public:
         size_t block_idx,
         PostingsSerialization & postings_serialization,
         const String & index_id_for_caches,
-        bool with_scoring);
+        bool with_term_frequencies);
 
-    /// Flat postings of the posting-list block at `offset_in_file`, decoded during the granule
-    /// analysis. Returns null if the block was not read for scoring.
+    /// Flat postings with term frequencies of the single-block token whose block starts at `offset_in_file`,
+    /// decoded during the analysis of a granule for a query computing `bm25()`. Null if not decoded.
     ScoringPostingsPtr getScoringPostings(UInt64 offset_in_file) const;
 
 private:
@@ -568,11 +567,11 @@ private:
     TextIndexScoringStats scoring_stats;
     /// The scoring data the index stores, read from the text index header.
     TextIndexScoringKind scoring_kind = TextIndexScoringKind::None;
-    /// Flat postings of the single-block tokens decoded for BM25 scoring during the granule
-    /// analysis, keyed by the block's offset in the postings file.
-    absl::flat_hash_map<UInt64, ScoringPostingsPtr> scoring_postings_by_offset;
-    /// Whether the query computes `_bm25_score` with this index.
+    /// Whether the query computes `bm25()` with this index (see `MergeTreeIndexConditionText::isScoringEnabled`).
     bool scoring_enabled = false;
+    /// Flat postings with term frequencies of the single-block tokens decoded during the analysis
+    /// for the scoring cursors of the query, keyed by the block's offset in the postings file.
+    absl::flat_hash_map<UInt64, ScoringPostingsPtr> scoring_postings_by_offset;
 };
 
 /// Text index granule created on writing of the index.
@@ -744,7 +743,8 @@ public:
     using IMergeTreeIndex::createIndexCondition;
 
     MergeTreeIndexConditionPtr createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const override;
-    MergeTreeIndexConditionPtr createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context, bool scoring_enabled) const;
+    /// Creates the condition sharing `scoring_queries` with the other conditions of the same template (see `TextIndexScoringQueries`).
+    MergeTreeIndexConditionPtr createIndexConditionWithScoring(const ActionsDAG::Node * predicate, ContextPtr context, TextIndexScoringQueriesPtr scoring_queries) const;
 
     const IPostingListCodec * getPostingListCodec() const { return posting_list_codec.get(); }
     static DataTypePtr getNestedDataType(const DataTypePtr & data_type);

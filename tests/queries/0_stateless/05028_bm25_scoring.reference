@@ -16,7 +16,7 @@
 -- AND of two hasToken (conjunction scorer over both tokens)
 1	OK
 7	OK
--- OR composition (generic scorer): a row surviving via one branch gets contributions from all its scoring tokens
+-- OR composition: every matching clause adds its score, a failed conjunction adds nothing
 1	OK
 4	OK
 7	OK
@@ -24,19 +24,26 @@
 -- OR with a regular-column branch: a row surviving only via it scores 0 where it matches no scoring token
 4	1
 6	1
--- ORDER BY _bm25_score DESC LIMIT: plain top-k works
+-- ORDER BY bm25() DESC LIMIT: plain top-k works
 1
 7
 3
--- _bm25_score used only in ORDER BY (not in SELECT)
+-- bm25() used only in ORDER BY (not in SELECT)
 3
 2
--- _bm25_score inside an expression
+-- bm25() inside an expression
 7	1
 10	1
--- SELECT * does not include the ephemeral virtual column
-7	distributed consensus raft raft raft quorum	30
-10	vector search with quorum reads	4
+-- bm25() with explicit parameters matches a reference computed with them
+1	OK
+2	OK
+3	OK
+4	OK
+5	OK
+7	OK
+-- the same score under two spellings of the call
+10	1
+7	1
 -- PREWHERE on a regular column composes with the score
 1	1
 7	1

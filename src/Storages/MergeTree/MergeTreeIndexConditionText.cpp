@@ -145,20 +145,23 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     MergeTreeIndexTextPostprocessorPtr postprocessor_,
     bool has_positions_,
     NameSet columns_shadowing_map_subcolumns_,
-    bool scoring_enabled_)
+    TextIndexScoringQueriesPtr scoring_queries_)
     : WithContext(context_)
     , header(index_sample_block)
     , normalized_index_column_name(normalized_index_column_name_)
     , columns_shadowing_map_subcolumns(std::move(columns_shadowing_map_subcolumns_))
     , owned_tokenizer(tokenizer_ && tokenizer_->isStateful() ? std::shared_ptr<const ITokenizer>(tokenizer_->clone()) : nullptr)
     , tokenizer(owned_tokenizer ? owned_tokenizer.get() : tokenizer_)
+    , scoring_queries(std::move(scoring_queries_))
     , preprocessor(preprocessor_)
     , has_preprocessor(preprocessor && preprocessor->hasActions())
     , postprocessor(postprocessor_)
     , has_postprocessor(postprocessor && postprocessor->hasActions())
     , has_positions(has_positions_)
-    , scoring_enabled(scoring_enabled_)
 {
+    if (!scoring_queries)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "The scoring queries of the text index condition are not set");
+
     if (!predicate)
     {
         rpn.emplace_back(RPNElement::FUNCTION_UNKNOWN);
@@ -403,6 +406,22 @@ std::optional<String> MergeTreeIndexConditionText::replaceToVirtualColumn(const 
     return virtual_column_name;
 }
 
+String MergeTreeIndexConditionText::registerScoreVirtualColumn(const TextSearchQuery & query, const String & index_name)
+{
+    auto query_hash = query.getHash();
+    auto it = all_search_queries.find(query_hash);
+
+    if (it == all_search_queries.end())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text search query {} is not a query of the text index condition", query.getFunctionName());
+
+    auto hash_str = getSipHash128AsHexString(query_hash);
+    String virtual_column_name = fmt::format("{}{}_bm25_{}", TEXT_INDEX_VIRTUAL_COLUMN_PREFIX, index_name, hash_str);
+
+    virtual_column_to_search_query[virtual_column_name] = it->second;
+    scoring_queries->queries[query_hash] = it->second;
+    return virtual_column_name;
+}
+
 TextSearchQueryPtr MergeTreeIndexConditionText::getSearchQueryForVirtualColumn(const String & column_name) const
 {
     auto it = virtual_column_to_search_query.find(column_name);
@@ -415,14 +434,8 @@ TextSearchQueryPtr MergeTreeIndexConditionText::getSearchQueryForVirtualColumn(c
 std::vector<String> MergeTreeIndexConditionText::getScoringTokens() const
 {
     Names tokens;
-    for (const auto & [_, search_query] : all_search_queries)
+    for (const auto & [_, search_query] : scoring_queries->queries)
     {
-        const auto & function_name = search_query->getFunctionName();
-
-        /// Only tokens from special full-text search functions are considered for scoring.
-        if (function_name != "hasToken" && function_name != "hasAnyTokens" && function_name != "hasAllTokens")
-            continue;
-
         for (const auto & token : search_query->getTokens())
             tokens.push_back(token);
     }

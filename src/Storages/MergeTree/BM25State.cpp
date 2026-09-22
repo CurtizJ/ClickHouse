@@ -9,7 +9,6 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
-#include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
@@ -102,14 +101,15 @@ std::shared_ptr<const MergeTreeIndexGranuleText> loadTextIndexGranuleForStats(
 
 }
 
-BM25GlobalStatsBuilder::BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_)
+BM25GlobalStatsBuilder::BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_, BM25Params params_)
     : index_with_condition(std::move(index_with_condition_))
+    , params(params_)
 {
     text_index = &typeid_cast<const MergeTreeIndexText &>(*index_with_condition.index.get());
     condition_text = &typeid_cast<const MergeTreeIndexConditionText &>(*index_with_condition.condition_template->generateUnsubstituted());
     scoring_token_names = condition_text->getScoringTokens();
 
-    if (!condition_text->isScoringEnabled() || scoring_token_names.empty())
+    if (scoring_token_names.empty())
     {
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "Cannot compute text score: the condition of text index '{}' has no scoring tokens",
@@ -164,7 +164,6 @@ void BM25GlobalStatsBuilder::addPart(const DataPartPtr & part, const MergeTreeRe
 
 BM25StatePtr BM25GlobalStatsBuilder::build() const
 {
-    const BM25Params params;
     const UInt64 total_docs = num_docs.load(std::memory_order_relaxed);
     const UInt64 total_doc_length = sum_doc_length.load(std::memory_order_relaxed);
     const Float64 avg_doc_length = total_docs ? static_cast<Float64>(total_doc_length) / static_cast<Float64>(total_docs) : 0.0;
@@ -193,7 +192,7 @@ BM25StatePtr buildBM25State(
 
     for (const auto & [_, index_task] : index_read_tasks)
     {
-        if (index_task.columns.contains(BM25ScoreColumn::name))
+        if (index_task.bm25_params)
         {
             score_task = &index_task;
             break;
@@ -204,7 +203,7 @@ BM25StatePtr buildBM25State(
         return nullptr;
 
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::TextScoreStatsBuildMicroseconds);
-    auto builder = std::make_shared<BM25GlobalStatsBuilder>(score_task->index);
+    auto builder = std::make_shared<BM25GlobalStatsBuilder>(score_task->index, *score_task->bm25_params);
 
     /// A part can appear in several entries, its statistics must be accumulated once.
     std::unordered_set<DataPartPtr> parts;

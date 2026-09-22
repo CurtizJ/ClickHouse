@@ -279,19 +279,21 @@ void lazyIntersectPostingLists(
     float density_threshold);
 
 /// Union scorer: per-token union walk over `cursors`, adds each token's BM25 contribution
-/// at its hit rows of the window [row_offset, row_offset + num_rows) into `data`.
-/// Correct under arbitrary predicate composition (rows may match any subset of the tokens).
+/// at its hit rows of the window [row_offset, row_offset + num_rows) into `data` and marks
+/// the hit rows with 1 in `matches` (the match column of the predicate).
 void scoreCursorsUnion(
     Float32 * data,
+    UInt8 * matches,
     std::vector<ScoreCursor> & cursors,
     size_t row_offset,
     size_t num_rows);
 
 /// Intersection scorer: joint leapfrog over all `cursors`, sums every token's BM25 contribution
-/// at each intersection row of the window [row_offset, row_offset + num_rows) into `data`.
-/// Valid only under the global `All` search mode.
+/// at each intersection row of the window [row_offset, row_offset + num_rows) into `data` and marks
+/// the intersection rows with 1 in `matches` (the match column of the predicate).
 void scoreCursorsIntersection(
     Float32 * data,
+    UInt8 * matches,
     std::vector<ScoreCursor> & cursors,
     size_t row_offset,
     size_t num_rows);

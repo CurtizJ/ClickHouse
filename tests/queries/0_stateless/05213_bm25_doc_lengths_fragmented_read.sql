@@ -1,7 +1,7 @@
 -- Tags: no-parallel-replicas
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 SET use_query_condition_cache = 0;
@@ -30,7 +30,7 @@ SELECT number, concat(if(number % 7 = 0, 'raft ', ''), arrayStringConcat(arrayMa
 FROM numbers(5000, 3000);
 
 SELECT '-- scores of scattered primary key ranges';
-SELECT id, round(_bm25_score, 4)
+SELECT id, round(bm25(), 4)
 FROM tab_doc_lengths
 WHERE hasAnyTokens(body, 'raft') AND (id BETWEEN 100 AND 130 OR id BETWEEN 4990 AND 5010 OR id BETWEEN 7980 AND 7999)
 ORDER BY id;
@@ -39,27 +39,27 @@ SELECT '-- the fragmented read gives the same scores as the sequential read of t
 SELECT countIf(fragmented.s != full.s) AS mismatches, count() AS rows
 FROM
 (
-    SELECT id, round(_bm25_score, 5) AS s
+    SELECT id, round(bm25(), 5) AS s
     FROM tab_doc_lengths
     WHERE hasAnyTokens(body, 'raft') AND (id BETWEEN 100 AND 130 OR id BETWEEN 1000 AND 1200 OR id BETWEEN 4990 AND 5010 OR id BETWEEN 7900 AND 7999)
 ) AS fragmented
 INNER JOIN
 (
-    SELECT id, round(_bm25_score, 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft')
+    SELECT id, round(bm25(), 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft')
 ) AS full USING (id);
 
 SELECT '-- the same with blocks smaller than a granule, so reads resume in the middle of granules';
 SELECT countIf(fragmented.s != full.s) AS mismatches, count() AS rows
 FROM
 (
-    SELECT id, round(_bm25_score, 5) AS s
+    SELECT id, round(bm25(), 5) AS s
     FROM tab_doc_lengths
     WHERE hasAnyTokens(body, 'raft') AND (id BETWEEN 100 AND 130 OR id BETWEEN 1000 AND 1200 OR id BETWEEN 4990 AND 5010 OR id BETWEEN 7900 AND 7999)
     SETTINGS max_block_size = 50, max_threads = 1
 ) AS fragmented
 INNER JOIN
 (
-    SELECT id, round(_bm25_score, 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft') SETTINGS max_block_size = 50, max_threads = 1
+    SELECT id, round(bm25(), 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft') SETTINGS max_block_size = 50, max_threads = 1
 ) AS full USING (id);
 
 SELECT '-- the same after merging the parts, which rewrites the index';
@@ -70,17 +70,17 @@ SELECT count() FROM system.parts WHERE database = currentDatabase() AND table = 
 SELECT countIf(fragmented.s != full.s) AS mismatches, count() AS rows
 FROM
 (
-    SELECT id, round(_bm25_score, 5) AS s
+    SELECT id, round(bm25(), 5) AS s
     FROM tab_doc_lengths
     WHERE hasAnyTokens(body, 'raft') AND (id BETWEEN 100 AND 130 OR id BETWEEN 1000 AND 1200 OR id BETWEEN 4990 AND 5010 OR id BETWEEN 7900 AND 7999)
     SETTINGS max_block_size = 50, max_threads = 1
 ) AS fragmented
 INNER JOIN
 (
-    SELECT id, round(_bm25_score, 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft')
+    SELECT id, round(bm25(), 5) AS s FROM tab_doc_lengths WHERE hasAnyTokens(body, 'raft')
 ) AS full USING (id);
 
-SELECT id, round(_bm25_score, 4)
+SELECT id, round(bm25(), 4)
 FROM tab_doc_lengths
 WHERE hasAnyTokens(body, 'raft') AND (id BETWEEN 100 AND 130 OR id BETWEEN 4990 AND 5010 OR id BETWEEN 7980 AND 7999)
 ORDER BY id;

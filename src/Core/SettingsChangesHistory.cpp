@@ -43,7 +43,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.10",
         {
-            {"allow_experimental_bm25_score_column", false, false, "New setting to allow reading the `_bm25_score` virtual column filled by the direct read from a text index with `scoring = 'bm25'`."},
+            {"allow_experimental_bm25_scoring", false, false, "New setting to allow the function `bm25` computed by the direct read from a text index with `scoring = 'bm25'`."},
             {"allow_executable_tables", true, true, "New setting to disable reading through the `executable` table function and from `Executable` and `ExecutablePool` tables."},
             {"iceberg_tolerate_conflicting_manifest_schemas", false, true, "New setting: when an Iceberg manifest file header carries a schema that conflicts with the schema registered for the same schema-id from metadata.json, prefer the metadata.json schema and log a warning instead of failing the query, matching the behavior of other query engines. `compatibility` below 26.10 restores the previous strict behavior."},
             {"legacy_join_size_limits_trigger_spilling", true, false, "`max_rows_in_join` / `max_bytes_in_join` are now hard caps for every hash join, including the ones that spill to disk, where they used to act as the spill trigger. Spilling is driven by `max_bytes_before_external_join` / `max_bytes_ratio_before_external_join` alone."},

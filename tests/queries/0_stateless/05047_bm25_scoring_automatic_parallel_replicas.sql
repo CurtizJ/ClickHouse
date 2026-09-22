@@ -3,7 +3,7 @@
 --   not wrap the test in its own parallel-replicas mode.
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 
@@ -33,6 +33,6 @@ INSERT INTO tab_bm25_auto_pr SELECT number, concat(toString(number), multiIf(num
 -- The automatic-parallel-replicas heuristic builds an alternative plan without index analysis; it
 -- must not reject the query at planning time. The plan substitution is skipped for queries reading
 -- the score column, so the executed (local) plan still fills it.
-SELECT count(), uniqExact(round(_bm25_score, 4)) FROM tab_bm25_auto_pr WHERE hasToken(str, 'error');
+SELECT count(), uniqExact(round(bm25(), 4)) FROM tab_bm25_auto_pr WHERE hasToken(str, 'error');
 
 DROP TABLE tab_bm25_auto_pr;

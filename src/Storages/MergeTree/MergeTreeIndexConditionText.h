@@ -83,6 +83,17 @@ using MergeTreeIndexTextPreprocessorPtr = std::shared_ptr<MergeTreeIndexTextPrep
 class MergeTreeIndexTextPostprocessor;
 using MergeTreeIndexTextPostprocessorPtr = std::shared_ptr<MergeTreeIndexTextPostprocessor>;
 
+/// The search queries of one text index that the query computes `bm25()` for, keyed by their hash. Shared by
+/// all conditions generated from one condition template (the unsubstituted one the direct-read pass registers
+/// the score virtual columns on, and the per-part ones the granule analysis runs with), so the analysis of
+/// every part knows which term frequencies the reader needs.
+struct TextIndexScoringQueries
+{
+    std::unordered_map<UInt128, TextSearchQueryPtr> queries;
+};
+
+using TextIndexScoringQueriesPtr = std::shared_ptr<TextIndexScoringQueries>;
+
 /// Condition for text index.
 /// Unlike conditions for other indexes, it can be used after analysis
 /// of granules on reading from text index step (see MergeTreeReaderTextIndex)
@@ -99,7 +110,7 @@ public:
         MergeTreeIndexTextPostprocessorPtr postprocessor_,
         bool has_positions_,
         NameSet columns_shadowing_map_subcolumns_,
-        bool scoring_enabled_);
+        TextIndexScoringQueriesPtr scoring_queries_);
 
     ~MergeTreeIndexConditionText() override = default;
     static bool isSupportedFunction(const String & function_name);
@@ -121,12 +132,16 @@ public:
     bool canAnswerFunctionNode(const ActionsDAG::Node & node) const;
     /// Returns generated virtual column name for the replacement of related function node.
     std::optional<String> replaceToVirtualColumn(const TextSearchQuery & query, const String & index_name);
+    /// Returns the name of the BM25 score virtual column of the query (`__text_index_<index>_bm25_<hash>`)
+    /// and registers it: the reader fills it with the query's score for the rows the query matches and 0 elsewhere.
+    String registerScoreVirtualColumn(const TextSearchQuery & query, const String & index_name);
     TextSearchQueryPtr getSearchQueryForVirtualColumn(const String & column_name) const;
 
-    /// Tokens contributing to the `_bm25_score` virtual column: the sorted,
-    /// deduplicated union of the tokens of the hasToken / hasAnyTokens / hasAllTokens conditions.
+    /// Tokens whose statistics BM25 scoring needs: the sorted, deduplicated
+    /// union of the tokens of the queries with a registered score virtual column.
     std::vector<String> getScoringTokens() const;
-    bool isScoringEnabled() const { return scoring_enabled; }
+    /// Whether the query computes `bm25()` with this index, i.e. a score virtual column is registered.
+    bool isScoringEnabled() const { return !scoring_queries->queries.empty(); }
 
     TextIndexTokensCachePtr tokensCache() const { return tokens_cache; }
     TextIndexHeaderCachePtr headerCache() const { return header_cache; }
@@ -241,6 +256,8 @@ private:
     std::unordered_map<UInt128, TextSearchQueryPtr> all_search_queries;
     /// Mapping from virtual column (optimized for direct read from text index) to search query.
     std::unordered_map<String, TextSearchQueryPtr> virtual_column_to_search_query;
+    /// Search queries with a registered BM25 score virtual column, shared with the other conditions of the template.
+    TextIndexScoringQueriesPtr scoring_queries;
     /// If global mode is All, then we can exit analysis earlier if any token is missing in granule.
     TextSearchMode global_search_mode = TextSearchMode::All;
     /// Reference preprocessor expression
@@ -251,8 +268,6 @@ private:
     bool has_postprocessor;
     /// Whether the index has position data for phrase queries.
     bool has_positions = false;
-    /// Whether the query computes `_bm25_score` with this index.
-    bool scoring_enabled = false;
     /// Cache for tokens and their infos (cardinality, etc.)
     TextIndexTokensCachePtr tokens_cache;
     /// Cache for headers of the text index

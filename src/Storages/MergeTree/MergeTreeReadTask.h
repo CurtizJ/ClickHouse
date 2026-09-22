@@ -1,9 +1,11 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
+#include <Storages/MergeTree/BM25Kernel.h>
 #include <Storages/MergeTree/IMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
@@ -74,7 +76,9 @@ struct IndexReadTask
     NamesAndTypesList columns;
     MergeTreeIndexWithCondition index;
     bool is_final = false;
-    /// Query-global BM25 state for the `_bm25_score` virtual column.
+    /// Set when the query computes `bm25()` over this text index.
+    std::optional<BM25Params> bm25_params;
+    /// Query-global BM25 state, built once the parts to read are known (`ReadFromMergeTree::initializePipeline`).
     BM25StatePtr bm25_score_state;
 };
 
