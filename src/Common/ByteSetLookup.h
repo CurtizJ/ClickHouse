@@ -140,29 +140,6 @@ public:
         return mask;
     }
 
-    /// Same as `matchBlock`, and also sets bit `i` of `high_bits` iff byte `i` is not ASCII (at least 0x80),
-    /// from the same load of the block.
-    ALWAYS_INLINE UInt32 matchBlockAndHighBits(const char * pos, UInt32 & high_bits) const
-    {
-#if defined(__SSSE3__) || defined(__aarch64__)
-        if (vectorized)
-        {
-            UInt8x16 bytes;
-            memcpy(&bytes, pos, BLOCK_SIZE);
-            high_bits = blockMask(std::bit_cast<Int8x16>(bytes) < Int8x16{});
-            return blockMask(containsVector(bytes));
-        }
-#endif
-        UInt32 mask = 0;
-        high_bits = 0;
-        for (size_t i = 0; i < BLOCK_SIZE; ++i)
-        {
-            mask |= static_cast<UInt32>(contains(pos[i])) << i;
-            high_bits |= static_cast<UInt32>(static_cast<UInt8>(pos[i]) >= 0x80) << i;
-        }
-        return mask;
-    }
-
 private:
     static constexpr ptrdiff_t SCALAR_PREFIX = 16;
 

@@ -10,7 +10,6 @@
 #include <Common/UTF8Helpers.h>
 #include <Common/PODArray.h>
 #include <Functions/Regexps.h>
-#include <Common/RegexpJIT/RegexpProgram.h>
 #include <Interpreters/JIT/CompileRegexp.h>
 #include <IO/VarInt.h>
 
@@ -346,35 +345,6 @@ String SplitByStringTokenizer::getDescription() const
     return result + "])";
 }
 
-namespace
-{
-
-/// If the pattern is a character class `C` repeated `{1,n}` times (`C`, `C+`, ...), optionally in a capture group,
-/// splitting by it is splitting by the bytes of `C`: runs of separators give empty pieces, which are skipped.
-/// In `match_tokens` mode only `C+` qualifies, its matches are the maximal runs of `C`, i.e. the pieces between
-/// the bytes out of `C`. Returns the quantifier of `C`, or nullptr for other patterns.
-const RegexpJIT::Op * getRepeatedCharacterClass(const RegexpJIT::RegexpProgram & program, bool match_tokens)
-{
-    if (program.anchored_start || program.anchored_end)
-        return nullptr;
-
-    const RegexpJIT::Op * quantifier = nullptr;
-    for (const auto & op : program.ops)
-    {
-        if (op.kind == RegexpJIT::OpKind::CaptureStart || op.kind == RegexpJIT::OpKind::CaptureEnd)
-            continue;
-        if (op.kind != RegexpJIT::OpKind::CharQuant || quantifier)
-            return nullptr;
-        quantifier = &op;
-    }
-
-    if (!quantifier || quantifier->min != 1 || (match_tokens && quantifier->max != std::numeric_limits<uint32_t>::max()))
-        return nullptr;
-    return quantifier;
-}
-
-}
-
 SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool match_tokens_)
     : ITokenizerHelper(Type::SplitByRegexp)
     , regexp_str(regexp_)
@@ -395,25 +365,8 @@ SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool matc
             "'{}' tokenizer: pattern '{}' can match an empty string, which is not supported with match_tokens = true",
             getName(), regexp_);
 
-    /// On valid UTF-8 the byte-wise matchers below give exactly the same matches as RE2, so whether they are
-    /// used (the pattern may be unsupported, or the embedded compiler may be absent) never changes tokens.
-    RegexpJIT::ParseFlags flags;
-    flags.dot_all = true;
-    const auto program = RegexpJIT::tryCompileToProgram(regexp_, flags);
-    if (!program)
-        return;
-
-    if (const auto * quantifier = getRepeatedCharacterClass(*program, match_tokens))
-    {
-        /// The class is either ASCII-only, or a negated one that contains all non-ASCII characters.
-        ascii_separators = ByteSetLookup::fromPredicate([&](char c)
-        {
-            return isASCII(c) && quantifier->set.contains(static_cast<uint8_t>(c)) != match_tokens;
-        });
-        high_bytes_are_separators = !quantifier->set.isAsciiOnly() != match_tokens;
-        return;
-    }
-
+    /// On valid UTF-8 the JIT-compiled matcher gives exactly the same matches as RE2, so whether it is used
+    /// (the pattern may be unsupported, or the embedded compiler may be absent) never changes tokens.
     jit_matcher = getRegexpJITMatcher(regexp_, /* case_insensitive */ false, /* dot_all */ true, /* min_count_to_compile */ 0);
     if (jit_matcher.num_captures > max_jit_captures)
         jit_matcher = {};
@@ -425,8 +378,6 @@ SplitByRegexpTokenizer::SplitByRegexpTokenizer(const SplitByRegexpTokenizer & ot
     , match_tokens(other.match_tokens)
     , regexp(regexp_str, OptimizedRegularExpression::RE_DOT_NL)
     , token_group(other.token_group)
-    , ascii_separators(other.ascii_separators)
-    , high_bytes_are_separators(other.high_bytes_are_separators)
     , jit_matcher(other.jit_matcher)
 {
 }

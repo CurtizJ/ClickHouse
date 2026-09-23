@@ -1,6 +1,5 @@
--- The `splitByRegexp` tokenizer splits by a byte set when the pattern is a repeated character class, and otherwise
--- uses the JIT-compiled matcher when possible. Check that it produces the same tokens as RE2 on ASCII strings,
--- valid UTF-8 and invalid UTF-8.
+-- The `splitByRegexp` tokenizer uses the JIT-compiled matcher on valid UTF-8 when possible. Check that it produces
+-- the same tokens as RE2 on ASCII strings, valid UTF-8 and invalid UTF-8.
 
 -- The reference functions must use RE2: their JIT-compiled matcher may differ from it on invalid UTF-8.
 SET compile_regular_expressions = 0;

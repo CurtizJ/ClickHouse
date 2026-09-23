@@ -21,7 +21,7 @@
     <!-- Baseline: the same separators as the character class below. -->
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByString', [' ', '=', ',', '"'])) SETTINGS max_threads = {threads}</query>
 
-    <!-- A repeated character class: split by a byte set. -->
+    <!-- A repeated character class, matched by the JIT-compiled matcher. -->
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '[ =,"]')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '[^A-Za-z0-9._-]+')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '[A-Za-z0-9._-]+', true)) SETTINGS max_threads = {threads}</query>
@@ -30,7 +30,7 @@
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '\\s*=\\s*')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '([a-z_]+)=', true)) SETTINGS max_threads = {threads}</query>
 
-    <!-- UTF-8 text split by a byte set. -->
+    <!-- UTF-8 text, matched by the JIT-compiled matcher. -->
     <query>SELECT count() FROM tok_utf8 WHERE NOT ignore(tokens(s, 'splitByRegexp', '[ ,.]+')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_utf8 WHERE NOT ignore(tokens(s, 'splitByRegexp', '[^ ,.]+', true)) SETTINGS max_threads = {threads}</query>
 

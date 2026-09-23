@@ -220,25 +220,6 @@ inline ALWAYS_INLINE UInt32 separatorBits(const ByteSetLookup & separators, cons
     return bits & ((1u << block_length) - 1);
 }
 
-/// Same as `separatorBits`, and also sets bit `i` of `high_bits` iff byte `i` of the block is not ASCII.
-inline ALWAYS_INLINE UInt32 separatorAndHighBits(const ByteSetLookup & separators, const char * block, size_t block_length, UInt32 & high_bits)
-{
-    const UInt32 valid = (1u << block_length) - 1;
-#if !defined(MEMORY_SANITIZER) /// MSan cannot see that the bits of the uninitialized padding bytes are discarded
-    UInt32 bits = separators.matchBlockAndHighBits(block, high_bits);
-#else
-    UInt32 bits = 0;
-    high_bits = 0;
-    for (size_t i = 0; i < block_length; ++i)
-    {
-        bits |= static_cast<UInt32>(separators.contains(block[i])) << i;
-        high_bits |= static_cast<UInt32>(static_cast<UInt8>(block[i]) >= 0x80) << i;
-    }
-#endif
-    high_bits &= valid;
-    return bits & valid;
-}
-
 /// Calls `callback` for every token split by bytes in `separators`.
 template <typename Callback>
 void forEachTokenSplitByBytes(const ByteSetLookup & separators, const char * __restrict data, size_t length, Callback && callback)
@@ -421,13 +402,11 @@ struct SplitByRegexpTokenizer final : public ITokenizerHelper<SplitByRegexpToken
     void substringToTokens(const char * data, size_t length, VectorWithMemoryTracking<String> & tokens, bool is_prefix, bool is_suffix) const override;
 
     /// Hot-path tokenizer used by the free `forEachToken` (index build, search, the `tokens` function).
-    /// Uses a byte set or the JIT-compiled matcher when they are equivalent to RE2 on the string.
+    /// Uses the JIT-compiled matcher when it is equivalent to RE2 on the string.
     template <Fn<bool(const char *, size_t)> Callback>
     void forEachTokenImpl(const char * data, size_t length, Callback && callback) const
     {
-        if (ascii_separators)
-            forEachTokenByBytes(data, length, callback);
-        else if (jit_matcher && UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(data), length))
+        if (jit_matcher && UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(data), length))
             forEachTokenJIT(data, length, callback);
         else
             forEachTokenRE2(data, length, 0, callback);
@@ -445,52 +424,6 @@ private:
         while (pos < length && nextInStringImpl(data, length, pos, token_start, token_length, matches))
             if (callback(data + token_start, token_length))
                 return;
-    }
-
-    /// Splits by `ascii_separators`, plus all non-ASCII bytes if `high_bytes_are_separators`, in one pass.
-    /// The rest of the string is validated at the first non-ASCII byte, and invalid UTF-8 is handed over to RE2
-    /// from the current token: the tokens before it end at ASCII separators, which both agree on.
-    template <typename Callback>
-    void forEachTokenByBytes(const char * data, size_t length, Callback && callback) const
-    {
-        const char * end = data + length;
-        const char * token_start = data;
-        bool is_valid_utf8 = false;
-
-        for (const char * block = data; block < end; block += ByteSetLookup::BLOCK_SIZE)
-        {
-            const size_t block_length = std::min<size_t>(end - block, ByteSetLookup::BLOCK_SIZE);
-            UInt32 high_bits = 0;
-            UInt32 separator_bits = detail::separatorAndHighBits(*ascii_separators, block, block_length, high_bits);
-
-            if (high_bits != 0 && !is_valid_utf8)
-            {
-                /// The bytes before `block` are ASCII, so the string is valid UTF-8 iff its rest is.
-                if (!UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(block), end - block))
-                {
-                    forEachTokenRE2(data, length, token_start - data, callback);
-                    return;
-                }
-                is_valid_utf8 = true;
-            }
-
-            if (high_bytes_are_separators)
-                separator_bits |= high_bits;
-
-            while (separator_bits != 0)
-            {
-                const char * separator = block + std::countr_zero(separator_bits);
-                separator_bits &= separator_bits - 1;
-
-                if (separator > token_start && callback(token_start, separator - token_start))
-                    return;
-
-                token_start = separator + 1;
-            }
-        }
-
-        if (token_start < end)
-            callback(token_start, end - token_start);
     }
 
     /// Same as `forEachTokenRE2`, but with the JIT-compiled matcher.
@@ -549,10 +482,7 @@ private:
     /// Loop-invariant, so it is resolved once at construction rather than per match. Unused otherwise.
     /// Declared after `regexp` because it is derived from it.
     size_t token_group;
-    /// The ASCII separator bytes, if the pattern is a repeated character class. See `forEachTokenByBytes`.
-    std::optional<ByteSetLookup> ascii_separators;
-    bool high_bytes_are_separators = false;
-    /// Otherwise, the JIT-compiled matcher, if the pattern is in the supported subset.
+    /// The JIT-compiled matcher used on valid UTF-8, if the pattern is in the supported subset.
     RegexpJITMatcher jit_matcher;
 };
 
