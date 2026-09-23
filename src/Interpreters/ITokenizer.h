@@ -427,7 +427,7 @@ struct SplitByRegexpTokenizer final : public ITokenizerHelper<SplitByRegexpToken
     {
         if (ascii_separators)
             forEachTokenByBytes(data, length, callback);
-        else if (jit_matcher && (!needs_valid_utf8 || UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(data), length)))
+        else if (jit_matcher && UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(data), length))
             forEachTokenJIT(data, length, callback);
         else
             forEachTokenRE2(data, length, 0, callback);
@@ -448,15 +448,14 @@ private:
     }
 
     /// Splits by `ascii_separators`, plus all non-ASCII bytes if `high_bytes_are_separators`, in one pass.
-    /// If `needs_valid_utf8`, the rest of the string is validated at the first non-ASCII byte, and invalid
-    /// UTF-8 is handed over to RE2 from the current token: the tokens before it end at ASCII separators,
-    /// which both agree on.
+    /// The rest of the string is validated at the first non-ASCII byte, and invalid UTF-8 is handed over to RE2
+    /// from the current token: the tokens before it end at ASCII separators, which both agree on.
     template <typename Callback>
     void forEachTokenByBytes(const char * data, size_t length, Callback && callback) const
     {
         const char * end = data + length;
         const char * token_start = data;
-        bool is_valid_utf8 = !needs_valid_utf8;
+        bool is_valid_utf8 = false;
 
         for (const char * block = data; block < end; block += ByteSetLookup::BLOCK_SIZE)
         {
@@ -555,9 +554,6 @@ private:
     bool high_bytes_are_separators = false;
     /// Otherwise, the JIT-compiled matcher, if the pattern is in the supported subset.
     RegexpJITMatcher jit_matcher;
-    /// Byte-wise matching gives the same matches as RE2 on any string if the pattern matches only ASCII bytes,
-    /// and otherwise only on valid UTF-8.
-    bool needs_valid_utf8 = true;
 };
 
 /// Parser doing "no operation". Returns the entire input as a single token.

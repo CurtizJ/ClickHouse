@@ -30,7 +30,7 @@
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '\\s*=\\s*')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_log_lines WHERE NOT ignore(tokens(s, 'splitByRegexp', '([a-z_]+)=', true)) SETTINGS max_threads = {threads}</query>
 
-    <!-- UTF-8 text split by a byte set: an ASCII class needs no check, a negated class needs valid UTF-8. -->
+    <!-- UTF-8 text split by a byte set. -->
     <query>SELECT count() FROM tok_utf8 WHERE NOT ignore(tokens(s, 'splitByRegexp', '[ ,.]+')) SETTINGS max_threads = {threads}</query>
     <query>SELECT count() FROM tok_utf8 WHERE NOT ignore(tokens(s, 'splitByRegexp', '[^ ,.]+', true)) SETTINGS max_threads = {threads}</query>
 

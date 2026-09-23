@@ -373,35 +373,6 @@ const RegexpJIT::Op * getRepeatedCharacterClass(const RegexpJIT::RegexpProgram &
     return quantifier;
 }
 
-/// Whether a match of `ops` can contain a non-ASCII byte.
-bool canMatchNonAscii(const std::vector<RegexpJIT::Op> & ops)
-{
-    for (const auto & op : ops)
-    {
-        switch (op.kind)
-        {
-            case RegexpJIT::OpKind::Literal:
-                if (std::ranges::any_of(op.literal, [](uint8_t c) { return c >= 0x80; }))
-                    return true;
-                break;
-            case RegexpJIT::OpKind::CharQuant:
-                if (!op.set.isAsciiOnly())
-                    return true;
-                break;
-            case RegexpJIT::OpKind::Optional:
-                if (canMatchNonAscii(op.body))
-                    return true;
-                break;
-            case RegexpJIT::OpKind::PrefixAnchor:
-            case RegexpJIT::OpKind::SuffixAnchor:
-            case RegexpJIT::OpKind::CaptureStart:
-            case RegexpJIT::OpKind::CaptureEnd:
-                break;
-        }
-    }
-    return false;
-}
-
 }
 
 SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool match_tokens_)
@@ -424,17 +395,13 @@ SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool matc
             "'{}' tokenizer: pattern '{}' can match an empty string, which is not supported with match_tokens = true",
             getName(), regexp_);
 
-    /// The byte-wise matchers below give exactly the same matches as RE2 (see `needs_valid_utf8`), so whether they
-    /// are used (the pattern may be unsupported, or the embedded compiler may be absent) never changes tokens.
+    /// On valid UTF-8 the byte-wise matchers below give exactly the same matches as RE2, so whether they are
+    /// used (the pattern may be unsupported, or the embedded compiler may be absent) never changes tokens.
     RegexpJIT::ParseFlags flags;
     flags.dot_all = true;
     const auto program = RegexpJIT::tryCompileToProgram(regexp_, flags);
     if (!program)
         return;
-
-    /// RE2 skips to the next match byte by byte, so a pattern matching only ASCII bytes finds the same matches
-    /// in invalid UTF-8. Otherwise the bytes of an invalid sequence may be matched by byte-wise matching only.
-    needs_valid_utf8 = canMatchNonAscii(program->ops);
 
     if (const auto * quantifier = getRepeatedCharacterClass(*program, match_tokens))
     {
@@ -443,7 +410,7 @@ SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool matc
         {
             return isASCII(c) && quantifier->set.contains(static_cast<uint8_t>(c)) != match_tokens;
         });
-        high_bytes_are_separators = needs_valid_utf8 != match_tokens;
+        high_bytes_are_separators = !quantifier->set.isAsciiOnly() != match_tokens;
         return;
     }
 
@@ -461,7 +428,6 @@ SplitByRegexpTokenizer::SplitByRegexpTokenizer(const SplitByRegexpTokenizer & ot
     , ascii_separators(other.ascii_separators)
     , high_bytes_are_separators(other.high_bytes_are_separators)
     , jit_matcher(other.jit_matcher)
-    , needs_valid_utf8(other.needs_valid_utf8)
 {
 }
 
