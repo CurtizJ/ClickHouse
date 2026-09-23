@@ -57,8 +57,8 @@ namespace
     std::unordered_map<UInt128, UInt64, UInt128Hash> regexp_seen_counter;
     constexpr size_t MAX_SEEN_COUNTER_ENTRIES = 10000;
 
-    /// Members of a set listed individually are only used when the set (or its complement) is small.
-    constexpr size_t SIMD_MEMBERS_MAX = 8;
+    /// A set is tested with SIMD as a union of byte ranges, if the set or its complement has at most this many.
+    constexpr size_t SIMD_RANGES_MAX = 8;
     constexpr uint32_t UNBOUNDED = std::numeric_limits<uint32_t>::max();
 }
 
@@ -137,6 +137,82 @@ bool isZeroWidthOp(const Op & op)
         default:
             return false;
     }
+}
+
+/// True if `ops` can match an empty string (zero-width assertions are treated as matching empty).
+bool isNullable(const std::vector<Op> & ops)
+{
+    for (const Op & op : ops)
+    {
+        switch (op.kind)
+        {
+            case OpKind::Literal:
+                if (!op.literal.empty())
+                    return false;
+                break;
+            case OpKind::CharQuant:
+                if (op.min > 0)
+                    return false;
+                break;
+            case OpKind::Alternate:
+            {
+                bool any_nullable = false;
+                for (const auto & branch : op.branches)
+                    any_nullable |= isNullable(branch);
+                if (!any_nullable)
+                    return false;
+                break;
+            }
+            case OpKind::PrefixAnchor:
+            case OpKind::SuffixAnchor:
+            case OpKind::CaptureStart:
+            case OpKind::CaptureEnd:
+            case OpKind::Optional:
+                break;
+        }
+    }
+    return true;
+}
+
+/// The set of bytes a non-empty match of `ops` can begin with. Only meaningful if `ops` is not nullable.
+CharSet firstBytes(const std::vector<Op> & ops, bool case_insensitive)
+{
+    CharSet first;
+    for (const Op & op : ops)
+    {
+        switch (op.kind)
+        {
+            case OpKind::Literal:
+                if (!op.literal.empty())
+                {
+                    first.add(op.literal[0]);
+                    if (case_insensitive)
+                        first.foldAsciiCase();
+                    return first;
+                }
+                break;
+            case OpKind::CharQuant:
+                first.unite(op.set);
+                if (op.min > 0)
+                    return first;
+                break;
+            case OpKind::Optional:
+                first.unite(firstBytes(op.body, case_insensitive));
+                break;
+            case OpKind::Alternate:
+                for (const auto & branch : op.branches)
+                    first.unite(firstBytes(branch, case_insensitive));
+                if (!isNullable({op}))
+                    return first;
+                break;
+            case OpKind::PrefixAnchor:
+            case OpKind::SuffixAnchor:
+            case OpKind::CaptureStart:
+            case OpKind::CaptureEnd:
+                break;
+        }
+    }
+    return first;
 }
 
 /// Emits LLVM IR for the per-string matcher described by a `RegexpProgram`.
@@ -225,14 +301,31 @@ public:
             b.CreateBr(loop);
             b.SetInsertPoint(loop);
 
-            auto * start = b.CreatePHI(i8_ptr, 2);
-            start->addIncoming(search_from_arg, match_entry);
+            auto * start_phi = b.CreatePHI(i8_ptr, 2);
+            start_phi->addIncoming(search_from_arg, match_entry);
+            llvm::Value * start = start_phi;
 
             auto * past_end = b.CreateICmpUGT(start, end_arg);
             auto * body = newBB("start_body");
             b.CreateCondBr(past_end, ret0, body);
 
             b.SetInsertPoint(body);
+
+            /// A match that cannot be empty starts with one of its first bytes: skip the positions holding
+            /// other bytes. If there are none till the end, there is no match, as it cannot start at `end`.
+            if (!isNullable(top_ops))
+            {
+                CharSet skip = firstBytes(top_ops, program.case_insensitive);
+                if (skip.count() != 256)
+                {
+                    skip.invert();
+                    start = emitConsumeRun(start, skip, end_arg);
+                    auto * found = newBB("start_found");
+                    b.CreateCondBr(b.CreateICmpEQ(start, end_arg), ret0, found);
+                    b.SetInsertPoint(found);
+                }
+            }
+
             match_start = start;
             initCaptures();
             leading_run_end = nullptr;
@@ -250,7 +343,7 @@ public:
                 start_next = b.CreateSelect(past, leading_run_end, start_plus_one);
             }
             b.CreateBr(loop);
-            start->addIncoming(start_next, attempt_fail);
+            start_phi->addIncoming(start_next, attempt_fail);
         }
 
         b.SetInsertPoint(ret0);
@@ -327,6 +420,9 @@ private:
                 out.push_back(op.capture_index);
             else if (op.kind == OpKind::Optional)
                 collectCaptureIndices(op.body, out);
+            else if (op.kind == OpKind::Alternate)
+                for (const auto & branch : op.branches)
+                    collectCaptureIndices(branch, out);
         }
     }
 
@@ -353,13 +449,20 @@ private:
             module, arr_type, /* isConstant */ true, llvm::GlobalValue::PrivateLinkage, init, "regexp_set");
     }
 
-    static std::vector<uint8_t> listMembers(const CharSet & set, bool complement)
+    /// The maximal ranges `[lo, hi]` of bytes that are in `set` (or not in it, if `complement`).
+    static std::vector<std::pair<uint8_t, uint8_t>> listRanges(const CharSet & set, bool complement)
     {
-        std::vector<uint8_t> members;
+        std::vector<std::pair<uint8_t, uint8_t>> ranges;
         for (unsigned c = 0; c < 256; ++c)
-            if (set.contains(static_cast<uint8_t>(c)) != complement)
-                members.push_back(static_cast<uint8_t>(c));
-        return members;
+        {
+            if (set.contains(static_cast<uint8_t>(c)) == complement)
+                continue;
+            if (!ranges.empty() && ranges.back().second + 1u == c)
+                ranges.back().second = static_cast<uint8_t>(c);
+            else
+                ranges.emplace_back(static_cast<uint8_t>(c), static_cast<uint8_t>(c));
+        }
+        return ranges;
     }
 
     /// Emit a scan that consumes the maximal run of bytes that are in `set`, starting at `cursor`,
@@ -375,24 +478,14 @@ private:
         if (in_count == 256)
             return scan_limit; /// Every byte is in the set, so the run extends all the way to `scan_limit`.
 
-        /// Pick the cheaper set to test with SIMD: the members themselves, or the stop set (complement).
-        bool stop_when_member = false;
-        std::vector<uint8_t> members;
-        bool use_simd = true;
-        if (in_count <= SIMD_MEMBERS_MAX)
-        {
-            members = listMembers(set, /* complement */ false);
-            stop_when_member = false; /// stop at the first byte that is NOT one of the members.
-        }
-        else if (256 - in_count <= SIMD_MEMBERS_MAX)
-        {
-            members = listMembers(set, /* complement */ true);
-            stop_when_member = true; /// stop at the first byte that IS a stop member.
-        }
-        else
-        {
-            use_simd = false;
-        }
+        /// Pick the cheaper set to test with SIMD: the set itself, or the stop set (complement).
+        auto ranges = listRanges(set, /* complement */ false);
+        auto stop_ranges = listRanges(set, /* complement */ true);
+        /// If true, stop at the first byte in `ranges`, otherwise at the first byte not in them.
+        const bool stop_when_member = stop_ranges.size() < ranges.size();
+        if (stop_when_member)
+            ranges = std::move(stop_ranges);
+        const bool use_simd = ranges.size() <= SIMD_RANGES_MAX;
 
         auto * set_table = bakeSetTable(set);
         auto * vec_type = llvm::FixedVectorType::get(b.getInt8Ty(), 16);
@@ -433,11 +526,17 @@ private:
             b.SetInsertPoint(simd_body);
             auto * vec = b.CreateAlignedLoad(vec_type, p, llvm::Align(1));
             llvm::Value * match_vec = nullptr;
-            for (uint8_t m : members)
+            for (auto [lo, hi] : ranges)
             {
-                auto * splat = b.CreateVectorSplat(16, b.getInt8(m));
-                auto * eq = b.CreateICmpEQ(vec, splat);
-                match_vec = match_vec ? b.CreateOr(match_vec, eq) : eq;
+                /// `lo <= x <= hi` is `x - lo <= hi - lo` in unsigned arithmetic.
+                llvm::Value * in_range = nullptr;
+                if (lo == hi)
+                    in_range = b.CreateICmpEQ(vec, b.CreateVectorSplat(16, b.getInt8(lo)));
+                else
+                    in_range = b.CreateICmpULE(
+                        b.CreateSub(vec, b.CreateVectorSplat(16, b.getInt8(lo))),
+                        b.CreateVectorSplat(16, b.getInt8(static_cast<uint8_t>(hi - lo))));
+                match_vec = match_vec ? b.CreateOr(match_vec, in_range) : in_range;
             }
             auto * match_mask = b.CreateBitCast(match_vec, b.getInt16Ty());
             auto * stop_mask = stop_when_member ? match_mask : b.CreateNot(match_mask);
@@ -587,6 +686,32 @@ private:
         matchAt(rest, cursor, fail);
     }
 
+    void emitAlternate(const Op & op, llvm::Value * cursor, const Cont * rest, llvm::BasicBlock * fail)
+    {
+        std::vector<int> indices;
+        collectCaptureIndices({op}, indices);
+        auto * null_ptr = llvm::ConstantPointerNull::get(bytePtrTy());
+
+        for (size_t i = 0; i < op.branches.size(); ++i)
+        {
+            const bool is_last = i + 1 == op.branches.size();
+            auto * next = is_last ? fail : newBB("alt_next");
+            Cont branch_cont{&op.branches[i], 0, rest};
+            matchAt(&branch_cont, cursor, next);
+
+            if (!is_last)
+            {
+                /// The failed branch may have set its captures, but it did not participate in the match.
+                b.SetInsertPoint(next);
+                for (int index : indices)
+                {
+                    storeCapture(capture_starts_arg, index, null_ptr);
+                    storeCapture(capture_ends_arg, index, null_ptr);
+                }
+            }
+        }
+    }
+
     void emitSuccess(llvm::Value * cursor)
     {
         storeCapture(capture_starts_arg, 0, match_start);
@@ -646,6 +771,9 @@ private:
                 break;
             case OpKind::Optional:
                 emitOptional(op, cursor, &rest, fail);
+                break;
+            case OpKind::Alternate:
+                emitAlternate(op, cursor, &rest, fail);
                 break;
         }
     }

@@ -23,6 +23,9 @@ constexpr int MAX_OPTIONALS = 4;
 constexpr int MAX_NONDET_QUANTIFIERS = 0;
 /// Guard against pathological nesting depth.
 constexpr int MAX_DEPTH = 16;
+/// Maximum total number of alternation branches. Like an `Optional`, every branch duplicates the continuation
+/// in the generated code, see `emittedSize`.
+constexpr int MAX_ALTERNATION_BRANCHES = 16;
 
 bool isAscii(uint8_t c) { return c < 0x80; }
 
@@ -49,7 +52,7 @@ public:
             ++pos;
         }
 
-        program.ops = parseSequence(/* depth */ 0, /* in_group */ false);
+        program.ops = parseAlternation(/* depth */ 0, /* in_group */ false);
 
         /// A trailing `$` (only valid at the very end of the top-level sequence) is recorded as
         /// `anchored_end`; `parseSequence` leaves it for us to consume here.
@@ -61,7 +64,12 @@ public:
 
         if (failed || pos != pattern.size())
             return std::nullopt;
-        if (optionals_count > MAX_OPTIONALS)
+        if (optionals_count > MAX_OPTIONALS || alternation_branches_count > MAX_ALTERNATION_BRANCHES)
+            return std::nullopt;
+
+        /// `^a|b` is `(?:^a)|b` and `a|b$` is `a|(?:b$)`, but the anchors are recorded for the whole program.
+        const bool top_level_alternation = program.ops.size() == 1 && program.ops[0].kind == OpKind::Alternate;
+        if (top_level_alternation && (program.anchored_start || program.anchored_end))
             return std::nullopt;
 
         program.num_captures = next_capture_index;
@@ -75,6 +83,7 @@ private:
     size_t pos = 0;
     int next_capture_index = 1; /// group 0 is the whole match, reserved.
     int optionals_count = 0;
+    int alternation_branches_count = 0;
     bool case_insensitive = false;
     bool dot_all = false;
     bool failed = false;
@@ -113,7 +122,30 @@ private:
         }
     }
 
-    /// Parse a sequence of atoms until end of input, or until a `)` when inside a group.
+    /// Parse sequences separated by `|` until end of input, or until a `)` when inside a group.
+    std::vector<Op> parseAlternation(int depth, bool in_group)
+    {
+        std::vector<std::vector<Op>> branches;
+        branches.push_back(parseSequence(depth, in_group));
+        while (!failed && peek() == '|')
+        {
+            ++pos; /// consume '|'.
+            branches.push_back(parseSequence(depth, in_group));
+        }
+
+        if (branches.size() == 1)
+            return std::move(branches[0]);
+
+        alternation_branches_count += static_cast<int>(branches.size());
+        Op op;
+        op.kind = OpKind::Alternate;
+        op.branches = std::move(branches);
+        std::vector<Op> ops;
+        ops.push_back(std::move(op));
+        return ops;
+    }
+
+    /// Parse a sequence of atoms until end of input, or until a `|`, or until a `)` when inside a group.
     std::vector<Op> parseSequence(int depth, bool in_group)
     {
         std::vector<Op> ops;
@@ -140,17 +172,13 @@ private:
         {
             char c = pattern[pos];
 
-            if (in_group && c == ')')
+            if ((in_group && c == ')') || c == '|')
                 break;
 
             switch (c)
             {
                 case ')':
                     bail(); /// Unbalanced close paren at top level.
-                    break;
-
-                case '|':
-                    bail(); /// Alternation is not supported yet.
                     break;
 
                 case '^':
@@ -415,7 +443,7 @@ private:
             capture_index = next_capture_index++;
 
         pos = body_start;
-        std::vector<Op> body = parseSequence(depth + 1, /* in_group */ true);
+        std::vector<Op> body = parseAlternation(depth + 1, /* in_group */ true);
         if (failed)
             return false;
         if (peek() != ')')
@@ -679,6 +707,14 @@ static CharSet analyzeFirst(std::vector<Op> & ops, const CharSet & follow, int &
                 rest_first[i].unite(after); /// the body may be skipped
                 break;
             }
+            case OpKind::Alternate:
+            {
+                /// A nullable branch includes `after` in its first-byte set by itself.
+                rest_first[i] = CharSet{};
+                for (auto & branch : op.branches)
+                    rest_first[i].unite(analyzeFirst(branch, after, nondet_quant, fork_count));
+                break;
+            }
         }
     }
 
@@ -723,6 +759,11 @@ static bool caseInsensitiveTouchesNonAsciiFold(const std::vector<Op> & ops)
                 if (caseInsensitiveTouchesNonAsciiFold(op.body))
                     return true;
                 break;
+            case OpKind::Alternate:
+                for (const auto & branch : op.branches)
+                    if (caseInsensitiveTouchesNonAsciiFold(branch))
+                        return true;
+                break;
             default:
                 break;
         }
@@ -742,6 +783,37 @@ static size_t programSize(const std::vector<Op> & ops)
             size += op.literal.size();
         else if (op.kind == OpKind::Optional)
             size += 1 + programSize(op.body);
+        else if (op.kind == OpKind::Alternate)
+        {
+            size += 1;
+            for (const auto & branch : op.branches)
+                size += programSize(branch);
+        }
+        else
+            size += 1;
+    }
+    return size;
+}
+
+/// The size of the generated code: unlike `programSize`, it accounts for the emitter duplicating the
+/// continuation `follow_size` for every branch of an `Alternate` and for both paths of an `Optional`.
+static size_t emittedSize(const std::vector<Op> & ops, size_t follow_size)
+{
+    size_t size = follow_size;
+    for (size_t i = ops.size(); i-- > 0;)
+    {
+        const Op & op = ops[i];
+        if (op.kind == OpKind::Literal)
+            size += op.literal.size();
+        else if (op.kind == OpKind::Optional)
+            size += emittedSize(op.body, size) + 1;
+        else if (op.kind == OpKind::Alternate)
+        {
+            size_t total = 1;
+            for (const auto & branch : op.branches)
+                total += emittedSize(branch, size);
+            size = total;
+        }
         else
             size += 1;
     }
@@ -788,7 +860,8 @@ std::optional<RegexpProgram> tryCompileToProgram(std::string_view pattern, const
     /// once the compile-count threshold is reached. Such patterns gain nothing from the JIT (RE2 already
     /// searches long literals optimally), so fall back to the general engine.
     constexpr size_t MAX_PROGRAM_SIZE = 256;
-    if (programSize(program->ops) > MAX_PROGRAM_SIZE)
+    constexpr size_t MAX_EMITTED_SIZE = 1024;
+    if (programSize(program->ops) > MAX_PROGRAM_SIZE || emittedSize(program->ops, 0) > MAX_EMITTED_SIZE)
         return std::nullopt;
 
     /// Mark deterministic quantifiers and bound backtracking to keep matching linear (avoid ReDoS):

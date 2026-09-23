@@ -92,6 +92,7 @@ enum class OpKind : uint8_t
     Optional,       /// `(?:...)?` / `(...)?` - greedily match `body`, or skip it.
     CaptureStart,   /// Record the cursor as the start of capture group `capture_index`.
     CaptureEnd,     /// Record the cursor as the end of capture group `capture_index`.
+    Alternate,      /// `a|b|...` - try `branches` in order, the first one that lets the rest match wins.
 };
 
 struct Op
@@ -117,6 +118,9 @@ struct Op
     /// OpKind::Optional
     std::vector<Op> body;
     bool optional_greedy = true;
+
+    /// OpKind::Alternate
+    std::vector<std::vector<Op>> branches;
 };
 
 struct RegexpProgram
