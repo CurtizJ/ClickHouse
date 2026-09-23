@@ -4,12 +4,14 @@
 
 #include <Common/ByteSetLookup.h>
 #include <Common/assert_cast.h>
+#include <Common/isValidUTF8.h>
 #include <Common/OptimizedRegularExpression.h>
 #include <Common/StringUtils.h>
 #include <Columns/IColumn_fwd.h>
 #include <Common/PODArray_fwd.h>
 #include <Common/VectorWithMemoryTracking.h>
 #include <Functions/sparseGramsImpl.h>
+#include <Interpreters/JIT/CompileRegexp.h>
 #include <Interpreters/BloomFilter.h>
 #include <base/FnTraits.h>
 #include <base/types.h>
@@ -218,6 +220,25 @@ inline ALWAYS_INLINE UInt32 separatorBits(const ByteSetLookup & separators, cons
     return bits & ((1u << block_length) - 1);
 }
 
+/// Same as `separatorBits`, and also sets bit `i` of `high_bits` iff byte `i` of the block is not ASCII.
+inline ALWAYS_INLINE UInt32 separatorAndHighBits(const ByteSetLookup & separators, const char * block, size_t block_length, UInt32 & high_bits)
+{
+    const UInt32 valid = (1u << block_length) - 1;
+#if !defined(MEMORY_SANITIZER) /// MSan cannot see that the bits of the uninitialized padding bytes are discarded
+    UInt32 bits = separators.matchBlockAndHighBits(block, high_bits);
+#else
+    UInt32 bits = 0;
+    high_bits = 0;
+    for (size_t i = 0; i < block_length; ++i)
+    {
+        bits |= static_cast<UInt32>(separators.contains(block[i])) << i;
+        high_bits |= static_cast<UInt32>(static_cast<UInt8>(block[i]) >= 0x80) << i;
+    }
+#endif
+    high_bits &= valid;
+    return bits & valid;
+}
+
 /// Calls `callback` for every token split by bytes in `separators`.
 template <typename Callback>
 void forEachTokenSplitByBytes(const ByteSetLookup & separators, const char * __restrict data, size_t length, Callback && callback)
@@ -382,6 +403,11 @@ private:
 struct SplitByRegexpTokenizer final : public ITokenizerHelper<SplitByRegexpTokenizer>
 {
     explicit SplitByRegexpTokenizer(const String & regexp_, bool match_tokens_ = false);
+    /// Recompiles the regexp: RE2 guards its DFA cache with a single lock, which serializes threads sharing it.
+    SplitByRegexpTokenizer(const SplitByRegexpTokenizer & other);
+
+    /// Not mutable, but callers must clone it per thread to get a private RE2, see the copy constructor.
+    bool isStateful() const override { return true; }
 
     static const char * getName() { return "splitByRegexp"; }
     static const char * getExternalName() { return getName(); }
@@ -395,14 +421,24 @@ struct SplitByRegexpTokenizer final : public ITokenizerHelper<SplitByRegexpToken
     void substringToTokens(const char * data, size_t length, VectorWithMemoryTracking<String> & tokens, bool is_prefix, bool is_suffix) const override;
 
     /// Hot-path tokenizer used by the free `forEachToken` (index build, search, the `tokens` function).
-    /// It reuses a single `MatchVec` across all tokens of the string, so - unlike a per-call `nextInString` -
-    /// it does not heap-allocate the RE2 match scratch for every emitted token. The buffer is a local, so the
-    /// method stays `const` and reentrant.
+    /// Uses a byte set or the JIT-compiled matcher when they are equivalent to RE2 on the string.
     template <Fn<bool(const char *, size_t)> Callback>
     void forEachTokenImpl(const char * data, size_t length, Callback && callback) const
     {
+        if (ascii_separators)
+            forEachTokenByBytes(data, length, callback);
+        else if (jit_matcher && (!needs_valid_utf8 || UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(data), length)))
+            forEachTokenJIT(data, length, callback);
+        else
+            forEachTokenRE2(data, length, 0, callback);
+    }
+
+private:
+    /// Tokens of `[data + pos, data + length)`, found with RE2 using the whole string as the context.
+    template <typename Callback>
+    void forEachTokenRE2(const char * data, size_t length, size_t pos, Callback && callback) const
+    {
         OptimizedRegularExpression::MatchVec matches;
-        size_t pos = 0;
         size_t token_start = 0;
         size_t token_length = 0;
 
@@ -411,7 +447,91 @@ struct SplitByRegexpTokenizer final : public ITokenizerHelper<SplitByRegexpToken
                 return;
     }
 
-private:
+    /// Splits by `ascii_separators`, plus all non-ASCII bytes if `high_bytes_are_separators`, in one pass.
+    /// If `needs_valid_utf8`, the rest of the string is validated at the first non-ASCII byte, and invalid
+    /// UTF-8 is handed over to RE2 from the current token: the tokens before it end at ASCII separators,
+    /// which both agree on.
+    template <typename Callback>
+    void forEachTokenByBytes(const char * data, size_t length, Callback && callback) const
+    {
+        const char * end = data + length;
+        const char * token_start = data;
+        bool is_valid_utf8 = !needs_valid_utf8;
+
+        for (const char * block = data; block < end; block += ByteSetLookup::BLOCK_SIZE)
+        {
+            const size_t block_length = std::min<size_t>(end - block, ByteSetLookup::BLOCK_SIZE);
+            UInt32 high_bits = 0;
+            UInt32 separator_bits = detail::separatorAndHighBits(*ascii_separators, block, block_length, high_bits);
+
+            if (high_bits != 0 && !is_valid_utf8)
+            {
+                /// The bytes before `block` are ASCII, so the string is valid UTF-8 iff its rest is.
+                if (!UTF8::isValidUTF8(reinterpret_cast<const UInt8 *>(block), end - block))
+                {
+                    forEachTokenRE2(data, length, token_start - data, callback);
+                    return;
+                }
+                is_valid_utf8 = true;
+            }
+
+            if (high_bytes_are_separators)
+                separator_bits |= high_bits;
+
+            while (separator_bits != 0)
+            {
+                const char * separator = block + std::countr_zero(separator_bits);
+                separator_bits &= separator_bits - 1;
+
+                if (separator > token_start && callback(token_start, separator - token_start))
+                    return;
+
+                token_start = separator + 1;
+            }
+        }
+
+        if (token_start < end)
+            callback(token_start, end - token_start);
+    }
+
+    /// Same as `forEachTokenRE2`, but with the JIT-compiled matcher.
+    template <typename Callback>
+    void forEachTokenJIT(const char * data, size_t length, Callback && callback) const
+    {
+        const auto * begin = reinterpret_cast<const uint8_t *>(data);
+        const auto * end = begin + length;
+        const uint8_t * capture_starts[max_jit_captures];
+        const uint8_t * capture_ends[max_jit_captures];
+        const uint8_t * pos = begin;
+
+        while (pos <= end && jit_matcher.func(begin, end, pos, capture_starts, capture_ends) == 1)
+        {
+            if (capture_ends[0] == capture_starts[0])
+            {
+                if (match_tokens)
+                    throwEmptyMatch();
+                /// An empty match is treated as "no separator", like in `nextRegexpMatch`.
+                break;
+            }
+
+            const uint8_t * token_begin = match_tokens ? capture_starts[token_group] : pos;
+            const uint8_t * token_end = match_tokens ? capture_ends[token_group] : capture_starts[0];
+            pos = capture_ends[0];
+
+            if (token_begin && token_end > token_begin
+                && callback(reinterpret_cast<const char *>(token_begin), token_end - token_begin))
+                return;
+        }
+
+        if (!match_tokens && pos < end)
+            callback(reinterpret_cast<const char *>(pos), end - pos);
+    }
+
+    [[noreturn]] void throwEmptyMatch() const;
+
+    /// The JIT matcher writes all capture groups, so patterns with more groups are matched by RE2 only.
+    static constexpr int max_jit_captures = 16;
+
     /// Single split step, taking caller-owned RE2 match scratch so the hot path can reuse one buffer.
     /// Dispatches to `nextMatchedToken` when `match_tokens` is set.
     bool nextInStringImpl(
@@ -424,14 +544,20 @@ private:
 
     String regexp_str;
     bool match_tokens;
-    /// `shared_ptr` (rather than a plain member) so that the tokenizer stays copyable for `clone`, since
-    /// `OptimizedRegularExpression` is non-copyable. The compiled regexp is immutable and safe to share.
-    std::shared_ptr<OptimizedRegularExpression> regexp;
+    OptimizedRegularExpression regexp;
     /// Index into the RE2 match vector of the span that becomes the token in `match_tokens` mode:
     /// capture group 1 when the pattern has capture groups, otherwise 0 (the whole match).
     /// Loop-invariant, so it is resolved once at construction rather than per match. Unused otherwise.
     /// Declared after `regexp` because it is derived from it.
     size_t token_group;
+    /// The ASCII separator bytes, if the pattern is a repeated character class. See `forEachTokenByBytes`.
+    std::optional<ByteSetLookup> ascii_separators;
+    bool high_bytes_are_separators = false;
+    /// Otherwise, the JIT-compiled matcher, if the pattern is in the supported subset.
+    RegexpJITMatcher jit_matcher;
+    /// Byte-wise matching gives the same matches as RE2 on any string if the pattern matches only ASCII bytes,
+    /// and otherwise only on valid UTF-8.
+    bool needs_valid_utf8 = true;
 };
 
 /// Parser doing "no operation". Returns the entire input as a single token.

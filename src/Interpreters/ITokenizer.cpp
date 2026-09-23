@@ -10,6 +10,8 @@
 #include <Common/UTF8Helpers.h>
 #include <Common/PODArray.h>
 #include <Functions/Regexps.h>
+#include <Common/RegexpJIT/RegexpProgram.h>
+#include <Interpreters/JIT/CompileRegexp.h>
 #include <IO/VarInt.h>
 
 #include <algorithm>
@@ -344,25 +346,123 @@ String SplitByStringTokenizer::getDescription() const
     return result + "])";
 }
 
+namespace
+{
+
+/// If the pattern is a character class `C` repeated `{1,n}` times (`C`, `C+`, ...), optionally in a capture group,
+/// splitting by it is splitting by the bytes of `C`: runs of separators give empty pieces, which are skipped.
+/// In `match_tokens` mode only `C+` qualifies, its matches are the maximal runs of `C`, i.e. the pieces between
+/// the bytes out of `C`. Returns the quantifier of `C`, or nullptr for other patterns.
+const RegexpJIT::Op * getRepeatedCharacterClass(const RegexpJIT::RegexpProgram & program, bool match_tokens)
+{
+    if (program.anchored_start || program.anchored_end)
+        return nullptr;
+
+    const RegexpJIT::Op * quantifier = nullptr;
+    for (const auto & op : program.ops)
+    {
+        if (op.kind == RegexpJIT::OpKind::CaptureStart || op.kind == RegexpJIT::OpKind::CaptureEnd)
+            continue;
+        if (op.kind != RegexpJIT::OpKind::CharQuant || quantifier)
+            return nullptr;
+        quantifier = &op;
+    }
+
+    if (!quantifier || quantifier->min != 1 || (match_tokens && quantifier->max != std::numeric_limits<uint32_t>::max()))
+        return nullptr;
+    return quantifier;
+}
+
+/// Whether a match of `ops` can contain a non-ASCII byte.
+bool canMatchNonAscii(const std::vector<RegexpJIT::Op> & ops)
+{
+    for (const auto & op : ops)
+    {
+        switch (op.kind)
+        {
+            case RegexpJIT::OpKind::Literal:
+                if (std::ranges::any_of(op.literal, [](uint8_t c) { return c >= 0x80; }))
+                    return true;
+                break;
+            case RegexpJIT::OpKind::CharQuant:
+                if (!op.set.isAsciiOnly())
+                    return true;
+                break;
+            case RegexpJIT::OpKind::Optional:
+                if (canMatchNonAscii(op.body))
+                    return true;
+                break;
+            case RegexpJIT::OpKind::PrefixAnchor:
+            case RegexpJIT::OpKind::SuffixAnchor:
+            case RegexpJIT::OpKind::CaptureStart:
+            case RegexpJIT::OpKind::CaptureEnd:
+                break;
+        }
+    }
+    return false;
+}
+
+}
+
 SplitByRegexpTokenizer::SplitByRegexpTokenizer(const String & regexp_, bool match_tokens_)
     : ITokenizerHelper(Type::SplitByRegexp)
     , regexp_str(regexp_)
     , match_tokens(match_tokens_)
     /// Captures are tracked in both modes for simplicity, though only `match_tokens` mode reads them.
-    , regexp(std::make_shared<OptimizedRegularExpression>(regexp_, OptimizedRegularExpression::RE_DOT_NL))
+    , regexp(regexp_, OptimizedRegularExpression::RE_DOT_NL)
     /// A pattern with capture groups is never "trivial", so whenever `getNumberOfSubpatterns()` is
     /// non-zero, index 1 is always populated. See the `chassert` in `nextInStringImpl`.
-    , token_group(match_tokens_ && regexp->getNumberOfSubpatterns() > 0 ? 1 : 0)
+    , token_group(match_tokens_ && regexp.getNumberOfSubpatterns() > 0 ? 1 : 0)
 {
     /// Best-effort: reject patterns that can match empty (they'd get `nextMatchedToken` stuck). Not
     /// exhaustive - a zero-width assertion (`\b`, `$`) can still match empty only in some contexts,
     /// which this check can't see; `nextMatchedToken` catches that case at the point of use instead.
     OptimizedRegularExpression::MatchVec probe_matches;
-    if (match_tokens_ && regexp->match("", 0, probe_matches) > 0)
+    if (match_tokens_ && regexp.match("", 0, probe_matches) > 0)
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
             "'{}' tokenizer: pattern '{}' can match an empty string, which is not supported with match_tokens = true",
             getName(), regexp_);
+
+    /// The byte-wise matchers below give exactly the same matches as RE2 (see `needs_valid_utf8`), so whether they
+    /// are used (the pattern may be unsupported, or the embedded compiler may be absent) never changes tokens.
+    RegexpJIT::ParseFlags flags;
+    flags.dot_all = true;
+    const auto program = RegexpJIT::tryCompileToProgram(regexp_, flags);
+    if (!program)
+        return;
+
+    /// RE2 skips to the next match byte by byte, so a pattern matching only ASCII bytes finds the same matches
+    /// in invalid UTF-8. Otherwise the bytes of an invalid sequence may be matched by byte-wise matching only.
+    needs_valid_utf8 = canMatchNonAscii(program->ops);
+
+    if (const auto * quantifier = getRepeatedCharacterClass(*program, match_tokens))
+    {
+        /// The class is either ASCII-only, or a negated one that contains all non-ASCII characters.
+        ascii_separators = ByteSetLookup::fromPredicate([&](char c)
+        {
+            return isASCII(c) && quantifier->set.contains(static_cast<uint8_t>(c)) != match_tokens;
+        });
+        high_bytes_are_separators = needs_valid_utf8 != match_tokens;
+        return;
+    }
+
+    jit_matcher = getRegexpJITMatcher(regexp_, /* case_insensitive */ false, /* dot_all */ true, /* min_count_to_compile */ 0);
+    if (jit_matcher.num_captures > max_jit_captures)
+        jit_matcher = {};
+}
+
+SplitByRegexpTokenizer::SplitByRegexpTokenizer(const SplitByRegexpTokenizer & other)
+    : ITokenizerHelper(Type::SplitByRegexp)
+    , regexp_str(other.regexp_str)
+    , match_tokens(other.match_tokens)
+    , regexp(regexp_str, OptimizedRegularExpression::RE_DOT_NL)
+    , token_group(other.token_group)
+    , ascii_separators(other.ascii_separators)
+    , high_bytes_are_separators(other.high_bytes_are_separators)
+    , jit_matcher(other.jit_matcher)
+    , needs_valid_utf8(other.needs_valid_utf8)
+{
 }
 
 bool SplitByRegexpTokenizer::nextInStringImpl(
@@ -377,7 +477,7 @@ bool SplitByRegexpTokenizer::nextInStringImpl(
         size_t match_start = 0;
         size_t match_length = 0;
 
-        if (nextRegexpMatch(*regexp, data, length, pos, match_start, match_length, matches))
+        if (nextRegexpMatch(regexp, data, length, pos, match_start, match_length, matches))
         {
             /// The token is the text preceding the separator; `pos` has already advanced past the separator.
             if (match_start > token_begin)
@@ -410,7 +510,7 @@ bool SplitByRegexpTokenizer::nextMatchedToken(
 {
     while (pos <= length)
     {
-        if (regexp->match(data, length, pos, matches) == 0)
+        if (regexp.match(data, length, pos, matches) == 0)
         {
             pos = length + 1; /// Mark exhausted so subsequent calls return false.
             return false;
@@ -419,14 +519,9 @@ bool SplitByRegexpTokenizer::nextMatchedToken(
         chassert(token_group < matches.size());
         const auto & whole_match = matches[0];
 
+        /// Safety net for context-dependent cases (e.g. `\b`) the constructor's check can't see.
         if (whole_match.length == 0)
-        {
-            /// Safety net for context-dependent cases (e.g. `\b`) the constructor's check can't see.
-            throw Exception(
-                ErrorCodes::BAD_ARGUMENTS,
-                "'{}' tokenizer: pattern '{}' matched an empty string, which is not supported with match_tokens = true",
-                getName(), regexp_str);
-        }
+            throwEmptyMatch();
 
         /// Advance past the whole match, not just the captured span, so matches never overlap.
         pos = whole_match.offset + whole_match.length;
@@ -443,6 +538,14 @@ bool SplitByRegexpTokenizer::nextMatchedToken(
     }
 
     return false;
+}
+
+void SplitByRegexpTokenizer::throwEmptyMatch() const
+{
+    throw Exception(
+        ErrorCodes::BAD_ARGUMENTS,
+        "'{}' tokenizer: pattern '{}' matched an empty string, which is not supported with match_tokens = true",
+        getName(), regexp_str);
 }
 
 bool SplitByRegexpTokenizer::nextInString(const char * data, size_t length, size_t & pos, size_t & token_start, size_t & token_length) const
