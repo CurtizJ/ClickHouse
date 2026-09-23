@@ -6,6 +6,7 @@
 #include <Common/assert_cast.h>
 #include <Common/OptimizedRegularExpression.h>
 #include <Common/StringUtils.h>
+#include <Common/UTF8Helpers.h>
 #include <Columns/IColumn_fwd.h>
 #include <Common/PODArray_fwd.h>
 #include <Common/VectorWithMemoryTracking.h>
@@ -191,6 +192,28 @@ struct NgramsTokenizer final : public ITokenizerHelper<NgramsTokenizer>
     bool nextInStringLike(const char * data, size_t length, size_t & pos, String & token) const override;
 
     size_t getN() const { return n; }
+
+    /// Hot-path tokenizer used by the free `forEachToken`, equivalent to repeated `nextInString`.
+    /// Slides a window of `n` code points: `start` is its first code point, `last` is its last one.
+    template <typename Callback>
+    void forEachTokenImpl(const char * __restrict data, size_t length, Callback && callback) const
+    {
+        size_t start = 0;
+        size_t last = 0;
+        for (size_t i = 1; i < n && last < length; ++i)
+            last += UTF8::seqLength(static_cast<UInt8>(data[last]));
+
+        while (last < length)
+        {
+            const size_t end = last + UTF8::seqLength(static_cast<UInt8>(data[last]));
+            /// A truncated trailing sequence is cut at the end of the data.
+            if (callback(data + start, std::min(end, length) - start))
+                return;
+
+            start += UTF8::seqLength(static_cast<UInt8>(data[start]));
+            last = end;
+        }
+    }
 
     bool supportsStringLike() const override { return true; }
     void substringToBloomFilter(const char * data, size_t length, BloomFilter & bloom_filter, bool is_prefix, bool is_suffix) const override;
@@ -728,7 +751,7 @@ void forEachToken(const ITokenizer & tokenizer, const char * __restrict data, si
             if (length < ngrams_tokenizer.getN())
                 return;
 
-            detail::forEachTokenImpl(ngrams_tokenizer, data, length, callback);
+            ngrams_tokenizer.forEachTokenImpl(data, length, callback);
             return;
         }
         case ITokenizer::Type::SplitByString:
