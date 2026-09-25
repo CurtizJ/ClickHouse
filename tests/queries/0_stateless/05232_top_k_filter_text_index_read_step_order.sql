@@ -7,7 +7,7 @@ DROP TABLE IF EXISTS t_top_k_text_index_order;
 -- Small posting list blocks, so that the number of decoded blocks follows the number of granules read by the index step.
 CREATE TABLE t_top_k_text_index_order (key UInt64, value UInt64, s String, INDEX idx_s s TYPE text(tokenizer = splitByNonAlpha, posting_list_codec = 'bitpacking', posting_list_block_size = 1024))
 ENGINE = MergeTree ORDER BY key
-SETTINGS index_granularity = 1024, index_granularity_bytes = '10M';
+SETTINGS index_granularity = 1024, index_granularity_bytes = '10M', min_bytes_for_wide_part = 0;
 
 -- `value` decreases with `key`, so the first granules hold the largest values and the threshold
 -- of `ORDER BY value DESC` is final after the first block.
@@ -16,6 +16,7 @@ INSERT INTO t_top_k_text_index_order SELECT number, 1000000 - number, if(number 
 SET use_top_k_dynamic_filtering = 1, use_skip_indexes_for_top_k = 0, use_query_condition_cache = 0, enable_parallel_replicas = 0, max_threads = 1;
 SET use_skip_indexes_on_data_read = 1, query_plan_direct_read_from_text_index = 1, use_text_index_postings_cache = 0;
 SET merge_tree_read_split_ranges_into_intersecting_and_non_intersecting_injection_probability = 0;
+SET query_plan_max_limit_for_top_k_optimization = 1000, enable_multiple_prewhere_read_steps = 1;
 
 SELECT '-- results';
 SELECT key, value FROM t_top_k_text_index_order WHERE hasToken(s, 'even') ORDER BY value DESC LIMIT 5;

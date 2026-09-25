@@ -149,15 +149,15 @@ SELECT '-- `__topKFilter` in PREWHERE must still populate the cache';
 CREATE TABLE tab_topk (k UInt32, v1 UInt32, v2 UInt32) ENGINE = MergeTree ORDER BY k
 SETTINGS index_granularity = 64, min_bytes_for_wide_part = 0, add_minmax_index_for_numeric_columns = 0;
 INSERT INTO tab_topk SELECT number, number, number FROM numbers(100000);
--- `__topKFilter` actually reaching PREWHERE is what this arm exists to exercise: the cache count below
--- reads 1 either way, because without it the read has no PREWHERE and the WHERE filter is tagged as
--- before.
+-- `__topKFilter` actually reaching PREWHERE, as its first read step, is what this arm exists to exercise:
+-- the cache count below reads 1 either way, because without it the read has no PREWHERE and the WHERE
+-- filter is tagged as before.
 SELECT count() > 0 FROM (EXPLAIN actions = 1, pretty = 0 SELECT v1 FROM tab_topk WHERE v2 = 10000 ORDER BY v1 ASC LIMIT 5
     SETTINGS use_query_condition_cache_for_top_k = 1, use_top_k_dynamic_filtering = 1,
              use_skip_indexes_for_top_k = 1, query_plan_max_limit_for_top_k_optimization = 1000,
              optimize_move_to_prewhere = 0, max_block_size = 4096,
              query_plan_max_step_description_length = 1000)
-WHERE explain ILIKE '%prewhere filter column: %__topkfilter(%';
+WHERE explain ILIKE '%topk filter column: %__topkfilter(%';
 SYSTEM CLEAR QUERY CONDITION CACHE;
 SELECT v1 FROM tab_topk WHERE v2 = 10000 ORDER BY v1 ASC LIMIT 5
 SETTINGS use_query_condition_cache_for_top_k = 1, use_top_k_dynamic_filtering = 1,

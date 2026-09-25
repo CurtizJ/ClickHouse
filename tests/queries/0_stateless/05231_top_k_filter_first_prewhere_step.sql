@@ -6,13 +6,17 @@ DROP TABLE IF EXISTS t_top_k_first;
 
 CREATE TABLE t_top_k_first (key UInt64, value UInt64, s String)
 ENGINE = MergeTree ORDER BY key
-SETTINGS index_granularity = 1024;
+SETTINGS index_granularity = 1024, index_granularity_bytes = '10Mi', min_bytes_for_wide_part = 0;
 
 -- `value` decreases with `key`, so the first granules hold the largest values and the threshold
 -- of `ORDER BY value DESC` is final after the first block.
 INSERT INTO t_top_k_first SELECT number, 1000000 - number, toString(number % 100) FROM numbers(200000);
 
 SET use_top_k_dynamic_filtering = 1, use_skip_indexes_for_top_k = 0, use_query_condition_cache = 0, enable_parallel_replicas = 0, max_threads = 1;
+SET query_plan_max_limit_for_top_k_optimization = 1000, max_block_size = 1024, enable_multiple_prewhere_read_steps = 1;
+-- The plans below print the PREWHERE conditions, whose form and order depend on these.
+SET optimize_functions_to_subcolumns = 1, allow_reorder_prewhere_conditions = 0, optimize_empty_string_comparisons = 1;
+SET optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1;
 SET explain_query_plan_default = 'legacy';
 
 SELECT '-- plan: the conditions are in PREWHERE together with the top-K filter';

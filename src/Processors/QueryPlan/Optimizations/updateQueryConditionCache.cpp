@@ -58,11 +58,12 @@ void updateQueryConditionCache(const Stack & stack, const QueryPlanOptimizationS
 
     /// PREWHERE runs before the tagged filter sees a row, so a granule that filter empties may still
     /// hold rows only PREWHERE removed. Sound while the PREWHERE condition is in `filter_actions_dag`
-    /// (the hash covers it) or is `__topKFilter` (key salted with the TopK plan); a runtime filter is neither.
+    /// (the hash covers it); a runtime filter is not. The top-K filter is a separate read step, not a part
+    /// of the PREWHERE, and the key is salted with the TopK plan for it.
     if (const auto & prewhere_info = read_from_merge_tree->getPrewhereInfo())
     {
         const auto * prewhere_node = prewhere_info->prewhere_actions.tryFindInOutputs(prewhere_info->prewhere_column_name);
-        if (!prewhere_node || !isDeterministicAllowingTopKFilter(prewhere_node))
+        if (!prewhere_node || !VirtualColumnUtils::isDeterministic(prewhere_node))
             return;
     }
 

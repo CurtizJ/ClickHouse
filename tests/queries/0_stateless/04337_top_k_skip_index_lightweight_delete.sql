@@ -6,6 +6,8 @@
 -- prune the part that actually holds the live top rows, yielding empty results.
 
 SET query_plan_max_limit_for_top_k_optimization = 1000;
+-- The plans below print the dynamic top-K filter next to the skip-index granule selection.
+SET use_top_k_dynamic_filtering = 1;
 
 -- Materialized lightweight delete: the deleted part's stale [0,0] minmax must not prune the live part.
 DROP TABLE IF EXISTS topk_lwd;
