@@ -305,8 +305,10 @@ public:
     void setIndexReadTasks(IndexReadTasks index_read_tasks_) { index_read_tasks = std::move(index_read_tasks_); }
 
     /// The top-K dynamic filter the readers apply as their first PREWHERE step, or null if the read
-    /// is not stamped for dynamic filtering by `tryOptimizeTopK` (see `TopKFilterInfo::dynamic_filtering`).
+    /// is not stamped for dynamic filtering by `tryOptimizeTopK` (see `TopKFilterInfo::dynamic_filtering`)
+    /// or reads in order.
     TopKReadFilterPtr getTopKReadFilter() const;
+    bool hasTopKReadFilter() const;
 
     /// True if a coordinator-side snapshot boundary is pinned (e.g. select_sequential_consistency).
     /// Such a read cannot be distributed: a worker reads from its own snapshot and cannot reproduce it.

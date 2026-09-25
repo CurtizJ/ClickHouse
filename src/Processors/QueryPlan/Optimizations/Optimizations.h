@@ -227,7 +227,8 @@ size_t tryPropagatePredicateAcrossEquiJoin(QueryPlan::Node * parent_node, QueryP
 /// Try to prune LHS table granules using JoinRuntimeFilter & index analysis
 void registerLeftSideIndexAnalysisSecondPass(QueryPlan::Node & node, const QueryPlanOptimizationSettings & optimization_settings);
 
-/// Optimize ORDER BY ... LIMIT n query by using skip index or Prewhere threshold filtering
+/// Optimize ORDER BY ... LIMIT n query by using skip index or a threshold filter, pushed down through
+/// joins and unions into the reads (as the first PREWHERE read step)
 size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & nodes, const Optimization::ExtraSettings & settings);
 
 /// Push LIMIT into GROUP BY via bounded heap when GROUP BY matches or is a prefix of ORDER BY keys
@@ -271,8 +272,11 @@ inline const auto & getOptimizations()
          "convertAnyJoinToSemiOrAntiJoin",
          &QueryPlanOptimizationSettings::convert_any_join_to_semi_or_anti_join},
         {tryRemoveUnusedColumns, "removeUnusedColumns", &QueryPlanOptimizationSettings::remove_unused_columns},
-        {tryOptimizeTopK, "tryOptimizeTopK", &QueryPlanOptimizationSettings::try_use_top_k_optimization},
+        /// Before `tryOptimizeTopK`: the `Sort + Limit` it adds on the preserved side of a join gets the full
+        /// top-K optimization of its own read (including the skip-index marks), and the dynamic filter of the
+        /// outer sort then stops at that `Limit` instead of taking the read first.
         {tryTopKThroughJoin, "topKThroughJoin", &QueryPlanOptimizationSettings::top_k_through_join},
+        {tryOptimizeTopK, "tryOptimizeTopK", &QueryPlanOptimizationSettings::try_use_top_k_optimization},
     });
 
     return optimizations;

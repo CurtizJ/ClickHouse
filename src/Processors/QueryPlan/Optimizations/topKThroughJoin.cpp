@@ -246,7 +246,8 @@ size_t tryTopKThroughJoin(QueryPlan::Node * parent_node, QueryPlan::Nodes & node
     /// `Post Join Actions`, occasionally with one more wrapper.
     SortDescription description = sort_step->getSortDescription();
     QueryPlan::Node * join_node = sort_node->children.front();
-    for (size_t peeled = 0; peeled < 4; ++peeled)
+    size_t num_peeled = 0;
+    for (; num_peeled < 4; ++num_peeled)
     {
         auto * expression_step = typeid_cast<ExpressionStep *>(join_node->step.get());
         if (!expression_step)
@@ -465,9 +466,10 @@ size_t tryTopKThroughJoin(QueryPlan::Node * parent_node, QueryPlan::Nodes & node
 
     join_node->children[preserved_idx] = &new_limit_node;
 
-    /// Re-run optimizations on the modified subtree so the inserted Sort+Limit can
-    /// be picked up by tryOptimizeTopK / tryPushDownLimit etc.
-    return 3;
+    /// Re-run optimizations on the modified subtree down to the inserted Limit, so that the
+    /// inserted Sort+Limit is picked up by tryOptimizeTopK / tryPushDownLimit etc.: it is below
+    /// the Sort, the peeled ExpressionSteps and the Join.
+    return num_peeled + 4;
 }
 
 }

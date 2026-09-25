@@ -5581,7 +5581,7 @@ void ReadFromMergeTree::describeActions(FormatSettings & format_settings) const
     if (format_settings.pretty)
         QueryPlanFormat::formatOutputColumns(format_settings.pretty_names, format_settings.out, *this, prefix);
 
-    const bool has_top_k_read_filter = top_k_filter_info && top_k_filter_info->dynamic_filtering;
+    const bool has_top_k_read_filter = hasTopKReadFilter();
 
     if (query_info.prewhere_info || query_info.row_level_filter || has_top_k_read_filter)
     {
@@ -5708,7 +5708,7 @@ void ReadFromMergeTree::describeActions(JSONBuilder::JSONMap & map) const
         map.add("Read each partition through separate port", true);
 
     std::unique_ptr<JSONBuilder::JSONMap> prewhere_info_map;
-    const bool has_top_k_read_filter = top_k_filter_info && top_k_filter_info->dynamic_filtering;
+    const bool has_top_k_read_filter = hasTopKReadFilter();
     if (query_info.prewhere_info || query_info.row_level_filter || has_top_k_read_filter)
     {
         prewhere_info_map = std::make_unique<JSONBuilder::JSONMap>();
@@ -6170,9 +6170,16 @@ void ReadFromMergeTree::setTopKColumn(const TopKFilterInfo & top_k_filter_info_)
     top_k_filter_info->condition_hash = combined_hash;
 }
 
+bool ReadFromMergeTree::hasTopKReadFilter() const
+{
+    /// Reading in the order of the sort makes the threshold reject every row after the first `n`, so the
+    /// LIMIT could no longer stop the read early and it would degenerate into a full scan.
+    return top_k_filter_info && top_k_filter_info->dynamic_filtering && !query_info.input_order_info;
+}
+
 TopKReadFilterPtr ReadFromMergeTree::getTopKReadFilter() const
 {
-    if (!top_k_filter_info || !top_k_filter_info->dynamic_filtering)
+    if (!hasTopKReadFilter())
         return nullptr;
 
     if (!top_k_filter_info->threshold_tracker)

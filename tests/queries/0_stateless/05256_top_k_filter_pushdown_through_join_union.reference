@@ -1,0 +1,70 @@
+-- INNER JOIN: the read of the left input takes the filter
+1
+7	999993	g0
+107	999893	g1
+207	999793	g2
+307	999693	g3
+407	999593	g4
+7	999993	g0
+107	999893	g1
+207	999793	g2
+307	999693	g3
+407	999593	g4
+-- LEFT JOIN: the read of the left input takes the filter
+1
+99999	900001	
+99998	900002	
+99997	900003	
+99996	900004	
+99995	900005	
+99999	900001	
+99998	900002	
+99997	900003	
+99996	900004	
+99995	900005	
+99999	900001	
+99998	900002	
+99997	900003	
+99996	900004	
+99995	900005	
+-- RIGHT and FULL JOIN: unmatched right rows carry default left columns, no filter
+0
+0
+-- the sort column from the right input: no filter
+0
+-- the left input has no read to take the filter: no filter
+0
+7	999993	g0
+107	999893	g1
+207	999793	g2
+7	999993	g0
+107	999893	g1
+207	999793	g2
+-- UNION ALL: the reads of both inputs take the filter
+2
+0	2000000
+1	1999998
+2	1999996
+3	1999994
+4	1999992
+0	2000000
+1	1999998
+2	1999996
+3	1999994
+4	1999992
+-- a condition which depends on the block stops the filter: no filter
+0
+-- LEFT JOIN with a minmax index: the Sort + Limit of topKThroughJoin selects the top-K granules
+1
+0	1000000	
+1	999999	
+2	999998	
+3	999997	
+4	999996	
+0	1000000	
+1	999999	
+2	999998	
+3	999997	
+4	999996	
+-- the filter reads fewer rows of the left input
+1
