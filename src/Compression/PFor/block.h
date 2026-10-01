@@ -178,12 +178,19 @@ inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, Delta mode,
         if (k > sizeof(T) || !need(in + 1, k)) // loadLE reads k bytes
             return 0;
         const T c = static_cast<T>(loadLE(in + 1, k));
-        for (unsigned i = 0; i < cnt; ++i)
-            out[i] = c;
-        if (mode == Delta::d1)
-            deltaApply<T, 1>(out, cnt, prev);
-        else if (mode == Delta::d0)
-            deltaApply<T, 0>(out, cnt, prev);
+        if (mode == Delta::none)
+        {
+            for (unsigned i = 0; i < cnt; ++i)
+                out[i] = c;
+        }
+        else
+        {
+            // A constant gap needs no prefix sum: value i is prev + (i + 1) * gap, with no loop-carried chain.
+            const T gap = static_cast<T>(c + (mode == Delta::d1 ? 1u : 0u));
+            for (unsigned i = 0; i < cnt; ++i)
+                out[i] = static_cast<T>(prev + gap * static_cast<T>(i + 1));
+            prev = static_cast<T>(prev + gap * static_cast<T>(cnt));
+        }
         return 1u + k;
     }
 
@@ -208,21 +215,6 @@ inline size_t blockDecode(const uint8_t * in, unsigned cnt, T * out, Delta mode,
     const size_t base_bytes = packedBytes(cnt, b);
     if (!need(p, base_bytes))
         return 0;
-
-    // Fused single pass: a full uint32 delta block with no exceptions unpacks and prefix-sums in one sweep.
-#if PFOR_HAS_VERTICAL
-    if constexpr (sizeof(T) == 4)
-        if (mode != Delta::none && e == 0 && cnt == BLOCK && b >= 1 && b <= 31)
-        {
-            uint32_t carry = static_cast<uint32_t>(prev);
-            if (mode == Delta::d1)
-                unpackVertical32FusedDelta<1>(p, b, reinterpret_cast<uint32_t *>(out), carry);
-            else
-                unpackVertical32FusedDelta<0>(p, b, reinterpret_cast<uint32_t *>(out), carry);
-            prev = static_cast<T>(carry);
-            return static_cast<size_t>((p + base_bytes) - in);
-        }
-#endif
 
     unpackBase<T>(p, cnt, b, out);
     p += base_bytes;

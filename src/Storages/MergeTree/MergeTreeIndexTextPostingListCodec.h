@@ -157,22 +157,12 @@ public:
     void decode(ReadBuffer & in, UInt64 max_cardinality, PaddedPODArray<UInt32> & row_ids, PaddedPODArray<char> & buffer);
 
 private:
-    /// Encodes one block of up to BLOCK_SIZE row ids as deltas and appends it to `compressed_data`.
-    ///
-    /// Block layout:
-    ///   [1 byte bits][row ids payload]
-    ///
-    /// - bits: max bit-width among deltas in this block
-    /// - row ids payload: Codec::encode(...) bitpacked bytes
-    ///
-    /// Also updates current segment metadata (cardinality, payload size).
+    /// Encodes one block of up to BLOCK_SIZE row ids with `block_codec` (as deltas from `prev_row_id`)
+    /// and appends it to `compressed_data`. Also updates current segment metadata (cardinality, payload size).
     void encodeBlock(std::span<const UInt32> block_row_ids);
 
-    /// Decodes one compressed block of `out.size()` row ids into `out` and reconstructs absolute row ids.
-    ///
-    /// - Delegates the block payload to `block_codec` (bitpacking reads a bits-width byte), which fills `out` with delta values
-    /// - inclusive_scan converts deltas to row ids using `prev_row_id` as initial prefix
-    /// - Updates prev_row_id to the last decoded row id
+    /// Decodes one compressed block of `out.size()` row ids into `out` with `block_codec`, which restores
+    /// absolute row ids from the deltas starting at `prev_row_id`. Updates `prev_row_id` to the last decoded row id.
     void decodeBlock(std::span<const std::byte> & in, std::span<uint32_t> out);
 
     /// Reads a segment header and returns it together with the segment payload.
@@ -187,7 +177,7 @@ private:
     uint32_t prev_row_id = 0;
     /// Number of row ids in the open segment.
     size_t row_ids_in_current_segment = 0;
-    /// Scratch buffer for one block: the deltas being encoded, or the row ids being decoded
+    /// Scratch buffer for the row ids of one decoded block
     std::vector<UInt32> block_values;
     /// Each segment has an in-memory descriptor
     std::vector<SegmentDescriptor> segment_descriptors;

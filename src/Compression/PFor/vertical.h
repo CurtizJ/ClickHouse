@@ -13,8 +13,10 @@
 
 #include <Compression/PFor/common.h>
 
+#include <array>
 #include <bit>
 #include <cstring>
+#include <utility>
 
 #if defined(__GNUC__) || defined(__clang__)
 #    define PFOR_HAS_VERTICAL 1
@@ -89,13 +91,18 @@ inline ALWAYS_INLINE void packVertical32(const uint32_t * r, unsigned b, uint8_t
     }
 }
 
-inline ALWAYS_INLINE void unpackVertical32(const uint8_t * in, unsigned b, uint32_t * out) noexcept
+// The width is a template argument: the fully unrolled rows then shift by immediates without the
+// `bits >= b` branches, whereas a runtime shift count costs an extra shuffle-port uop per shift.
+template <unsigned b>
+void unpackVertical32Fixed(const uint8_t * in, uint32_t * out) noexcept
 {
-    const uint32_t m = (1u << b) - 1u; // b in [1,31]
+    static_assert(b >= 1 && b <= 31);
+    constexpr uint32_t m = (1u << b) - 1u;
     const v4u32 mask = {m, m, m, m};
     v4u32 acc = {0, 0, 0, 0};
     unsigned bits = 0;
     const uint8_t * p = in;
+#pragma clang loop unroll(full)
     for (unsigned row = 0; row < 32; ++row)
     {
         v4u32 outv;
@@ -117,78 +124,62 @@ inline ALWAYS_INLINE void unpackVertical32(const uint8_t * in, unsigned b, uint3
     }
 }
 
-// SIMD delta reconstruction (inclusive prefix sum) over a contiguous uint32 residual
-// array, with a running carry across blocks. `plus` is 0 for d0 and 1 for d1 (gap-1).
-// Replaces the scalar prefix-sum: each 4-lane group does a 2-step in-vector scan
-// (lane-wise left shifts, which lower to a single byte-shift each) plus the carry.
+template <unsigned... widths>
+inline constexpr auto makeUnpackVertical32Table(std::integer_sequence<unsigned, widths...>) noexcept
+{
+    using Fn = void (*)(const uint8_t *, uint32_t *) noexcept;
+    return std::array<Fn, sizeof...(widths)>{&unpackVertical32Fixed<widths + 1>...};
+}
+
+inline ALWAYS_INLINE void unpackVertical32(const uint8_t * in, unsigned b, uint32_t * out) noexcept
+{
+    static constexpr auto table = makeUnpackVertical32Table(std::make_integer_sequence<unsigned, 31>{});
+    table[b - 1](in, out); // b in [1,31]
+}
+
+// Inclusive prefix sum of `cnt / 4` groups of 4 residuals, advancing `sum` (all lanes equal). Each group
+// does a 2-step in-vector scan (lane shifts, one `vpslldq` each). As in `CompressionCodecDelta`, the running
+// sum is advanced by the broadcast of the local scan, which keeps the broadcast off the loop-carried chain.
 template <uint32_t plus>
-inline ALWAYS_INLINE void deltaDecode32(uint32_t * out, unsigned cnt, uint32_t & carry) noexcept
+inline ALWAYS_INLINE void deltaDecodeGroups32(uint32_t * out, unsigned cnt, v4u32 & sum) noexcept
 {
     const v4u32 plusv = {plus, plus, plus, plus};
-    uint32_t c = carry;
-    unsigned i = 0;
-    for (; i + 4 <= cnt; i += 4)
+    for (unsigned i = 0; i + 4 <= cnt; i += 4)
     {
         v4u32 x;
         std::memcpy(&x, out + i, 16);
         x += plusv;
-        x += v4u32{0, x[0], x[1], x[2]}; // inclusive prefix sum, step 1
-        x += v4u32{0, 0, x[0], x[1]};    // step 2 -> {a, a+b, a+b+c, a+b+c+d}
-        x += v4u32{c, c, c, c};          // add the running carry
+        x += __builtin_shufflevector(x, v4u32{}, 4, 0, 1, 2);
+        x += __builtin_shufflevector(x, v4u32{}, 4, 4, 0, 1);
+        const v4u32 local_total = __builtin_shufflevector(x, x, 3, 3, 3, 3);
+        x += sum;
+        sum += local_total;
         std::memcpy(out + i, &x, 16);
-        c = x[3];
     }
-    for (; i < cnt; ++i) // tail (cnt not a multiple of 4)
-    {
-        c += out[i] + plus;
-        out[i] = c;
-    }
-    carry = c;
 }
 
-// Fused single-pass unpack + delta: like unpackVertical32 but each row's 4 residuals are
-// prefix-summed with the running carry and stored as final values, so there is no second
-// pass over the output. Valid only for exception-free blocks (residuals == decoded base).
-// plus is 0 for d0, 1 for d1.
+// SIMD delta reconstruction (inclusive prefix sum) over a contiguous uint32 residual
+// array, with a running carry across blocks. `plus` is 0 for d0 and 1 for d1 (gap-1).
 template <uint32_t plus>
-inline ALWAYS_INLINE void unpackVertical32FusedDelta(
-    const uint8_t * in, unsigned b, uint32_t * out, uint32_t & carry) noexcept
+inline ALWAYS_INLINE void deltaDecode32(uint32_t * out, unsigned cnt, uint32_t & carry) noexcept
 {
-    const uint32_t m = (1u << b) - 1u; // b in [1,31]
-    const v4u32 mask = {m, m, m, m};
-    const v4u32 plusv = {plus, plus, plus, plus};
-    v4u32 acc = {0, 0, 0, 0};
-    unsigned bits = 0;
-    const uint8_t * p = in;
-    uint32_t c = carry;
-    for (unsigned row = 0; row < 32; ++row)
+    v4u32 sum = {carry, carry, carry, carry};
+    /// A constant trip count for full blocks lets the loop unroll; the loop control otherwise costs as much as the scan.
+    if (cnt == BLOCK)
     {
-        v4u32 v;
-        if (bits >= b)
-        {
-            v = acc & mask;
-            acc >>= b;
-            bits -= b;
-        }
-        else
-        {
-            v4u32 w = loadStripeLE(p);
-            p += 16;
-            v = (acc | (w << bits)) & mask;
-            acc = w >> (b - bits);
-            bits = 32 - (b - bits);
-        }
-        // The 4 lanes are consecutive values (4*row .. 4*row+3): prefix-sum + carry, fused.
-        v += plusv;
-        v += v4u32{0, v[0], v[1], v[2]};
-        v += v4u32{0, 0, v[0], v[1]};
-        v += v4u32{c, c, c, c};
-        std::memcpy(out + 4u * row, &v, 16);
-        c = v[3];
+        deltaDecodeGroups32<plus>(out, BLOCK, sum);
+        carry = sum[0];
+        return;
     }
-    carry = c;
+    deltaDecodeGroups32<plus>(out, cnt, sum);
+    uint32_t s = sum[0];
+    for (unsigned i = cnt & ~3u; i < cnt; ++i) // tail (cnt not a multiple of 4)
+    {
+        s += out[i] + plus;
+        out[i] = s;
+    }
+    carry = s;
 }
-
 }
 
 #endif // PFOR_HAS_VERTICAL

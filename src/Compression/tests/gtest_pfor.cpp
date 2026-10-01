@@ -378,3 +378,40 @@ TEST(PForVarint, RejectsOverlong)
     EXPECT_EQ(parse(small, v), small.data() + small.size());
     EXPECT_EQ(v, 5u);
 }
+
+/// The single-block API continues a d0 chain from a caller-supplied `prev` (the text index posting list layout):
+/// every base width, with and without exceptions, full and partial blocks, wrapping around 2^32. The bytes must
+/// equal the `Delta::none` encoding of the gaps, which is what posting lists stored before the delta moved into PFor.
+TEST(PForBlock, DeltaFromPrev)
+{
+    std::mt19937_64 rng(0xB10C); // NOLINT(bugprone-random-generator-seed,cert-msc32-c,cert-msc51-cpp)
+    for (unsigned count : {1u, 77u, 128u})
+        for (unsigned width = 0; width <= 32; ++width)
+            for (unsigned num_exceptions : {0u, 1u, 9u})
+            {
+                std::vector<uint32_t> gaps(count);
+                for (auto & gap : gaps)
+                    gap = width == 0 ? 0 : static_cast<uint32_t>(rng() >> (64 - width));
+                for (unsigned j = 0; j < num_exceptions && width < 32; ++j)
+                    gaps[rng() % count] = static_cast<uint32_t>(rng()) | (1u << 31);
+
+                const uint32_t prev = static_cast<uint32_t>(rng());
+                std::vector<uint32_t> values(count);
+                uint32_t value = prev;
+                for (size_t i = 0; i < count; ++i)
+                    values[i] = value += gaps[i];
+
+                const size_t bound = PFor::maxCompressedBytes<uint32_t>(count);
+                std::vector<uint8_t> encoded(bound + 64);
+                std::vector<uint8_t> expected(bound + 64);
+                const size_t size = PFor::encodeBlock<uint32_t>(values, PFor::Delta::d0, prev, encoded.data());
+                ASSERT_EQ(size, PFor::encodeBlocks<uint32_t>(gaps, PFor::Delta::none, expected.data()));
+                ASSERT_EQ(std::memcmp(encoded.data(), expected.data(), size), 0) << "count " << count << " width " << width;
+
+                std::vector<uint32_t> decoded(count);
+                uint32_t carry = prev;
+                ASSERT_EQ(PFor::decodeBlock<uint32_t>(encoded.data(), count, PFor::Delta::d0, carry, decoded.data(), encoded.data() + size), size);
+                ASSERT_EQ(decoded, values) << "count " << count << " width " << width << " exceptions " << num_exceptions;
+                ASSERT_EQ(carry, values.back());
+            }
+}

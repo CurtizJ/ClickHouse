@@ -187,14 +187,6 @@ void SegmentedPostingListCodec::encodeBlock(std::span<const UInt32> block_row_id
     chassert(block_codec);
     chassert(!block_row_ids.empty() && block_row_ids.size() <= BLOCK_SIZE);
 
-    /// Compute the deltas into the scratch buffer.
-    /// The first element written by `adjacent_difference` is the value itself,
-    /// so adjust it to the delta from the last row id of the previous block.
-    block_values.resize(block_row_ids.size());
-    std::adjacent_difference(block_row_ids.begin(), block_row_ids.end(), block_values.begin());
-    block_values[0] = block_row_ids.front() - prev_row_id;
-    prev_row_id = block_row_ids.back();
-
     auto & segment_descriptor = segment_descriptors.back();
     segment_descriptor.cardinality += block_row_ids.size();
     segment_descriptor.row_id_end = block_row_ids.back();
@@ -204,7 +196,8 @@ void SegmentedPostingListCodec::encodeBlock(std::span<const UInt32> block_row_id
     block_meta.last_row_id = block_row_ids.back();
     block_meta.relative_offset = compressed_data.size() - segment_descriptor.compressed_data_offset;
 
-    block_codec->encodeBlock(block_values, compressed_data);
+    block_codec->encodeBlock(block_row_ids, prev_row_id, compressed_data);
+    prev_row_id = block_row_ids.back();
 
     segment_descriptor.compressed_data_size = compressed_data.size() - segment_descriptor.compressed_data_offset;
 }
@@ -216,10 +209,7 @@ void SegmentedPostingListCodec::decodeBlock(std::span<const std::byte> & in, std
 
     /// `in` is the remaining segment payload: a full block self-delimits, and the final tail block sees exactly
     /// its own bytes remaining (the Index Section is not part of this buffer). We only need `in` advanced past it.
-    block_codec->decodeBlock(in, out.size(), out);
-
-    /// Restore the original array from the decompressed delta values.
-    std::inclusive_scan(out.begin(), out.end(), out.begin(), std::plus<uint32_t>{}, prev_row_id);
+    block_codec->decodeBlock(in, out.size(), prev_row_id, out);
     prev_row_id = out.back();
 }
 

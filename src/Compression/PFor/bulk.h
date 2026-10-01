@@ -57,13 +57,13 @@ inline ALWAYS_INLINE const uint8_t * getVarintChecked(const uint8_t * p, const u
     }
 }
 
+// `prev` seeds the delta chain: the value preceding in[0] (0 for a whole stream).
 template <typename T>
-inline size_t bulkEncode(const T * in, size_t n, Delta mode, uint8_t * out) noexcept
+inline size_t bulkEncode(const T * in, size_t n, Delta mode, uint8_t * out, T prev = 0) noexcept
 {
     if (n == 0)
         return 0;
     uint8_t * p = out;
-    T prev = 0;
     T residuals[BLOCK];
     for (size_t s = 0; s < n; s += BLOCK)
     {

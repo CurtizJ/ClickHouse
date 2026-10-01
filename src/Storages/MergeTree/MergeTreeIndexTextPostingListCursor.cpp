@@ -390,7 +390,7 @@ void PostingListCursor::decodeBlock(size_t block_idx)
 
     /// The block span comes from the Index Section offsets and must be consumed in full.
     const size_t expected_bytes = block_data.size();
-    const size_t consumed_bytes = block_codec->decodeBlock(block_data, count, out_span);
+    const size_t consumed_bytes = block_codec->decodeBlock(block_data, count, last_decoded_doc_id, out_span);
 
     if (consumed_bytes != expected_bytes)
         throw Exception(ErrorCodes::CORRUPTED_DATA,
@@ -398,9 +398,7 @@ void PostingListCursor::decodeBlock(size_t block_idx)
             "Index Section span is {} bytes",
             block_idx, consumed_bytes, expected_bytes);
 
-    /// Restore absolute row ids from deltas directly in decoded_values.
-    std::inclusive_scan(decoded_values, decoded_values + count, decoded_values, std::plus<uint32_t>{}, last_decoded_doc_id);
-    last_decoded_doc_id = count > 0 ? decoded_values[count - 1] : last_decoded_doc_id;
+    last_decoded_doc_id = decoded_values[count - 1];
 
     /// The decoded block must end at the row id the Index Section claims for it: `advance` and the skip
     /// heuristics position by `block_last_row_ids`, and the next block decodes its deltas from it.
