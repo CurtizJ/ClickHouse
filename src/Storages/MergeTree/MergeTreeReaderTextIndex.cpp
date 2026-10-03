@@ -656,8 +656,8 @@ PostingList MergeTreeReaderTextIndex::buildPostingsForQuery(
         return {};
 
     std::optional<PostingList> result;
-    if (query_builder.postings)
-        result = *query_builder.postings & range_posting;
+    if (query_builder.hasPostings())
+        result = query_builder.getPostingsInRange(range);
 
     if (!query_builder.needReadPostings())
         return result.value_or(PostingList{});
@@ -808,9 +808,10 @@ MergeTreeReaderTextIndex::ResolvedSearch MergeTreeReaderTextIndex::resolveSearch
         }
     }
 
-    if (query_builder.postings && !query_builder.postings->isEmpty())
+    if (query_builder.hasPostings() && !query_builder.hasEmptyPostings())
     {
         /// Build a cursor over the sorted array of postings, shared by all readers of the granule.
+        /// The intersection folded into an array by the analyzer is iterated in place.
         auto cursor = std::make_shared<PostingListCursor>(query_builder.getFlatPostings());
         resolved.cursors.emplace_back(cursor.get());
         lazy_cursors.emplace_back(std::move(cursor));

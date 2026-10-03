@@ -225,7 +225,7 @@ UInt64 computeCountForPart(
     if (query_builder.is_failed)
         return 0;
 
-    /// `analyzePostings` already folded the small (single-block) postings into `query_builder.postings` by search mode.
+    /// `analyzePostings` already folded the small (single-block) postings into the query builder by search mode.
     std::vector<const TokenPostingsInfo *> tokens_to_read;
     tokens_to_read.reserve(query_builder.tokens.size());
 
@@ -236,7 +236,7 @@ UInt64 computeCountForPart(
     }
 
     if (tokens_to_read.empty())
-        return query_builder.postings ? query_builder.postings->cardinality() : 0;
+        return query_builder.getPostingsCardinality();
 
     const auto & settings = resolved.condition->getContext()->getSettingsRef();
     const auto search_mode = resolved.query->getSearchMode();
@@ -274,7 +274,7 @@ UInt64 computeCountForPart(
         }
 
         /// The folded small postings join the intersection or union as one more cursor over a flat array.
-        if (query_builder.postings && !query_builder.postings->isEmpty())
+        if (query_builder.hasPostings() && !query_builder.hasEmptyPostings())
             cursors.push_back(std::make_shared<PostingListCursor>(query_builder.getFlatPostings()));
 
         /// `rows_range` is the hull of the tokens' rows for `Any` and their overlap for `All`; an empty overlap fails the query.
@@ -310,7 +310,10 @@ UInt64 computeCountForPart(
 
     if (search_mode != TextSearchMode::All)
     {
-        std::optional<PostingList> merged_postings = query_builder.postings;
+        std::optional<PostingList> merged_postings;
+        if (query_builder.hasPostings())
+            merged_postings = query_builder.getPostingsAsBitmap();
+
         for (const auto * token_info : tokens_to_read)
         {
             check_cancelled();
@@ -329,7 +332,10 @@ UInt64 computeCountForPart(
     std::sort(tokens_to_read.begin(), tokens_to_read.end(),
         [](const auto * lhs, const auto * rhs) { return lhs->cardinality < rhs->cardinality; });
 
-    std::optional<PostingList> candidates = query_builder.postings;
+    std::optional<PostingList> candidates;
+    if (query_builder.hasPostings())
+        candidates = query_builder.getPostingsAsBitmap();
+
     size_t next = 0;
 
     if (!candidates)
