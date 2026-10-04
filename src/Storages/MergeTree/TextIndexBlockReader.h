@@ -86,7 +86,7 @@ private:
     void eraseGroup(Groups::iterator group);
     void releaseCurrent();
 
-    static constexpr size_t window = 8;
+    static constexpr size_t window = 4;
 
     const IMergeTreeDataPartInfoForReader & part_info;
     const IMergeTreeIndex & index;
