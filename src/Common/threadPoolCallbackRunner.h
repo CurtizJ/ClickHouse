@@ -289,17 +289,10 @@ public:
     // Note: This only catches std::reference_wrapper. It does NOT catch all reference
     // captures (e.g., [&local_var]). Use clang-tidy or code review for complete coverage.
 
-    /// Adds a new task to the pool and returns it
-    /// You are responsible for handling it from now on, checking its status and so on. You must implement your own waitForAllToFinish* equivalent
-    /// You must ensure that all returned tasks are waited upon (i.e., their futures are completed) before the ThreadPool is destroyed.
-    /// Otherwise, the task's lambda may reference a destroyed pool state, leading to undefined behavior.
-    [[nodiscard]] std::shared_ptr<Task> enqueueAndGiveOwnership(Callback && callback, Priority priority = {}, std::optional<Int64> wait_microseconds = {})
+private:
+    std::function<void()> makeTaskFunction(const std::shared_ptr<Task> & task, std::shared_ptr<std::promise<Result>> task_promise, Callback && callback)
     {
-        auto promise = std::make_shared<std::promise<Result>>();
-        auto task = std::make_shared<Task>();
-        task->future = promise->get_future();
-
-        auto task_func = [this, task, thread_group = getCurrentThreadGroup(), my_callback = std::move(callback), promise]() mutable -> void
+        return [this, task, thread_group = getCurrentThreadGroup(), my_callback = std::move(callback), promise = std::move(task_promise)]() mutable -> void
         {
             TaskState expected = SCHEDULED;
             if (!task->state.compare_exchange_strong(expected, RUNNING))
@@ -318,6 +311,20 @@ public:
 
             executeCallback(*promise, std::move(my_callback), std::move(thread_group), thread_name);
         };
+    }
+
+public:
+    /// Adds a new task to the pool and returns it
+    /// You are responsible for handling it from now on, checking its status and so on. You must implement your own waitForAllToFinish* equivalent
+    /// You must ensure that all returned tasks are waited upon (i.e., their futures are completed) before the ThreadPool is destroyed.
+    /// Otherwise, the task's lambda may reference a destroyed pool state, leading to undefined behavior.
+    [[nodiscard]] std::shared_ptr<Task> enqueueAndGiveOwnership(Callback && callback, Priority priority = {}, std::optional<Int64> wait_microseconds = {})
+    {
+        auto promise = std::make_shared<std::promise<Result>>();
+        auto task = std::make_shared<Task>();
+        task->future = promise->get_future();
+
+        auto task_func = makeTaskFunction(task, promise, std::move(callback));
 
         try
         {
@@ -347,6 +354,31 @@ public:
     void enqueueAndKeepTrack(Callback && callback, Priority priority = {}, std::optional<Int64> wait_microseconds = {})
     {
         tasks.emplace_back(enqueueAndGiveOwnership(std::move(callback), priority, wait_microseconds));
+    }
+
+    /// Like `enqueueAndKeepTrack`, but admits the task with the non-throwing `trySchedule`,
+    /// which does not wait for a free slot. Returns nullptr when the pool did not accept the task.
+    [[nodiscard]] std::shared_ptr<Task> tryEnqueueAndKeepTrack(Callback && callback, Priority priority = {})
+    {
+        auto promise = std::make_shared<std::promise<Result>>();
+        auto task = std::make_shared<Task>();
+        task->future = promise->get_future();
+
+        /// Reserve first, so that tracking an accepted task cannot throw.
+        tasks.reserve(tasks.size() + 1);
+        if (!pool.trySchedule(makeTaskFunction(task, std::move(promise), std::move(callback)), priority))
+            return nullptr;
+
+        tasks.emplace_back(task);
+        return task;
+    }
+
+    /// Cancels a task that has not started yet, so that the caller can run its work inline.
+    /// Returns false if the task is already running or finished. The future of a cancelled task is never satisfied.
+    static bool tryCancel(Task & task)
+    {
+        TaskState expected = SCHEDULED;
+        return task.state.compare_exchange_strong(expected, CANCELLED);
     }
 
     static void waitForAllToFinish(std::vector<std::shared_ptr<Task>> & tasks)

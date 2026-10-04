@@ -97,6 +97,8 @@ static std::unique_ptr<MergeTreeReaderStream> makeIndexReaderStream(
         CLOCK_MONOTONIC_COARSE);
 
     stream->adjustRightMark(getLastMark(all_mark_ranges));
+    /// Advisory: bounds the read-ahead of the reader executor, a no-op for the legacy buffers.
+    stream->updateReadRequestMap(std::make_shared<MarkRanges>(all_mark_ranges));
     stream->seekToStart();
     return stream;
 }
@@ -240,6 +242,19 @@ void MergeTreeIndexReader::adjustRightMark(size_t right_mark)
 {
     for (const auto & stream : stream_holders)
         stream->adjustRightMark(right_mark);
+}
+
+void MergeTreeIndexReader::prefetchBeginOfRange(size_t from_mark, const IMergeTreeIndexCondition * /*condition*/, Priority priority)
+{
+    initStreamIfNeeded();
+
+    for (const auto & stream : stream_holders)
+    {
+        stream->seekToMark(from_mark);
+        stream->getDataBuffer()->prefetch(priority);
+    }
+
+    stream_mark = from_mark;
 }
 
 }

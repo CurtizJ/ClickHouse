@@ -2,6 +2,7 @@
 #include <Core/Settings.h>
 #include <Interpreters/Cache/QueryConditionCache.h>
 #include <Storages/MergeTree/MergeTreeIOSettings.h>
+#include <Storages/MergeTree/MergeTreeIndexPrefetch.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/StorageInMemoryMetadata.h>
@@ -33,6 +34,8 @@ namespace Setting
     extern const SettingsBool merge_tree_use_prefixes_deserialization_thread_pool;
     extern const SettingsBool merge_tree_prefetch_json_shared_data_substreams;
     extern const SettingsUInt64 filesystem_prefetches_limit;
+    extern const SettingsNonZeroUInt64 filesystem_prefetch_max_memory_usage;
+    extern const SettingsBool use_skip_indexes_prefetch;
     extern const SettingsBool secondary_indexes_enable_bulk_filtering;
     extern const SettingsUInt64 merge_tree_min_bytes_for_seek;
     extern const SettingsUInt64 merge_tree_min_rows_for_seek;
@@ -154,6 +157,14 @@ MergeTreeReaderSettings MergeTreeReaderSettings::createForQuery(const ContextPtr
 {
     auto result = createFromContext(context);
     result.read_in_order = query_info.input_order_info != nullptr;
+
+    const auto & settings = context->getSettingsRef();
+    if (settings[Setting::use_skip_indexes_prefetch])
+    {
+        result.index_prefetch_budget = std::make_shared<IndexPrefetchBudget>(
+            settings[Setting::filesystem_prefetches_limit], settings[Setting::filesystem_prefetch_max_memory_usage]);
+    }
+
     return result;
 }
 

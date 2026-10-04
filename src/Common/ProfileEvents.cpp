@@ -177,6 +177,10 @@
     M(TextIndexLazyBlocksSkippedResolved, "Number of packed blocks skipped because the output region was already resolved (all-ones for OR, all-zeros for AND) in lazy posting list mode.", ValueType::Number) \
     M(TextIndexDiscardPatternScan, "Number of times pattern-based dictionary scan in a text index was discarded because the number of posting lists to read exceeded the threshold.", ValueType::Number) \
     M(TextIndexPatternBypassCacheHits, "Number of times a text index pattern dictionary scan was skipped because an earlier scan of the same part exceeded the posting-list threshold.", ValueType::Number) \
+    M(SkipIndexPrefetches, "Number of asynchronous prefetches of skip index data scheduled ahead of the index analysis.", ValueType::Number) \
+    M(SkipIndexPrefetchesRunInline, "Number of skip index prefetch jobs that had not started when the analysis needed their data, so the analysis cancelled them and ran them inline.", ValueType::Number) \
+    M(SkipIndexPrefetchWaitMicroseconds, "Time the skip index analysis waited for running prefetch jobs of skip index data.", ValueType::Microseconds) \
+    M(SkipIndexPrefetchBudgetExhausted, "Number of skip index prefetches not issued because the prefetch budget of the read step (`filesystem_prefetches_limit`, `filesystem_prefetch_max_memory_usage`) was exhausted.", ValueType::Number) \
     M(TextIndexGenericExclusionSearchAlgorithm, "Number of times the generic exclusion search algorithm is used over the text index.", ValueType::Number) \
     M(TextIndexGenericExclusionSearchStepLimitReached, "Number of times the generic exclusion search over the text index reached merge_tree_generic_exclusion_search_max_steps and accepted the remaining mark ranges without further splitting.", ValueType::Number) \
     M(QueryConditionCacheHits, "Number of times an entry has been found in the query condition cache (and reading of marks can be skipped). Only updated for SELECT queries with SETTING use_query_condition_cache = 1.", ValueType::Number) \

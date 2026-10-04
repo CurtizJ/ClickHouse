@@ -34,7 +34,9 @@ public:
     void read(size_t mark, const IMergeTreeIndexCondition * condition, MergeTreeIndexGranulePtr & granule, const MarkRanges * readable_ranges);
     void read(size_t mark, size_t current_granule_num, MergeTreeIndexBulkGranulesPtr & granules);
     void adjustRightMark(size_t right_mark);
-    void prefetchBeginOfRange(size_t from_mark, Priority priority);
+    /// Opens the stream (which waits for the marks), seeks it to `from_mark` and issues an asynchronous prefetch,
+    /// so that the next `read(from_mark, ...)` finds its data in flight. Blocks, so it runs on the prefetch pool.
+    void prefetchBeginOfRange(size_t from_mark, const IMergeTreeIndexCondition * condition, Priority priority);
     const StreamMap & getStreams() { return streams; }
 
 private:

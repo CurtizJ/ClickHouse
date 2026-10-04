@@ -21,6 +21,7 @@ namespace DB
 
 class KeyCondition;
 class VectorSimilarityIndexCache;
+class PrefetchedSkipIndexReader;
 struct ProjectionDescription;
 using ProjectionDescriptionRawPtr = const ProjectionDescription *;
 
@@ -127,7 +128,9 @@ public:
         VectorSimilarityIndexCache * vector_similarity_index_cache,
         bool use_skip_indexes_for_disjunctions,
         PartialDisjunctionResult & partial_disjunction_result,
-        LoggerPtr log);
+        LoggerPtr log,
+        /// If set, its reader is used instead of a new one. It was created for the same index, part and `ranges`.
+        PrefetchedSkipIndexReader * prefetched_reader = nullptr);
 
     static MergeTreeIndexBulkGranulesMinMaxPtr getMinMaxIndexGranules(
         const MergeTreeDataPartInfoForReaderPtr & part_info,

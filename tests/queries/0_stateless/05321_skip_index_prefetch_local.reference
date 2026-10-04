@@ -1,0 +1,16 @@
+parallel 12	162504
+serial 12	162504
+budget_1 12	162504
+data_read 12	162504
+disjunction 12306	541870458
+final 12	48
+budget_1_off	0	1	0
+budget_1_on	1	1	1
+disjunction_off	0	1	0
+disjunction_on	1	1	0
+final_off	0	1	0
+final_on	1	1	0
+parallel_off	0	1	0
+parallel_on	1	1	0
+serial_off	0	1	0
+serial_on	1	1	0

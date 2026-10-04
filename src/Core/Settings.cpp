@@ -2158,6 +2158,19 @@ Possible values:
 )", 0, \
         {"26.1", false, true, "Default enable"}, \
         {"25.9", false, false, "New setting"}) \
+    DECLARE(Bool, use_skip_indexes_prefetch, true, R"(
+Prefetch the data of skip indexes asynchronously, ahead of its analysis.
+
+When enabled, the data of the next skip index of a part is prefetched as soon as the primary key or the previous skip index has left some granules to check, and the analysis continues with other parts meanwhile. For indexes of type `text`, the header, dictionary blocks and posting lists are prefetched as soon as their offsets are known. The prefetches of a read step are limited by `filesystem_prefetches_limit` and `filesystem_prefetch_max_memory_usage`.
+
+Prefetching is used only for parts read asynchronously with prefetch: `remote_filesystem_read_method = 'threadpool'` with `remote_filesystem_read_prefetch` for remote disks, and `local_filesystem_read_method = 'pread_threadpool'` with `local_filesystem_read_prefetch` for local disks. It is not used with `use_reader_executor`.
+
+Possible values:
+
+- 0 — Disabled.
+- 1 — Enabled.
+)", 0, \
+        {"26.10", false, true, "New setting to prefetch the data of skip indexes asynchronously, ahead of its analysis."}) \
     DECLARE(Bool, use_skip_indexes_for_disjunctions, true, R"(
 Evaluate WHERE filters with mixed AND and OR conditions using skip indexes. Example: WHERE A = 5 AND (B = 5 OR C = 5).
 If disabled, skip indexes are still used to evaluate WHERE conditions but they must only contain AND-ed clauses.

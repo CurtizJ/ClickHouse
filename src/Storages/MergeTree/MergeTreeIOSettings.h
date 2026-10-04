@@ -23,6 +23,8 @@ struct SelectQueryInfo;
 
 class PackedFilesWriter;
 
+class IndexPrefetchBudget;
+
 enum class CompactPartsReadMethod : uint8_t
 {
     SingleBuffer,
@@ -87,6 +89,9 @@ struct MergeTreeReaderSettings
     UInt64 merge_tree_coarse_index_granularity = 8;
     UInt64 merge_tree_generic_exclusion_search_max_steps = 0;
     size_t filesystem_prefetches_limit = 0;
+    /// Caps the skip index prefetches of the read step; null when `use_skip_indexes_prefetch` is off.
+    /// Shared by all copies of the settings, see `canPrefetchIndexes`.
+    std::shared_ptr<IndexPrefetchBudget> index_prefetch_budget;
     bool load_marks_asynchronously = false;
     /// If true, compress marks into the in-memory representation one block at a time
     /// instead of materializing the full plain marks array.
