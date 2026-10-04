@@ -130,12 +130,21 @@ class FilterWithCachedCount
 {
     ConstantFilterDescription const_description;  /// TODO: ConstantFilterDescription only checks always true/false for const columns
                                                   /// think how to handle when the column in not const but has all 0s or all 1s
-    ColumnPtr column = nullptr;
-    const IColumn::Filter * data = nullptr;
+    /// A constant filter keeps its constant column and is expanded only when its data is requested.
+    mutable ColumnPtr column = nullptr;
+    mutable const IColumn::Filter * data = nullptr;
     mutable size_t cached_count_bytes = -1;
 
     ColumnPtr sparse_indices_holder;
     const ColumnUInt64 * sparse_indices = nullptr;
+
+    void initializeData(ColumnPtr column_) const;
+
+    void materialize() const
+    {
+        if (!data && column)
+            initializeData(column);
+    }
 
 public:
     explicit FilterWithCachedCount() = default;
@@ -147,9 +156,17 @@ public:
     bool alwaysTrue() const { return const_description.always_true; }
     bool alwaysFalse() const { return const_description.always_false; }
 
-    ColumnPtr getColumn() const { return column; }
+    ColumnPtr getColumn() const
+    {
+        materialize();
+        return column;
+    }
 
-    const IColumn::Filter & getData() const { return *data; }
+    const IColumn::Filter & getData() const
+    {
+        materialize();
+        return *data;
+    }
 
     bool isSparse() const { return sparse_indices != nullptr; }
     const ColumnUInt64 * getSparseIndices() const { return sparse_indices; }

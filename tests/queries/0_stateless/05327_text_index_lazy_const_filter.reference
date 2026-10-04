@@ -1,0 +1,29 @@
+parts	1
+Ground truth (no index)
+const, full	1500	46124250
+full, const	1024	523776
+const, full, const	1500	46124250
+full, const, full	2524	46648026
+const, const	0	0
+all, const, full	188	5780624
+all, const, const	0	0
+any, const, full	1500	46124250
+in expression	1510	46279250	1500
+small blocks	6000	231747000
+small blocks, all	751	28982248
+Lazy, leapfrog intersection
+const, full	1500	46124250
+full, const	1024	523776
+const, full, const	1500	46124250
+full, const, full	2524	46648026
+const, const	0	0
+all, const, full	188	5780624
+all, const, const	0	0
+any, const, full	1500	46124250
+in expression	1510	46279250	1500
+small blocks	6000	231747000
+small blocks, all	751	28982248
+Lazy, brute-force intersection
+all, const, full	188	5780624
+all, const, const	0	0
+small blocks, all	751	28982248

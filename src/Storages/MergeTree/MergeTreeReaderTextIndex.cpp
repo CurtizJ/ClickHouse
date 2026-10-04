@@ -1,3 +1,4 @@
+#include <Columns/ColumnConst.h>
 #include <Columns/ColumnsCommon.h>
 #include <IO/ReadHelpers.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
@@ -484,6 +485,28 @@ size_t MergeTreeReaderTextIndex::readRows(
     size_t fallback_offset = 0;
     std::optional<size_t> last_processed_mark;
 
+    /// Per lazy column, whether all its rows are zero, so that it is replaced with a constant after the read.
+    std::vector<UInt8> lazy_all_zero(res_columns.size(), 0);
+    /// Per lazy column, the rows of a constant from the previous reads into it. This read is filled into
+    /// an empty column instead, and the constant is expanded only if some row of this read is set.
+    std::vector<size_t> lazy_const_rows(res_columns.size(), 0);
+
+    for (size_t i = 0; i < res_columns.size(); ++i)
+    {
+        if (!isLazyColumn(i))
+            continue;
+
+        auto & column = res_columns[i];
+        lazy_all_zero[i] = column->empty() || isColumnConst(*column);
+
+        if (isColumnConst(*column))
+        {
+            lazy_const_rows[i] = column->size();
+            column = ColumnUInt8::create();
+            column->reserve(max_rows_to_read);
+        }
+    }
+
     while (read_rows < max_rows_to_read && from_mark < total_marks)
     {
         /// Postings are addressed per mark: rows past a mark's last row belong to the next mark
@@ -512,7 +535,12 @@ size_t MergeTreeReaderTextIndex::readRows(
         {
             auto & column_mutable = *res_columns[i];
 
-            if (is_always_true[i])
+            if (isLazyColumn(i))
+            {
+                if (fillColumnLazy(column_mutable, i, from_row, rows_to_read, range_posting))
+                    lazy_all_zero[i] = 0;
+            }
+            else if (is_always_true[i])
             {
                 auto & column_data = assert_cast<ColumnUInt8 &>(column_mutable).getData();
                 column_data.resize_fill(column_mutable.size() + rows_to_read, 1);
@@ -532,10 +560,6 @@ size_t MergeTreeReaderTextIndex::readRows(
                 /// Phrase queries are resolved from positional data (.pos), not per-mark posting lists.
                 applyPostingsPhrase(column_mutable, search_query, from_row, rows_to_read);
             }
-            else if (use_lazy_mode)
-            {
-                fillColumnLazy(column_mutable, i, from_row, rows_to_read, range_posting);
-            }
             else
             {
                 fillColumn(column_mutable, mark_postings[i], from_row, rows_to_read);
@@ -549,6 +573,27 @@ size_t MergeTreeReaderTextIndex::readRows(
 
         if (from_row == mark_end_row)
             ++from_mark;
+    }
+
+    for (size_t i = 0; i < res_columns.size(); ++i)
+    {
+        auto & column = res_columns[i];
+        size_t num_column_rows = lazy_const_rows[i] + column->size();
+
+        if (lazy_all_zero[i])
+        {
+            /// No row matches: a constant lets the filter drop the rows without scanning them.
+            if (num_column_rows > 0)
+                column = ColumnConst::create(ColumnUInt8::create(1, UInt8(0)), num_column_rows);
+        }
+        else if (lazy_const_rows[i] > 0)
+        {
+            auto full_column = ColumnUInt8::create();
+            full_column->reserve(num_column_rows);
+            full_column->insertManyDefaults(lazy_const_rows[i]);
+            full_column->insertRangeFrom(*column, 0, column->size());
+            column = std::move(full_column);
+        }
     }
 
     /// Remove blocks that are no longer needed; those covering the mark the next read continues in are kept.
@@ -776,7 +821,16 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const PostingList & 
     }
 }
 
-void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting)
+bool MergeTreeReaderTextIndex::isLazyColumn(size_t column_idx) const
+{
+    return is_initialized
+        && use_lazy_mode
+        && !is_always_true[column_idx]
+        && !use_fallback[column_idx]
+        && search_queries[column_idx]->getSearchMode() != TextSearchMode::Phrase;
+}
+
+bool MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting)
 {
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     size_t old_size = column_data.size();
@@ -789,7 +843,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
         /// hasAnyTokens / hasAllTokens whose needle tokens were all dropped (e.g. by a postprocessor): no
         /// match, so fill zeros for every row read, matching fillColumn and the row-scan path.
         column_data.resize_fill(old_size + num_rows, 0);
-        return;
+        return false;
     }
 
     const auto & analyzer = granule->getAnalyzer();
@@ -798,7 +852,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
     if (query_builder.is_failed)
     {
         column_data.resize_fill(old_size + num_rows, 0);
-        return;
+        return false;
     }
 
     std::vector<PostingListCursorPtr> cursors;
@@ -845,7 +899,7 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
 
                 PostingList clipped = *query_builder.postings & range_posting;
                 fillColumn(column, clipped, row_offset, num_rows);
-                return;
+                return !clipped.isEmpty();
             }
 
             /// Build a cursor over the sorted array of postings, shared by all readers of the granule.
@@ -857,14 +911,15 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
     column_data.resize_fill(old_size + num_rows, 0);
 
     if (cursors.empty())
-        return;
+        return false;
 
     if (search_query->getSearchMode() == TextSearchMode::Any)
-        lazyUnionPostingLists(column, cursors, old_size, row_offset, num_rows);
-    else if (search_query->getSearchMode() == TextSearchMode::All)
-        lazyIntersectPostingLists(column, cursors, old_size, row_offset, num_rows, intersection_algorithm);
-    else
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid search mode: {}", search_query->getSearchMode());
+        return lazyUnionPostingLists(column, cursors, old_size, row_offset, num_rows);
+
+    if (search_query->getSearchMode() == TextSearchMode::All)
+        return lazyIntersectPostingLists(column, cursors, old_size, row_offset, num_rows, intersection_algorithm);
+
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid search mode: {}", search_query->getSearchMode());
 }
 
 PostingList MergeTreeReaderTextIndex::readAllPostingsForToken(std::string_view token, const TokenPostingsInfo & token_info)

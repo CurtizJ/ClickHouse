@@ -81,6 +81,13 @@ static bool canInplaceFilter(const ColumnPtr & column, const ColumnPtr & filter_
 FilterWithCachedCount::FilterWithCachedCount(const ColumnPtr & column_)
     : const_description(*column_)
 {
+    if (const_description.always_true || const_description.always_false)
+    {
+        column = column_;
+        cached_count_bytes = const_description.always_true ? column_->size() : 0;
+        return;
+    }
+
     if (const auto * sparse = typeid_cast<const ColumnSparse *>(column_.get()))
     {
         const auto & values = sparse->getValuesColumn();
@@ -102,6 +109,11 @@ FilterWithCachedCount::FilterWithCachedCount(const ColumnPtr & column_)
         }
     }
 
+    initializeData(column_);
+}
+
+void FilterWithCachedCount::initializeData(ColumnPtr column_) const
+{
     ColumnPtr col = column_->convertToFullIfWrapped()->convertToFullColumnIfLowCardinality();
     FilterDescription desc(*col);
     column = desc.data_holder ? desc.data_holder : col;
@@ -649,6 +661,18 @@ void MergeTreeRangeReader::ReadResult::applyFilter(const FilterWithCachedCount &
 void MergeTreeRangeReader::ReadResult::optimize(const FilterWithCachedCount & current_filter, bool can_read_incomplete_granules_, bool must_apply_filter)
 {
     checkInternalConsistency();
+
+    /// A constant false filter drops all rows whatever the previous filter is, so it is resolved without the data.
+    if (current_filter.alwaysFalse())
+    {
+        if (total_rows_per_granule != 0)
+        {
+            LOG_TEST(log, "ReadResult::optimize() current filter is const False");
+            clear();
+        }
+
+        return;
+    }
 
     /// Combine new filter with the previous one if it is present.
     /// This filter has the size of total_rows_per granule. It is applied after reading contiguous chunks from

@@ -86,7 +86,10 @@ private:
     /// Collects the tokens whose postings the analysis left to read into `tokens_to_read`.
     void initializeTokensToRead();
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
-    void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
+    /// Whether the column is filled by `fillColumnLazy`.
+    bool isLazyColumn(size_t column_idx) const;
+    /// Returns false only if no row is set.
+    bool fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
 
     /// Fills a virtual column for an abandoned pattern query by evaluating the virtual column's
     /// default expression (the original search predicate) on the physical columns.
