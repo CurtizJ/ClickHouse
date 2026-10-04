@@ -31,7 +31,14 @@ void CachedCompressedReadBuffer::initInput()
 
 void CachedCompressedReadBuffer::prefetch(Priority priority)
 {
+    /// The next block is served from the cache, so there is nothing to read ahead.
+    if (cache->contains(UncompressedCache::hash(path, file_pos)))
+        return;
+
+    /// `seek` is lazy, so move `file_in` to the block that the next `nextImpl` reads,
+    /// otherwise the prefetch reads at a stale position and is discarded by that seek.
     initInput();
+    file_in->seek(file_pos, SEEK_SET);
     file_in->prefetch(priority);
 }
 
