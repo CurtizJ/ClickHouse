@@ -779,6 +779,7 @@ Pipe ReadFromMergeTree::readFromPool(
             dataflow_cache_updater);
 
         prefetched_pool->setReadRangesRefiner(createIndexReadRangesRefiner(index_build_context, storage_snapshot->metadata, settings));
+        prefetched_pool->setIndexBuildContext(index_build_context);
         pool = std::move(prefetched_pool);
     }
     else
@@ -800,6 +801,7 @@ Pipe ReadFromMergeTree::readFromPool(
             dataflow_cache_updater);
 
         read_pool->setReadRangesRefiner(createIndexReadRangesRefiner(index_build_context, storage_snapshot->metadata, settings));
+        read_pool->setIndexBuildContext(index_build_context);
         pool = std::move(read_pool);
     }
 

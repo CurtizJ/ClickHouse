@@ -79,7 +79,8 @@ SkipIndexReadResultPtr MergeTreeSkipIndexReader::read(
     const MergeTreeDataPartInfoForReaderPtr & part_info,
     const SkipIndexReadInput & input,
     const StorageMetadataPtr & metadata_snapshot,
-    const NameSet & all_updated_columns)
+    const NameSet & all_updated_columns,
+    PrefetchedSkipIndex prefetched)
 {
     CurrentMetrics::Increment metric(CurrentMetrics::FilteringMarksWithSecondaryKeys);
 
@@ -91,8 +92,9 @@ SkipIndexReadResultPtr MergeTreeSkipIndexReader::read(
     MergeTreeDataSelectExecutor::PartialDisjunctionResult partial_eval_results;
     if (use_for_disjunctions)
         partial_eval_results.resize(part_info->getIndexGranularity().getMarksCountWithoutFinal() * MergeTreeDataSelectExecutor::MAX_BITS_FOR_PARTIAL_DISJUNCTION_RESULT, true);
-    for (const auto & index_and_condition : skip_indexes.useful_indices)
+    for (size_t index_pos = 0; index_pos < skip_indexes.useful_indices.size(); ++index_pos)
     {
+        const auto & index_and_condition = skip_indexes.useful_indices[index_pos];
         if (is_cancelled)
             return {};
 
@@ -120,7 +122,8 @@ SkipIndexReadResultPtr MergeTreeSkipIndexReader::read(
             vector_similarity_index_cache.get(),
             use_for_disjunctions,
             partial_eval_results,
-            log);
+            log,
+            prefetched.reader && prefetched.index_pos == index_pos ? prefetched.reader.get() : nullptr);
 
         ranges = std::move(filtered_ranges);
 
@@ -255,6 +258,44 @@ SkipIndexReadResultPtr MergeTreeSkipIndexReader::read(
         res->threshold_tracker = skip_indexes.threshold_tracker;
     }
     return res;
+}
+
+PrefetchedSkipIndex MergeTreeSkipIndexReader::prefetchFirstIndex(
+    const MergeTreeDataPartInfoForReaderPtr & part_info,
+    const SkipIndexReadInput & input,
+    const StorageMetadataPtr & metadata_snapshot,
+    const NameSet & all_updated_columns) const
+{
+    if (input.ranges.empty() || !canPrefetchIndexes(*part_info, reader_settings))
+        return {};
+
+    /// The first index that `read` reads, with the same ranges.
+    for (size_t index_pos = 0; index_pos < skip_indexes.useful_indices.size(); ++index_pos)
+    {
+        const auto & index_and_condition = skip_indexes.useful_indices[index_pos];
+        const auto & index = index_and_condition.index;
+
+        if (!MergeTreeDataSelectExecutor::canUseIndex(index, metadata_snapshot, all_updated_columns)
+            || !index->getDeserializedFormat(*part_info, index->getFileName()))
+            continue;
+
+        if (index->isVectorSimilarityIndex())
+            return {};
+
+        auto reader = PrefetchedSkipIndexReader::tryCreate(
+            index,
+            index_and_condition.condition_template->generateForPart(*part_info),
+            part_info,
+            input.ranges,
+            reader_settings,
+            mark_cache.get(),
+            uncompressed_cache.get(),
+            context->getPrefetchThreadpool());
+
+        return {index_pos, std::move(reader)};
+    }
+
+    return {};
 }
 
 ProjectionIndexBitmap::ProjectionIndexBitmap(BitmapType bitmap_type)
@@ -645,13 +686,21 @@ MergeTreeIndexReadResultPool::getOrBuildIndexReadResult(
     if (it == index_read_result_registry.end())
     {
         auto promise = index_read_result_registry.emplace(part_index, IndexReadResultEntry{}).first->second.promise;
+
+        PrefetchedSkipIndex prefetched;
+        if (auto prefetched_it = prefetched_skip_indexes.find(part_index); prefetched_it != prefetched_skip_indexes.end())
+        {
+            prefetched = std::move(prefetched_it->second);
+            prefetched_skip_indexes.erase(prefetched_it);
+        }
+
         lock.unlock();
         try
         {
             MergeTreeIndexReadResultPtr res;
             if (skip_index_reader)
             {
-                auto skip_index_res = skip_index_reader->read(part_info, input, metadata_snapshot, all_updated_columns);
+                auto skip_index_res = skip_index_reader->read(part_info, input, metadata_snapshot, all_updated_columns, std::move(prefetched));
                 if (skip_index_res)
                 {
                     res = std::make_shared<MergeTreeIndexReadResult>();
@@ -689,8 +738,40 @@ MergeTreeIndexReadResultPool::getOrBuildIndexReadResult(
 
 void MergeTreeIndexReadResultPool::clear(size_t part_index)
 {
+    PrefetchedSkipIndex unused;
     std::lock_guard lock(index_read_result_registry_mutex);
     index_read_result_registry.erase(part_index);
+    if (auto it = prefetched_skip_indexes.find(part_index); it != prefetched_skip_indexes.end())
+    {
+        unused = std::move(it->second);
+        prefetched_skip_indexes.erase(it);
+    }
+}
+
+void MergeTreeIndexReadResultPool::prefetchSkipIndex(
+    size_t part_index,
+    const MergeTreeDataPartInfoForReaderPtr & part_info,
+    const SkipIndexReadInput & input,
+    const StorageMetadataPtr & metadata_snapshot,
+    const NameSet & all_updated_columns)
+{
+    if (!skip_index_reader)
+        return;
+
+    {
+        std::shared_lock lock(index_read_result_registry_mutex);
+        if (index_read_result_registry.contains(part_index) || prefetched_skip_indexes.contains(part_index))
+            return;
+    }
+
+    /// Outside of the lock: creating the reader is not free. A concurrent call for the same part keeps the first reader.
+    auto prefetched = skip_index_reader->prefetchFirstIndex(part_info, input, metadata_snapshot, all_updated_columns);
+    if (!prefetched.reader)
+        return;
+
+    std::lock_guard lock(index_read_result_registry_mutex);
+    if (!index_read_result_registry.contains(part_index))
+        prefetched_skip_indexes.try_emplace(part_index, std::move(prefetched));
 }
 
 void MergeTreeIndexReadResultPool::cancel() noexcept

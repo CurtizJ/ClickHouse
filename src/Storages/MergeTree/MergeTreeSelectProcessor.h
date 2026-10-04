@@ -106,6 +106,10 @@ struct MergeTreeIndexBuildContext
         PartRemainingMarks part_remaining_marks_);
 
     MergeTreeIndexReadResultPtr getPreparedIndexReadResult(const MergeTreeReadTask & task) const;
+
+    /// Prefetches the first skip index of a part that is going to be read soon, unless its result is built
+    /// or the part is done. Called by the read pools when they cut a task.
+    void prefetchIndexes(const MergeTreeReadTaskInfo & info, const StorageMetadataPtr & metadata_snapshot) const;
 };
 
 using MergeTreeIndexBuildContextPtr = std::shared_ptr<MergeTreeIndexBuildContext>;

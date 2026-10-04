@@ -79,9 +79,14 @@ MergeTreeReadTaskPtr MergeTreeReadPool::getTask(size_t task_idx, MergeTreeReadTa
         size_t thread_idx = 0;
         size_t need_marks = 0;
         MarkRanges cut_ranges;
+        std::optional<size_t> next_part_idx;
 
-        if (!cutRangesToRead(task_idx, part_idx, thread_idx, need_marks, cut_ranges))
+        if (!cutRangesToRead(task_idx, part_idx, thread_idx, need_marks, cut_ranges, next_part_idx))
             return nullptr;
+
+        /// The I/O of the next part's skip index overlaps with reading this part.
+        if (next_part_idx)
+            prefetchIndexes(*per_part_infos[*next_part_idx]);
 
         MarkRanges task_ranges;
         if (!ranges_refiner)
@@ -127,7 +132,8 @@ MergeTreeReadTaskPtr MergeTreeReadPool::getTask(size_t task_idx, MergeTreeReadTa
     }
 }
 
-bool MergeTreeReadPool::cutRangesToRead(size_t task_idx, size_t & part_idx, size_t & thread_idx, size_t & need_marks, MarkRanges & ranges_to_get_from_part)
+bool MergeTreeReadPool::cutRangesToRead(
+    size_t task_idx, size_t & part_idx, size_t & thread_idx, size_t & need_marks, MarkRanges & ranges_to_get_from_part, std::optional<size_t> & next_part_idx)
 {
     const std::lock_guard lock{mutex};
 
@@ -175,6 +181,17 @@ bool MergeTreeReadPool::cutRangesToRead(size_t task_idx, size_t & part_idx, size
         need_marks = std::min(marks_in_part, min_marks_per_task);
 
     cutFromThreadTask(thread_tasks, thread_idx, need_marks, ranges_to_get_from_part);
+
+    /// Parts are taken from the back.
+    for (auto it = thread_tasks.parts_and_ranges.rbegin(); it != thread_tasks.parts_and_ranges.rend(); ++it)
+    {
+        if (it->part_idx != part_idx)
+        {
+            next_part_idx = it->part_idx;
+            break;
+        }
+    }
+
     return true;
 }
 

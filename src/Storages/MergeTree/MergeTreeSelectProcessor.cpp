@@ -172,6 +172,21 @@ MergeTreeIndexReadResultPtr MergeTreeIndexBuildContext::getPreparedIndexReadResu
     return index_read_result;
 }
 
+void MergeTreeIndexBuildContext::prefetchIndexes(const MergeTreeReadTaskInfo & info, const StorageMetadataPtr & metadata_snapshot) const
+{
+    if (!index_reader_pool->hasSkipIndexReader())
+        return;
+
+    const size_t part_index = info.part_index_in_query;
+    auto remaining_it = part_remaining_marks.find(part_index);
+    auto input_it = read_ranges.find(part_index);
+    if (remaining_it == part_remaining_marks.end() || input_it == read_ranges.end() || remaining_it->second.value.load(std::memory_order_acquire) == 0)
+        return;
+
+    index_reader_pool->prefetchSkipIndex(
+        part_index, info.data_part_info, input_it->second, metadata_snapshot, info.alter_conversions->getAllUpdatedColumns());
+}
+
 MergeTreeSelectProcessor::MergeTreeSelectProcessor(
     MergeTreeReadPoolPtr pool_,
     MergeTreeSelectAlgorithmPtr algorithm_,

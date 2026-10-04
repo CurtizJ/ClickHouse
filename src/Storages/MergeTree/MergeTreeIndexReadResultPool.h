@@ -8,6 +8,7 @@
 #include <Storages/MergeTree/VectorSimilarityIndexCache.h>
 #include <Storages/MergeTree/MergeTreeIndexMinMax.h>
 #include <Storages/MergeTree/KeyCondition.h>
+#include <Storages/MergeTree/MergeTreeIndexPrefetch.h>
 
 #include <functional>
 #include <roaring/roaring.hh>
@@ -19,6 +20,13 @@ class IMergeTreeDataPart;
 using DataPartPtr = std::shared_ptr<const IMergeTreeDataPart>;
 
 struct SkipIndexReadInput;
+
+/// The prefetched reader of the skip index at `index_pos` in the list of skip indexes of `MergeTreeSkipIndexReader`.
+struct PrefetchedSkipIndex
+{
+    size_t index_pos = 0;
+    std::unique_ptr<PrefetchedSkipIndexReader> reader;
+};
 
 struct SkipIndexReadResult
 {
@@ -59,7 +67,16 @@ public:
         const MergeTreeDataPartInfoForReaderPtr & part_info,
         const SkipIndexReadInput & input,
         const StorageMetadataPtr & metadata_snapshot,
-        const NameSet & all_updated_columns);
+        const NameSet & all_updated_columns,
+        PrefetchedSkipIndex prefetched = {});
+
+    /// Prefetches the data of the first skip index that `read` would read for the part. I/O only: the indexes are
+    /// evaluated by `read` as before, so JOIN runtime filters published until then are still applied.
+    PrefetchedSkipIndex prefetchFirstIndex(
+        const MergeTreeDataPartInfoForReaderPtr & part_info,
+        const SkipIndexReadInput & input,
+        const StorageMetadataPtr & metadata_snapshot,
+        const NameSet & all_updated_columns) const;
 
     /// Whether `read` prunes by JOIN runtime filters. It snapshots them once per part, fail-open,
     /// so its result must not be built before the build side has published the filters.
@@ -252,6 +269,15 @@ public:
     /// Should be called when the last task for the part has finished.
     void clear(size_t part_index);
 
+    /// Prefetches the first skip index of a part whose result is not built yet, see `MergeTreeSkipIndexReader::prefetchFirstIndex`.
+    /// The result build of the part then uses the prefetched reader.
+    void prefetchSkipIndex(
+        size_t part_index,
+        const MergeTreeDataPartInfoForReaderPtr & part_info,
+        const SkipIndexReadInput & input,
+        const StorageMetadataPtr & metadata_snapshot,
+        const NameSet & all_updated_columns);
+
     /// Whether index read results may include a skip index part (for any part of the query).
     bool hasSkipIndexReader() const { return skip_index_reader != nullptr; }
 
@@ -266,6 +292,8 @@ private:
 
     /// Stores MergeTreeIndexReadResult instances per part to avoid redundant construction.
     std::unordered_map<size_t, IndexReadResultEntry> index_read_result_registry;
+    /// At most one per part, consumed by the build of its result.
+    std::unordered_map<size_t, PrefetchedSkipIndex> prefetched_skip_indexes;
     SharedMutex index_read_result_registry_mutex;
 };
 

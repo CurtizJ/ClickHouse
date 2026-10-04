@@ -242,6 +242,8 @@ void MergeTreePrefetchedReadPool::startPrefetches()
     while (!prefetch_queue.empty())
     {
         const auto & top = prefetch_queue.top();
+        /// Before the data: the first task of a part reads the result of its skip indexes.
+        prefetchIndexes(*top.task->read_info);
         createPrefetchedReadersForTask(*top.task);
 #ifndef NDEBUG
         if (prev.task)

@@ -71,6 +71,10 @@ public:
     /// refiner: see refineReadRanges calls in getTask of the concrete pools.
     void setReadRangesRefiner(MergeTreeReadRangesRefinerPtr refiner) { ranges_refiner = std::move(refiner); }
 
+    /// Must be called before the pipeline starts to call getTask. Lets the pool prefetch the skip indexes of parts
+    /// it is going to read soon, see `MergeTreeIndexBuildContext::prefetchIndexes`.
+    void setIndexBuildContext(MergeTreeIndexBuildContextPtr context_) { index_build_context = std::move(context_); }
+
 protected:
     /// Initialized in constructor
     const StorageSnapshotPtr storage_snapshot;
@@ -133,6 +137,10 @@ protected:
     std::vector<MarkRangesPtr> getActualPatchReadRequestMaps(const MergeTreeReadTaskInfo & info, const MarkRangesPtr & actual_map) const;
 
     MergeTreeReadRangesRefinerPtr ranges_refiner;
+    MergeTreeIndexBuildContextPtr index_build_context;
+
+    /// Prefetches the skip indexes of the part, if the pool has an index build context.
+    void prefetchIndexes(const MergeTreeReadTaskInfo & info) const;
 
     std::vector<MergeTreeReadTaskInfoPtr> per_part_infos;
     RangesInPatchParts ranges_in_patch_parts;

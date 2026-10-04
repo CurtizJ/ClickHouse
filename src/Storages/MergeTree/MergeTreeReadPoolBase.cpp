@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/DeserializationPrefixesCache.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeBlockReadUtils.h>
+#include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 #include <Access/ContextAccess.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
@@ -533,6 +534,12 @@ MergeTreeReadTask::Extras MergeTreeReadPoolBase::getExtras() const
         .storage_snapshot = storage_snapshot,
         .profile_callback = profile_callback,
     };
+}
+
+void MergeTreeReadPoolBase::prefetchIndexes(const MergeTreeReadTaskInfo & info) const
+{
+    if (index_build_context)
+        index_build_context->prefetchIndexes(info, storage_snapshot->metadata);
 }
 
 MarkRanges MergeTreeReadPoolBase::refineReadRanges(const MergeTreeReadTaskInfo & info, MarkRanges ranges) const
