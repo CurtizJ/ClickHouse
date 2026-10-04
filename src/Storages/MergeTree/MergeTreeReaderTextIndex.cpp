@@ -389,7 +389,7 @@ PostingListCursorPtr MergeTreeReaderTextIndex::makeLazyCursor(std::string_view t
         granule->getIndexIdForCaches());
 }
 
-void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
+void MergeTreeReaderTextIndex::prefetchPostings()
 {
     if (all_mark_ranges.empty() || !canPrefetchIndexes(*data_part_info_for_read, settings))
         return;
@@ -397,6 +397,7 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
     const auto & index_granularity = data_part_info_for_read->getIndexGranularity();
     const size_t row_begin = index_granularity.getMarkStartingRow(all_mark_ranges.front().begin);
     const size_t row_end = index_granularity.getMarkStartingRow(all_mark_ranges.back().end);
+
     if (row_begin >= row_end)
         return;
 
@@ -407,16 +408,13 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
 
     /// Only the columns that are answered from postings read them.
     absl::flat_hash_set<std::string_view> tokens_to_prefetch;
-    std::vector<const TextSearchQuery *> phrase_queries;
+
     for (size_t i = 0; i < search_queries.size(); ++i)
     {
         if (is_always_true[i] || use_fallback[i] || !search_queries[i])
             continue;
 
         const bool is_phrase = search_queries[i]->getSearchMode() == TextSearchMode::Phrase;
-        if (is_phrase)
-            phrase_queries.push_back(search_queries[i].get());
-
         for (const auto & token : is_phrase ? search_queries[i]->getPhraseTokens() : search_queries[i]->getTokens())
         {
             if (auto it = tokens_to_read.find(token); it != tokens_to_read.end())
@@ -436,6 +434,7 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
 
         const UInt64 begin = token_info.offsets[blocks.front()];
         auto hash = TextIndexPostingsCache::hash(granule->getIndexIdForCaches(), begin, static_cast<UInt8>(cache_kind));
+
         if (condition_text->postingsCache()->contains(hash))
             continue;
 
@@ -453,33 +452,6 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
         stream.getDataBuffer()->prefetch(priority);
         ProfileEvents::increment(ProfileEvents::TextIndexPrefetchedPostings);
     }
-
-    if (!positions_stream)
-        return;
-
-    /// Phrase search reads the positions of the tokens of a phrase in the order of the phrase.
-    ByteRangeSet positions;
-    std::optional<UInt64> first_positions;
-    for (const auto * search_query : phrase_queries)
-    {
-        for (const auto & token : search_query->getPhraseTokens())
-        {
-            auto it = token_infos.find(token);
-            if (it == token_infos.end() || !(it->second->header & PostingsSerialization::Flags::HasPositions) || it->second->position_bytes == 0)
-                continue;
-
-            positions.add({it->second->position_offset, it->second->position_bytes});
-            if (!first_positions)
-                first_positions = it->second->position_offset;
-        }
-    }
-
-    if (!first_positions || *first_positions >= positions_stream->getFileSize())
-        return;
-
-    positions_stream->getDataBuffer()->setRequestMap(std::move(positions));
-    positions_stream->seekToMark({*first_positions, 0});
-    positions_stream->getDataBuffer()->prefetch(priority);
 }
 
 void MergeTreeReaderTextIndex::initializePositionsStream()
@@ -566,7 +538,7 @@ size_t MergeTreeReaderTextIndex::readRows(
         classifyVirtualColumns();
         initializeTokensToRead();
         initializePositionsStream();
-        prefetchPostingsAndPositions();
+        prefetchPostings();
     }
 
     const bool any_use_fallback = !use_fallback.empty() && std::ranges::any_of(use_fallback, [](bool b) { return b; });

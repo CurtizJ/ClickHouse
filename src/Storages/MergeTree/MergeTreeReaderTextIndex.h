@@ -85,9 +85,9 @@ private:
     void classifyVirtualColumns();
     /// Collects the tokens whose postings the analysis left to read into `tokens_to_read`.
     void initializeTokensToRead();
-    /// For a prefetchable part, prefetches the first segment in `all_mark_ranges` of each list in `tokens_to_read`
-    /// and the positions of the phrase tokens, each on its own stream. The next segments follow on the same stream.
-    void prefetchPostingsAndPositions();
+    /// For a prefetchable part, prefetches the first segment in `all_mark_ranges` of each list in `tokens_to_read`,
+    /// each on its own stream. The next segments follow on the same stream.
+    void prefetchPostings();
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
     void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
 
