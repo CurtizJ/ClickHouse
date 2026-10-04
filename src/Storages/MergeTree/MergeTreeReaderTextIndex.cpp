@@ -382,16 +382,11 @@ PostingListCursorPtr MergeTreeReaderTextIndex::makeLazyCursor(std::string_view t
     if (!(token_info.header & PostingsSerialization::Flags::IsCompressed))
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected token for lazy mode: {}. Multi-block postings must be compressed", token);
 
-    auto cursor = std::make_shared<PostingListCursor>(
+    return std::make_shared<PostingListCursor>(
         getPostingsStream(token, token_info),
         token_info,
         condition_text->postingsCache().get(),
         granule->getIndexIdForCaches());
-
-    if (prefetch_until_row)
-        cursor->enableReadAhead(*prefetch_until_row);
-
-    return cursor;
 }
 
 void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
@@ -405,7 +400,6 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
     if (row_begin >= row_end)
         return;
 
-    prefetch_until_row = static_cast<UInt32>(std::min<size_t>(row_end - 1, std::numeric_limits<UInt32>::max()));
     const RowsRange rows(row_begin, row_end - 1);
     const auto priority = settings.read_settings.priority;
     const auto & token_infos = granule->getAnalyzer().getAllTokenInfos();
@@ -486,30 +480,6 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
     positions_stream->getDataBuffer()->setRequestMap(std::move(positions));
     positions_stream->seekToMark({*first_positions, 0});
     positions_stream->getDataBuffer()->prefetch(priority);
-}
-
-void MergeTreeReaderTextIndex::prefetchNextPostingsBlock(
-    std::string_view token, const TokenPostingsInfo & token_info, MergeTreeReaderStream & stream, size_t block_idx)
-{
-    const size_t next = block_idx + 1;
-    if (!prefetch_until_row || next >= token_info.offsets.size() || token_info.ranges[next].begin > *prefetch_until_row)
-        return;
-
-    if (auto it = postings_blocks.find(token); it != postings_blocks.end() && it->second.contains(next))
-        return;
-
-    auto [prefetched_it, inserted] = prefetched_postings_blocks.try_emplace(token, next);
-    if (!inserted && prefetched_it->second >= next)
-        return;
-    prefetched_it->second = next;
-
-    auto hash = TextIndexPostingsCache::hash(granule->getIndexIdForCaches(), token_info.offsets[next], static_cast<UInt8>(TextIndexPostingsCacheKind::Roaring));
-    if (condition_text->postingsCache()->contains(hash))
-        return;
-
-    stream.seekToMark({token_info.offsets[next], 0});
-    stream.getDataBuffer()->prefetch(settings.read_settings.priority);
-    ProfileEvents::increment(ProfileEvents::TextIndexPrefetchedPostings);
 }
 
 void MergeTreeReaderTextIndex::initializePositionsStream()
@@ -857,7 +827,6 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
         result.push_back(it->second);
     }
 
-    prefetchNextPostingsBlock(token, token_info, postings_stream, blocks_to_read.back());
     return result;
 }
 

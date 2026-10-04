@@ -86,10 +86,8 @@ private:
     /// Collects the tokens whose postings the analysis left to read into `tokens_to_read`.
     void initializeTokensToRead();
     /// For a prefetchable part, prefetches the first segment in `all_mark_ranges` of each list in `tokens_to_read`
-    /// and the positions of the phrase tokens, each on its own stream, and sets `prefetch_until_row`.
+    /// and the positions of the phrase tokens, each on its own stream. The next segments follow on the same stream.
     void prefetchPostingsAndPositions();
-    /// Reads ahead the segment after `block_idx` on the stream of the token, if it is needed and not cached.
-    void prefetchNextPostingsBlock(std::string_view token, const TokenPostingsInfo & token_info, MergeTreeReaderStream & stream, size_t block_idx);
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
     void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows, PostingList & range_posting);
 
@@ -142,10 +140,6 @@ private:
 
     /// Stream for position data (.pos file) used for phrase queries.
     std::unique_ptr<MergeTreeReaderStream> positions_stream;
-    /// The last row of `all_mark_ranges` when the part is prefetched: segments up to it are read ahead.
-    std::optional<UInt32> prefetch_until_row;
-    /// The segment of each token read ahead last in materialize mode, so that the marks of a segment prefetch it once.
-    absl::flat_hash_map<std::string_view, size_t> prefetched_postings_blocks;
     /// Per-reader memo of phrase results (shared via the postings cache) so repeated readRows calls skip the cache lookup.
     absl::flat_hash_map<UInt128, FlatPostingsPtr> phrase_search_doc_ids;
 
