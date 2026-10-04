@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/PostingListSegment.h>
 #include <Core/SettingsEnums.h>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace DB
@@ -105,6 +106,9 @@ public:
     /// Used to sort cursors by selectivity for leapfrog intersection.
     UInt32 cardinality() const;
 
+    /// After reading a segment, read ahead the next one on the same stream if it starts at or before `last_row`.
+    void enableReadAhead(UInt32 last_row) { read_ahead_last_row = last_row; }
+
 private:
     /// Point `current_segment` at the `segment_idx`-th segment (from the cache or `buildPostingSegment`)
     /// without decoding block data yet. No-op for shared-array cursors, which already hold the array.
@@ -174,6 +178,7 @@ private:
     /// Segment iteration state.
     size_t current_segment_idx = 0;
     bool is_valid = true;
+    std::optional<UInt32> read_ahead_last_row;
 
     /// ProfileEvents are batched into these local counters and flushed in the destructor
     /// to avoid per-block / per-advance atomic ops on the hot path.

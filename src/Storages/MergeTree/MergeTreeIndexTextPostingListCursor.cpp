@@ -27,6 +27,7 @@ namespace ProfileEvents
     extern const Event TextIndexLazySegmentsSkippedDense;
     extern const Event TextIndexLazySegmentsSkippedResolved;
     extern const Event TextIndexLazyBlocksSkippedResolved;
+    extern const Event TextIndexPrefetchedPostings;
 }
 
 namespace DB
@@ -328,6 +329,19 @@ PostingListSegment PostingListCursor::buildPostingSegment(size_t segment_idx)
 
     segment.block_count = num_blocks;
     segment.tail_size = segment.doc_count % IPostingListBlockCodec::BLOCK_SIZE;
+
+    /// The next segment follows this one on the stream, so reading it ahead needs no new request.
+    const size_t next_segment = segment_idx + 1;
+    if (read_ahead_last_row && next_segment < total_segments && info->ranges[next_segment].begin <= *read_ahead_last_row)
+    {
+        auto next_key = TextIndexPostingsCache::hash(index_id_for_cache, info->offsets[next_segment], static_cast<UInt8>(TextIndexPostingsCacheKind::Segment));
+        if (!postings_cache || !postings_cache->contains(next_key))
+        {
+            data_buffer->prefetch(Priority{});
+            ProfileEvents::increment(ProfileEvents::TextIndexPrefetchedPostings);
+        }
+    }
+
     return segment;
 }
 
