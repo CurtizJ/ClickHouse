@@ -37,6 +37,10 @@ SETTINGS use_skip_indexes_prefetch = 1, text_index_hint_max_selectivity = 1, log
 SELECT sum(id) FROM t_text_index_prefetch_segments WHERE hasPhrase(message, 'common often')
 SETTINGS use_skip_indexes_prefetch = 0, text_index_hint_max_selectivity = 1, log_comment = 'text_segments_phrase_off';
 
+-- The phrase is answered by the fallback to the original predicate, so its postings and positions are not read nor prefetched.
+SELECT sum(id) FROM t_text_index_prefetch_segments WHERE hasPhrase(message, 'common often')
+SETTINGS use_skip_indexes_prefetch = 1, text_index_hint_max_selectivity = 0, log_comment = 'text_segments_phrase_fallback_on';
+
 SYSTEM FLUSH LOGS query_log;
 
 SELECT

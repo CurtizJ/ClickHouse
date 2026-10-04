@@ -411,7 +411,26 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
     const auto & token_infos = granule->getAnalyzer().getAllTokenInfos();
     const auto cache_kind = use_lazy_mode ? TextIndexPostingsCacheKind::Segment : TextIndexPostingsCacheKind::Roaring;
 
-    for (const auto & token : tokens_to_read)
+    /// Only the columns that are answered from postings read them.
+    absl::flat_hash_set<std::string_view> tokens_to_prefetch;
+    std::vector<const TextSearchQuery *> phrase_queries;
+    for (size_t i = 0; i < search_queries.size(); ++i)
+    {
+        if (is_always_true[i] || use_fallback[i] || !search_queries[i])
+            continue;
+
+        const bool is_phrase = search_queries[i]->getSearchMode() == TextSearchMode::Phrase;
+        if (is_phrase)
+            phrase_queries.push_back(search_queries[i].get());
+
+        for (const auto & token : is_phrase ? search_queries[i]->getPhraseTokens() : search_queries[i]->getTokens())
+        {
+            if (auto it = tokens_to_read.find(token); it != tokens_to_read.end())
+                tokens_to_prefetch.insert(*it);
+        }
+    }
+
+    for (const auto & token : tokens_to_prefetch)
     {
         const auto & token_info = *token_infos.at(token);
         if (token_info.header & PostingsSerialization::Flags::EmbeddedPostings)
@@ -447,11 +466,8 @@ void MergeTreeReaderTextIndex::prefetchPostingsAndPositions()
     /// Phrase search reads the positions of the tokens of a phrase in the order of the phrase.
     ByteRangeSet positions;
     std::optional<UInt64> first_positions;
-    for (const auto & search_query : search_queries)
+    for (const auto * search_query : phrase_queries)
     {
-        if (!search_query || search_query->getSearchMode() != TextSearchMode::Phrase)
-            continue;
-
         for (const auto & token : search_query->getPhraseTokens())
         {
             auto it = token_infos.find(token);
