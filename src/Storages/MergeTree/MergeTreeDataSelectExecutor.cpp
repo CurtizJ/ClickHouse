@@ -1318,8 +1318,8 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
                     || !index->getDeserializedFormat(*state.part_info_for_reader, index->getFileName()))
                     continue;
 
-                /// Vector similarity indexes have a cache of deserialized granules, and the header of a text index is usually cached.
-                if (index->isVectorSimilarityIndex() || index->isTextIndex())
+                /// Vector similarity indexes have a cache of deserialized granules.
+                if (index->isVectorSimilarityIndex())
                     return false;
 
                 state.prefetched_reader = PrefetchedSkipIndexReader::tryCreate(

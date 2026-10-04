@@ -1,9 +1,18 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
+#include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/MergeTreeIndexGranularityInfo.h>
+#include <Storages/MergeTree/MergeTreeIndexPrefetch.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/TextIndexBlockReader.h>
 #include <Storages/MergeTree/MergeTreeIndicesSerialization.h>
 #include <Storages/MergeTree/VectorSimilarityIndexCache.h>
+
+namespace ProfileEvents
+{
+    extern const Event TextIndexPrefetchedHeaders;
+}
 
 namespace DB
 {
@@ -180,6 +189,9 @@ void MergeTreeIndexReader::read(size_t mark, const IMergeTreeIndexCondition * co
         if (!res)
             res = index->createIndexGranule();
 
+        if (index->isTextIndex() && !text_prefetch && canPrefetchIndexes(*data_part_info, settings))
+            text_prefetch = std::make_unique<TextIndexPrefetchHandle>(*data_part_info, *index, settings, /*enable_prefetch=*/ true);
+
         MergeTreeIndexDeserializationState state
         {
             .version = version,
@@ -189,9 +201,11 @@ void MergeTreeIndexReader::read(size_t mark, const IMergeTreeIndexCondition * co
             .readable_ranges = readable_ranges,
             .skip_postings_deserialization = false,
             .reader_settings = settings,
+            .text_index_prefetch = text_prefetch.get(),
         };
 
         res->deserializeBinaryWithMultipleStreams(streams, state);
+        text_prefetch.reset();
         stream_mark = mark + 1;
     };
 
@@ -244,12 +258,30 @@ void MergeTreeIndexReader::adjustRightMark(size_t right_mark)
         stream->adjustRightMark(right_mark);
 }
 
-void MergeTreeIndexReader::prefetchBeginOfRange(size_t from_mark, const IMergeTreeIndexCondition * /*condition*/, Priority priority)
+void MergeTreeIndexReader::prefetchBeginOfRange(size_t from_mark, const IMergeTreeIndexCondition * condition, Priority priority)
 {
+    if (index->isTextIndex())
+    {
+        text_prefetch = std::make_unique<TextIndexPrefetchHandle>(*data_part_info, *index, settings, /*enable_prefetch=*/ true);
+        if (!issueTextIndexPrefetches(*text_prefetch, typeid_cast<const MergeTreeIndexConditionText &>(*condition), *data_part_info, *index))
+            return;
+
+        ProfileEvents::increment(ProfileEvents::TextIndexPrefetchedHeaders);
+    }
+
     initStreamIfNeeded();
 
     for (const auto & stream : stream_holders)
     {
+        /// The header of a text index is read whole: bound the request by the file.
+        if (index->isTextIndex())
+        {
+            ByteRangeSet whole_file;
+            whole_file.add({0, stream->getFileSize()});
+            stream->getDataBuffer()->setRequestMap(std::move(whole_file));
+            stream->adjustRightMark(marks_count);
+        }
+
         stream->seekToMark(from_mark);
         stream->getDataBuffer()->prefetch(priority);
     }

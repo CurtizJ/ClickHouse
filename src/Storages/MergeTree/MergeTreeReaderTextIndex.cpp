@@ -9,6 +9,9 @@
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/MergeTreeIndexPrefetch.h>
+#include <Storages/MergeTree/TextIndexBlockReader.h>
+#include <base/scope_guard.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
@@ -267,6 +270,11 @@ void MergeTreeReaderTextIndex::readGranule()
     /// The analysis opens the dictionary and postings streams itself.
     MergeTreeIndexInputStreams streams;
     streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
+
+    std::optional<TextIndexPrefetchHandle> prefetch_handle;
+    if (canPrefetchIndexes(*data_part_info_for_read, settings))
+        deserialization_state->text_index_prefetch = &prefetch_handle.emplace(*data_part_info_for_read, *index.index, settings, /*enable_prefetch=*/ true);
+    SCOPE_EXIT({ deserialization_state->text_index_prefetch = nullptr; });
 
     auto granule_ptr = index.index->createIndexGranule();
     granule_ptr->deserializeBinaryWithMultipleStreams(streams, *deserialization_state);

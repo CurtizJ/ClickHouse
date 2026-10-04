@@ -380,6 +380,18 @@ struct TextIndexSerialization
 using TokenToPostingsMap = absl::flat_hash_map<String, PostingListPtr>;
 
 class TextIndexAnalyzer;
+class TextIndexBlockReader;
+struct TextIndexPrefetchHandle;
+class MergeTreeIndexConditionText;
+
+/// Issues the prefetches of a text index granule that can be located without I/O, before its analysis starts:
+/// the posting lists of tokens found in the tokens cache and, if the header is cached, the dictionary blocks of the
+/// other tokens. Returns whether the header has to be read: false also if the caches prove that the granule matches nothing.
+bool issueTextIndexPrefetches(
+    TextIndexPrefetchHandle & handle,
+    const MergeTreeIndexConditionText & condition_text,
+    const IMergeTreeDataPartInfoForReader & part_info,
+    const IMergeTreeIndex & index);
 
 /// Text index granule created on reading of the index.
 struct MergeTreeIndexGranuleText final : public IMergeTreeIndexGranule
@@ -416,18 +428,20 @@ public:
 
 private:
     /// Reads dictionary blocks and analyzes them for tokens.
-    void analyzeDictionaryForTokens(const DictionarySparseIndex & sparse_index, MergeTreeIndexReaderStream & dictionary_stream, MergeTreeIndexDeserializationState & state);
+    void analyzeDictionaryForTokens(const DictionarySparseIndex & sparse_index, TextIndexPrefetchHandle & readers, MergeTreeIndexDeserializationState & state);
     /// Reads dictionary blocks and analyzes them for patterns.
-    void analyzeDictionaryForPatterns(const DictionarySparseIndex & sparse_index, MergeTreeIndexReaderStream & dictionary_stream, MergeTreeIndexDeserializationState & state);
+    void analyzeDictionaryForPatterns(const DictionarySparseIndex & sparse_index, TextIndexBlockReader & dictionary_reader, MergeTreeIndexDeserializationState & state);
     /// Fills tokens and their infos from the cache.
     /// Returns tokens that are not in the cache and need to be read from the dictionary file.
-    std::vector<String> fillTokensFromCache(MergeTreeIndexDeserializationState & state);
+    std::vector<String> fillTokensFromCache(TextIndexBlockReader & postings_reader, MergeTreeIndexDeserializationState & state);
+    /// Announces the single-segment posting list of the token to `postings_reader`, if the analysis is going to read it.
+    void enqueuePostingsIfNeeded(TextIndexBlockReader & postings_reader, MergeTreeIndexDeserializationState & state, std::string_view token, const TokenPostingsInfo & token_info) const;
     std::pair<std::vector<size_t>, NameSet> matchTokens(const ColumnString & all_tokens, std::vector<std::string_view> needed_tokens);
 
     std::shared_ptr<TextIndexHeader> loadHeader(MergeTreeIndexReaderStream & header_stream, MergeTreeIndexDeserializationState & state);
     /// Reads the single-segment posting lists of the needed tokens and folds them into the analyzer.
-    /// Opens the postings stream itself, once the tokens are known, with a buffer that fits the largest of the lists.
-    void analyzePostings(PostingsSerialization & postings_serialization, MergeTreeIndexDeserializationState & state);
+    /// The rarest are read first; a fallback stream gets a buffer that fits the largest of the lists.
+    void analyzePostings(PostingsSerialization & postings_serialization, TextIndexBlockReader & postings_reader, MergeTreeIndexDeserializationState & state);
 
     bool is_empty = true;
     MergeTreeIndexTextParams params;

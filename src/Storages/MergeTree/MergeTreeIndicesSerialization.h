@@ -28,6 +28,7 @@ class IMergeTreeIndexCondition;
 class IMergeTreeDataPartInfoForReader;
 struct IMergeTreeIndex;
 struct MarkRanges;
+struct TextIndexPrefetchHandle;
 
 /// Represents a substream of a merge tree index.
 /// By default skip indexes have one substream (skp_idx_<name>.idx),
@@ -83,6 +84,9 @@ struct MergeTreeIndexDeserializationState
     const MarkRanges * readable_ranges;
     bool skip_postings_deserialization;
     const MergeTreeReaderSettings & reader_settings;
+    /// The block readers of a text index granule, with prefetches possibly in flight. If null, the analysis
+    /// creates its own readers without prefetching.
+    TextIndexPrefetchHandle * text_index_prefetch = nullptr;
 };
 
 }

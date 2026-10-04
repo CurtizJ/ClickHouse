@@ -180,6 +180,10 @@
     M(SkipIndexPrefetches, "Number of asynchronous prefetches of skip index data scheduled ahead of the index analysis.", ValueType::Number) \
     M(SkipIndexPrefetchesRunInline, "Number of skip index prefetch jobs that had not started when the analysis needed their data, so the analysis cancelled them and ran them inline.", ValueType::Number) \
     M(SkipIndexPrefetchWaitMicroseconds, "Time the skip index analysis waited for running prefetch jobs of skip index data.", ValueType::Microseconds) \
+    M(TextIndexPrefetchedHeaders, "Number of text index headers prefetched asynchronously ahead of the index analysis.", ValueType::Number) \
+    M(TextIndexPrefetchedDictionaryBlocks, "Number of text index dictionary blocks prefetched asynchronously ahead of their reads.", ValueType::Number) \
+    M(TextIndexPrefetchedPostings, "Number of text index posting list segments prefetched asynchronously ahead of their reads.", ValueType::Number) \
+    M(TextIndexUnusedPrefetches, "Number of prefetched text index dictionary blocks and posting list segments that were not read, for example because the analysis proved that the granule does not match.", ValueType::Number) \
     M(SkipIndexPrefetchBudgetExhausted, "Number of skip index prefetches not issued because the prefetch budget of the read step (`filesystem_prefetches_limit`, `filesystem_prefetch_max_memory_usage`) was exhausted.", ValueType::Number) \
     M(TextIndexGenericExclusionSearchAlgorithm, "Number of times the generic exclusion search algorithm is used over the text index.", ValueType::Number) \
     M(TextIndexGenericExclusionSearchStepLimitReached, "Number of times the generic exclusion search over the text index reached merge_tree_generic_exclusion_search_max_steps and accepted the remaining mark ranges without further splitting.", ValueType::Number) \

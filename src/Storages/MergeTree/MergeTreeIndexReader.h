@@ -11,6 +11,7 @@ namespace DB
 {
 
 class VectorSimilarityIndexCache;
+struct TextIndexPrefetchHandle;
 
 class MergeTreeIndexReader
 {
@@ -36,6 +37,7 @@ public:
     void adjustRightMark(size_t right_mark);
     /// Opens the stream (which waits for the marks), seeks it to `from_mark` and issues an asynchronous prefetch,
     /// so that the next `read(from_mark, ...)` finds its data in flight. Blocks, so it runs on the prefetch pool.
+    /// For a text index, the caches decide what to prefetch, see `issueTextIndexPrefetches`.
     void prefetchBeginOfRange(size_t from_mark, const IMergeTreeIndexCondition * condition, Priority priority);
     const StreamMap & getStreams() { return streams; }
 
@@ -52,6 +54,9 @@ private:
 
     StreamMap streams;
     std::vector<std::unique_ptr<MergeTreeReaderStream>> stream_holders;
+
+    /// The block readers of a text index granule, with the prefetches issued by `prefetchBeginOfRange`.
+    std::unique_ptr<TextIndexPrefetchHandle> text_prefetch;
 
     uint8_t version = 0;
     size_t stream_mark = 0;

@@ -12,7 +12,9 @@
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/IPostingListCodec.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
+#include <Storages/MergeTree/MergeTreeIndexPrefetch.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/TextIndexBlockReader.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
 
@@ -136,6 +138,10 @@ UInt64 computeCountForPart(
     /// The analysis opens the dictionary and postings streams itself
     MergeTreeIndexInputStreams streams;
     streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
+
+    std::optional<TextIndexPrefetchHandle> prefetch_handle;
+    if (canPrefetchIndexes(part_info, reader_settings))
+        state.text_index_prefetch = &prefetch_handle.emplace(part_info, *index.index, reader_settings, /*enable_prefetch=*/ true);
 
     auto granule_ptr = index.index->createIndexGranule();
     granule_ptr->deserializeBinaryWithMultipleStreams(streams, state);

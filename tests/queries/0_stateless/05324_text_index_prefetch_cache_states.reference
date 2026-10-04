@@ -1,0 +1,12 @@
+1000
+1000
+1000
+0
+0
+1000
+1000
+cold	1	1	1	0
+header_cached	0	1	1	0
+tokens_cached	0	0	1	0
+negative_miss	0	1	0	0
+negative_hit	0	0	0	0
