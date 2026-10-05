@@ -53,7 +53,7 @@ namespace ErrorCodes
 namespace
 {
 
-/// Opens the part's base text-index substreams and deserializes its granule
+/// Opens the part's text index sparse index stream and deserializes its granule
 std::shared_ptr<const MergeTreeIndexGranuleText> loadTextIndexGranuleForStats(
     const DataPartPtr & part,
     const MergeTreeIndexText & text_index,
@@ -65,25 +65,18 @@ std::shared_ptr<const MergeTreeIndexGranuleText> loadTextIndexGranuleForStats(
     LoadedMergeTreeDataPartInfoForReader part_info(part, std::make_shared<AlterConversions>());
 
     /// The stream names and sizes come from the part's checksums, so no storage request is needed here.
-    auto make_stream = [&](const MergeTreeIndexSubstream & substream)
-    {
-        return makeTextIndexInputStream(
-            part_info,
-            text_index.getFileName() + substream.suffix,
-            substream.extension,
-            MergeTreeIndexReader::patchSettings(reader_settings, substream.type));
-    };
-
-    auto sparse_index_stream = make_stream(substreams[0]);
-    auto dictionary_stream = make_stream(substreams[1]);
-    auto postings_stream = make_stream(substreams[2]);
+    auto sparse_index_stream = makeTextIndexInputStream(
+        part_info,
+        text_index.getFileName(),
+        substreams[0],
+        reader_settings,
+        /*expected_buffer_size=*/ std::nullopt);
 
     sparse_index_stream->seekToStart();
 
+    /// The analysis opens the dictionary stream itself.
     MergeTreeIndexInputStreams streams;
     streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
-    streams[MergeTreeIndexSubstream::Type::TextIndexDictionary] = dictionary_stream.get();
-    streams[MergeTreeIndexSubstream::Type::TextIndexPostings] = postings_stream.get();
 
     MergeTreeIndexDeserializationState state
     {
@@ -93,6 +86,7 @@ std::shared_ptr<const MergeTreeIndexGranuleText> loadTextIndexGranuleForStats(
         .index = text_index,
         .readable_ranges = nullptr,
         .text_index_read_postings = false,
+        .reader_settings = reader_settings,
     };
 
     auto granule = text_index.createIndexGranule();

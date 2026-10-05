@@ -49,11 +49,13 @@ public:
     {
     }
 
-    template <typename... Args>
-    static UInt128 hash(Args... args)
+    static UInt128 hash(std::string_view index_id, std::string_view token)
     {
         SipHash hasher;
-        (hasher.update(args),...);
+        hasher.update(UInt8{0}); /// Token postings, including negative cache entries.
+        hasher.update(index_id.size());
+        hasher.update(index_id);
+        hasher.update(token);
         return hasher.get128();
     }
 
@@ -73,14 +75,42 @@ public:
         set(key, notFoundEntry());
     }
 
+    void setPatternBypass(UInt128 key)
+    {
+        set(key, patternBypassEntry());
+    }
+
     static bool isNotFound(const MappedPtr & entry)
     {
         return entry == notFoundEntry();
     }
 
+    static bool isPatternBypass(const MappedPtr & entry)
+    {
+        return entry == patternBypassEntry();
+    }
+
+    static UInt128 hashPatternBypass(const String & index_id, UInt128 patterns_hash, UInt64 max_postings_to_read)
+    {
+        SipHash hasher;
+        hasher.update(UInt8{1}); /// Pattern bypass entries must not alias arbitrary token bytes.
+        hasher.update(index_id);
+        hasher.update(patterns_hash);
+        hasher.update(max_postings_to_read);
+        return hasher.get128();
+    }
+
 private:
     static const MappedPtr & notFoundEntry()
     {
+        static const auto entry = std::make_shared<TokenPostingsInfo>();
+        return entry;
+    }
+
+    static const MappedPtr & patternBypassEntry()
+    {
+        /// An empty TokenPostingsInfo has a nonzero weight, so sentinel entries
+        /// remain bounded by both the byte and entry-count cache limits.
         static const auto entry = std::make_shared<TokenPostingsInfo>();
         return entry;
     }
@@ -127,16 +157,14 @@ enum class TextIndexPostingsCacheKind : UInt8
 {
     Roaring = 0,
     Segment = 1,
-    Flat = 2,
-    /// Phrase search result, reusing the Flat (sorted doc-id) payload.
-    Phrase = 3,
+    Phrase = 3, /// phrase-search result, a sorted array of doc ids
     /// Flat postings of one posting-list block (sorted row ids and per-row term frequencies), decoded for BM25 scoring.
     ScoringPostings = 4,
 };
 
 /// A single cell of TextIndexPostingsCache. It holds one of:
 ///   - PostingListPtr:        a decoded Roaring bitmap of one posting-list block;
-///   - PaddedPODArrayPtr:     a plain array of UInt32 values: a flattened sorted array of postings (Flat, Phrase);
+///   - PaddedPODArrayPtr:     a sorted array of doc ids of a phrase-search result;
 ///   - ScoringPostingsPtr:    flat sorted row ids of one posting-list block with their term frequencies (BM25 scoring);
 ///   - PostingListSegmentPtr: a decoded segment (payload + per-block index) of a compressed posting list (lazy cursor).
 /// Every payload is held by shared_ptr, so a consumer keeps its data alive by copying the inner pointer

@@ -104,6 +104,7 @@ struct MergeTreeIndexDeserializationState
     const IMergeTreeIndex & index;
     const MarkRanges * readable_ranges = nullptr;
     bool text_index_read_postings = true;
+    const MergeTreeReaderSettings & reader_settings;
 };
 
 }
