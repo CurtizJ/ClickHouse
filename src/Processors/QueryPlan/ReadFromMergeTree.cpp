@@ -5341,6 +5341,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
             query_info.filter_actions_dag.get(),
             data,
             getParts(),
+            all_column_names,
             vector_search_parameters,
             top_k_filter_info,
             context,

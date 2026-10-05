@@ -42,17 +42,18 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-namespace
-{
-
 /// Posting-list doc IDs are 32-bit, so `row_offset > UInt32::max` cannot legitimately
 /// occur and would underflow `out[v - row_offset]` indexing in `padColumn` / leapfrog
-/// writers. Throw rather than silently emit a zero filter and drop matches.
+/// writers (and the direct-fill path in `MergeTreeReaderTextIndex`). Throw rather than
+/// silently emit a zero filter and drop matches.
 void requireRowOffsetRepresentable(size_t row_offset)
 {
     if (row_offset > std::numeric_limits<uint32_t>::max())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Posting-list cursor doesn't support row_offset larger than UINT32_MAX, got {}", row_offset);
 }
+
+namespace
+{
 
 double computeDensity(const TokenPostingsInfo & info)
 {
