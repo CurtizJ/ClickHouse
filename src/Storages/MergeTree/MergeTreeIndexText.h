@@ -454,6 +454,12 @@ struct TextIndexSerialization
     static void serializeRawPostings(std::span<const UInt32> row_ids, std::span<const UInt32> tf_minus_one, WriteBuffer & ostr);
     static void serializeHeader(const TextIndexHeader & header, WriteBuffer & ostr);
 
+    /// Appends the per-row `SmallFloat` document lengths to the `.dl` substream, which holds one uncompressed byte per row.
+    /// It is read like a column, so it gets a mark per granule of the part (from `state`). The text index has one granule
+    /// per part, so the mark of the first granule is written by the caller with the marks of the other substreams.
+    static void serializeDocLengths(
+        const PaddedPODArray<UInt8> & doc_lengths, MergeTreeIndexOutputStreams & streams, const MergeTreeIndexSerializationState & state);
+
     /// Reject a token the reader would refuse (throws `TOO_LARGE_STRING_SIZE`); call before copying a token elsewhere.
     static void checkTokenSize(size_t token_size);
     static TextIndexHeader deserializeHeader(ReadBuffer & istr);
@@ -594,7 +600,7 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     ~MergeTreeIndexGranuleTextWritable() override = default;
 
     void serializeBinary(WriteBuffer & ostr) const override;
-    void serializeBinaryWithMultipleStreams(MergeTreeIndexOutputStreams & streams) const override;
+    void serializeBinaryWithMultipleStreams(MergeTreeIndexOutputStreams & streams, const MergeTreeIndexSerializationState & state) const override;
     void deserializeBinary(ReadBuffer & istr, MergeTreeIndexVersion version) override;
 
     bool empty() const override { return sorted_tokens.empty(); }

@@ -61,12 +61,6 @@ struct MergeTreeIndexSubstream
             && type != Type::TextIndexPositions
             && type != Type::TextIndexDocLengths;
     }
-
-    /// A per-row substream holds exactly one uncompressed byte per row of the part.
-    static bool isPerRow(Type type)
-    {
-        return type == Type::TextIndexDocLengths;
-    }
 };
 
 using MergeTreeIndexSubstreams = std::vector<MergeTreeIndexSubstream>;
@@ -90,8 +84,14 @@ using MergeTreeIndexOutputStreams = std::map<MergeTreeIndexSubstream::Type, Merg
 
 class MergeTreeIndexGranularity;
 
-/// Writes the marks of a per-row index substream: one mark per granule of the part at the granule's starting row.
-void writePerRowSubstreamMarks(MergeTreeWriterStream & stream, const MergeTreeIndexGranularity & index_granularity, bool can_use_adaptive_granularity);
+struct MergeTreeIndexSerializationState
+{
+    /// Granularity of the part the index is written to. Null for the temporary segments of the text index materialization.
+    const MergeTreeIndexGranularity * index_granularity = nullptr;
+    bool can_use_adaptive_granularity = false;
+    /// Marks to prewarm the mark cache, by stream name. Marks written by the index itself must be added here too.
+    PlainMarksByName * cached_marks = nullptr;
+};
 
 using MergeTreeIndexReaderStream = MergeTreeReaderStream;
 using MergeTreeIndexInputStreams = std::map<MergeTreeIndexSubstream::Type, MergeTreeIndexReaderStream *>;

@@ -228,9 +228,7 @@ void MergeTreeDataPartWriterOnDisk::initSkipIndices()
             index_streams[index_substream.type] = stream.get();
             skip_indices_streams_holders.push_back(std::move(stream));
 
-            /// Marks of per-row substreams are written in `fillSkipIndicesChecksums`, not collected
-            /// here, so an entry for them would prewarm the mark cache with an empty array.
-            if (settings.save_marks_in_cache && !MergeTreeIndexSubstream::isPerRow(index_substream.type))
+            if (settings.save_marks_in_cache)
                 cached_index_marks.emplace(on_disk_stream_name, std::make_unique<MarksInCompressedFile::PlainArray>());
         }
 
@@ -315,7 +313,7 @@ void MergeTreeDataPartWriterOnDisk::calculateAndSerializeSkipIndices(const Block
             if (skip_index_accumulated_marks[i] == index_helper->index.granularity)
             {
                 auto index_granule = skip_indices_aggregators[i]->getGranuleAndReset();
-                index_granule->serializeBinaryWithMultipleStreams(index_streams);
+                index_granule->serializeBinaryWithMultipleStreams(index_streams, getIndexSerializationState());
                 skip_index_accumulated_marks[i] = 0;
             }
 
@@ -325,10 +323,6 @@ void MergeTreeDataPartWriterOnDisk::calculateAndSerializeSkipIndices(const Block
 
                 for (const auto & [type, stream] : index_streams)
                 {
-                    /// Per-row substreams get the marks of the part, written in fillSkipIndicesChecksums.
-                    if (MergeTreeIndexSubstream::isPerRow(type))
-                        continue;
-
                     auto & marks_out = stream->compress_marks ? stream->marks_compressed_hashing : stream->marks_hashing;
 
                     if (stream->compressed_hashing.offset() >= settings.min_compress_block_size)
@@ -435,17 +429,7 @@ void MergeTreeDataPartWriterOnDisk::fillSkipIndicesChecksums(MergeTreeData::Data
         {
             auto & index_streams = skip_indices_streams[i];
             auto index_granule = skip_indices_aggregators[i]->getGranuleAndReset();
-            index_granule->serializeBinaryWithMultipleStreams(index_streams);
-        }
-    }
-
-    /// Per-row substreams are complete now; their marks are the marks of the part.
-    for (const auto & index_streams : skip_indices_streams)
-    {
-        for (const auto & [type, stream] : index_streams)
-        {
-            if (MergeTreeIndexSubstream::isPerRow(type))
-                writePerRowSubstreamMarks(*stream, *index_granularity, settings.can_use_adaptive_granularity);
+            index_granule->serializeBinaryWithMultipleStreams(index_streams, getIndexSerializationState());
         }
     }
 

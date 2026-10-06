@@ -148,12 +148,8 @@ makeOutputStreams(
 
 void writeMarks(MergeTreeIndexOutputStreams & streams, bool can_use_adaptive_granularity)
 {
-    for (const auto & [type, stream] : streams)
+    for (const auto & [_, stream] : streams)
     {
-        /// Per-row substreams get the marks of the part once their bytes are written.
-        if (MergeTreeIndexSubstream::isPerRow(type))
-            continue;
-
         auto & marks_out = stream->compress_marks ? stream->marks_compressed_hashing : stream->marks_hashing;
 
         writeBinaryLittleEndian(stream->plain_hashing.count(), marks_out);
@@ -278,7 +274,7 @@ void BuildTextIndexTransform::writeTemporarySegment(size_t i)
         writer_settings);
 
     writeMarks(streams, writer_settings.can_use_adaptive_granularity);
-    granule->serializeBinaryWithMultipleStreams(streams);
+    granule->serializeBinaryWithMultipleStreams(streams, /*state=*/ {});
 
     for (auto & stream : streams_holders)
         stream->finalize();
@@ -1353,18 +1349,14 @@ void MergeTextIndexesTask::finalize()
 
     if (params.scoring == TextIndexScoringKind::BM25)
     {
-        auto * doc_lengths_stream = output_streams.at(MergeTreeIndexSubstream::Type::TextIndexDocLengths);
-        if (!doc_lengths_stream)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Merged text index with BM25 scoring is missing its document-lengths (.dl) output stream");
-
-        /// One uncompressed byte per row; the marks of the merged part make it readable like a column.
-        doc_lengths_stream->plain_hashing.write(reinterpret_cast<const char *>(merged_doc_lengths.data()), merged_doc_lengths.size());
-
-        if (!merged_doc_lengths.empty())
+        chassert(new_data_part && index_granularity);
+        MergeTreeIndexSerializationState state
         {
-            chassert(new_data_part && index_granularity);
-            writePerRowSubstreamMarks(*doc_lengths_stream, *index_granularity, new_data_part->index_granularity_info.mark_type.adaptive);
-        }
+            .index_granularity = index_granularity.get(),
+            .can_use_adaptive_granularity = new_data_part->index_granularity_info.mark_type.adaptive,
+        };
+
+        TextIndexSerialization::serializeDocLengths(merged_doc_lengths, output_streams, state);
 
         scoring_stats = TextIndexScoringStats
         {

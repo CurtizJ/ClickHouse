@@ -1786,16 +1786,59 @@ static DictionarySparseIndex serializeTokensAndPostings(
     return DictionarySparseIndex(std::move(sparse_index_tokens), std::move(sparse_index_offsets));
 }
 
-/// Appends the per-row `SmallFloat` document-length bytes of the granule to the `.dl` substream.
-/// The stream is not compressed and holds one byte per row of the part.
-/// The writer gives it the marks of the part, so scoring reads it like a regular column.
-static void serializeDocumentLengths(const PaddedPODArray<UInt8> & doc_lengths, MergeTreeIndexOutputStreams & streams)
+void TextIndexSerialization::serializeDocLengths(
+    const PaddedPODArray<UInt8> & doc_lengths, MergeTreeIndexOutputStreams & streams, const MergeTreeIndexSerializationState & state)
 {
-    auto * doc_lengths_stream = streams.at(MergeTreeIndexSubstream::Type::TextIndexDocLengths);
-    if (!doc_lengths_stream)
+    auto * stream = streams.at(MergeTreeIndexSubstream::Type::TextIndexDocLengths);
+    if (!stream)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index with BM25 scoring is missing its document-lengths (.dl) stream");
 
-    doc_lengths_stream->plain_hashing.write(reinterpret_cast<const char *>(doc_lengths.data()), doc_lengths.size());
+    stream->plain_hashing.write(reinterpret_cast<const char *>(doc_lengths.data()), doc_lengths.size());
+
+    /// Temporary segments of the index materialization are read sequentially, without marks.
+    if (!state.index_granularity)
+        return;
+
+    const auto & index_granularity = *state.index_granularity;
+    /// Without the final (zero-row) mark: on merge the stream is written before the writer appends it.
+    const size_t marks_count = index_granularity.getMarksCountWithoutFinal();
+    const size_t num_rows = stream->plain_hashing.count();
+    bool rows_match = num_rows == index_granularity.getTotalRows();
+
+    /// With non-adaptive marks the writer counts the last granule as full until the part is finalized
+    /// (see `MergeTreeIndexGranularityConstant::fixFromRowsCount`), so the rows only have to end in it.
+    if (!state.can_use_adaptive_granularity && marks_count > 0)
+        rows_match = num_rows > index_granularity.getMarkStartingRow(marks_count - 1) && num_rows <= index_granularity.getTotalRows();
+
+    if (!rows_match)
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Text index document-lengths stream '{}' has {} bytes for {} rows in {} marks",
+            stream->escaped_column_name, num_rows, index_granularity.getTotalRows(), marks_count);
+    }
+
+    auto & marks_out = stream->compress_marks ? stream->marks_compressed_hashing : stream->marks_hashing;
+
+    MarksInCompressedFile::PlainArray * cached_marks = nullptr;
+    if (state.cached_marks)
+    {
+        if (auto it = state.cached_marks->find(stream->escaped_column_name); it != state.cached_marks->end())
+            cached_marks = it->second.get();
+    }
+
+    /// The mark of the first granule was written at the start of the index granule, like for the other substreams.
+    for (size_t mark = 1; mark < marks_count; ++mark)
+    {
+        MarkInCompressedFile mark_in_file{index_granularity.getMarkStartingRow(mark), 0};
+
+        writeBinaryLittleEndian(mark_in_file.offset_in_compressed_file, marks_out);
+        writeBinaryLittleEndian(mark_in_file.offset_in_decompressed_block, marks_out);
+        if (state.can_use_adaptive_granularity)
+            writeBinaryLittleEndian(static_cast<UInt64>(index_granularity.getMarkRows(mark)), marks_out);
+
+        if (cached_marks)
+            cached_marks->push_back(mark_in_file);
+    }
 }
 
 void MergeTreeIndexGranuleTextWritable::serializeBinary(WriteBuffer &) const
@@ -1803,7 +1846,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinary(WriteBuffer &) const
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Index with type 'text' must be serialized with 3 streams: index, dictionary, postings");
 }
 
-void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(MergeTreeIndexOutputStreams & streams) const
+void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(MergeTreeIndexOutputStreams & streams, const MergeTreeIndexSerializationState & state) const
 {
     auto * index_stream = streams.at(MergeTreeIndexSubstream::Type::Regular);
     auto * dictionary_stream = streams.at(MergeTreeIndexSubstream::Type::TextIndexDictionary);
@@ -1851,7 +1894,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
 
     if (params.scoring == TextIndexScoringKind::BM25)
     {
-        serializeDocumentLengths(*context.doc_lengths, streams);
+        TextIndexSerialization::serializeDocLengths(*context.doc_lengths, streams, state);
         scoring_stats = {.num_docs = num_docs, .sum_doc_length = sum_doc_length};
     }
 

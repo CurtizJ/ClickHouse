@@ -37,8 +37,7 @@ public:
 
     /// Encodes a batch of sorted unique row ids (increasing across calls), appending to the open segment.
     /// Each time the open segment reaches the segment size, it is sealed and a new one is started.
-    /// A non-empty `tf_minus_one` (parallel to `row_ids`) carries the per-row term frequencies
-    /// on the BM25 scoring path.
+    /// A non-empty `tf_minus_one` (parallel to `row_ids`) carries the per-row term frequencies on the BM25 scoring path.
     virtual void append(
         std::span<const UInt32> row_ids,
         std::span<const UInt32> tf_minus_one,

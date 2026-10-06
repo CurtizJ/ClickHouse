@@ -1,9 +1,6 @@
 #include <Storages/MergeTree/MergeTreeWriterStream.h>
 #include <Storages/MergeTree/IDataPartStorage.h>
 #include <Storages/MergeTree/MergeTreeIndexGranularityInfo.h>
-#include <Storages/MergeTree/MergeTreeIndexGranularity.h>
-#include <Storages/MergeTree/MergeTreeIndicesSerialization.h>
-#include <IO/WriteHelpers.h>
 #include <IO/PackedFilesWriter.h>
 #include <IO/WriteSettings.h>
 #include <Common/PODArray.h>
@@ -363,41 +360,6 @@ MarkInCompressedFile MergeTreeWriterStream::getCurrentMark() const
         .offset_in_compressed_file = plain_hashing.count(),
         .offset_in_decompressed_block = compressed_hashing.offset()
     };
-}
-
-
-void writePerRowSubstreamMarks(MergeTreeWriterStream & stream, const MergeTreeIndexGranularity & index_granularity, bool can_use_adaptive_granularity)
-{
-    /// Without the final (zero-row) mark: on merge the substream is written before the writer appends it
-    /// to the granularity of the new part, so the reader also counts the marks without it.
-    const size_t marks_count = index_granularity.getMarksCountWithoutFinal();
-
-    /// One uncompressed byte per row, so the position of a granule is its starting row.
-    const size_t num_rows = stream.plain_hashing.count();
-    bool rows_match = num_rows == index_granularity.getTotalRows();
-
-    /// With non-adaptive marks the writer counts the last granule as full until the part is finalized
-    /// (see `MergeTreeIndexGranularityConstant::fixFromRowsCount`), so the rows only have to end in it.
-    if (!can_use_adaptive_granularity && marks_count > 0)
-        rows_match = num_rows > index_granularity.getMarkStartingRow(marks_count - 1) && num_rows <= index_granularity.getTotalRows();
-
-    if (!rows_match)
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Per-row index substream '{}' has {} bytes for {} rows in {} marks",
-            stream.escaped_column_name, num_rows, index_granularity.getTotalRows(), marks_count);
-    }
-
-    auto & marks_out = stream.compress_marks ? stream.marks_compressed_hashing : stream.marks_hashing;
-
-    for (size_t mark = 0; mark < marks_count; ++mark)
-    {
-        writeBinaryLittleEndian(static_cast<UInt64>(index_granularity.getMarkStartingRow(mark)), marks_out);
-        writeBinaryLittleEndian(static_cast<UInt64>(0), marks_out);
-
-        if (can_use_adaptive_granularity)
-            writeBinaryLittleEndian(static_cast<UInt64>(index_granularity.getMarkRows(mark)), marks_out);
-    }
 }
 
 }
