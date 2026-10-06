@@ -211,17 +211,18 @@ INNER JOIN bm25_clause(needles = ['consensus', 'raft']) AS ref ON direct.id = re
 ORDER BY direct.id;
 
 SELECT '-- the root conjunction is not masked, a nested one is';
+-- The mask is `if(<conjunction>, <score>, 0)`; the name of the conjunction node depends on whether it is in PREWHERE.
 SELECT count() > 0 FROM
 (
     EXPLAIN actions = 1 SELECT id, bm25() FROM tab_bm25_bool WHERE hasAnyTokens(body, ['consensus', 'raft']) AND price > 4
 )
-WHERE explain LIKE '%if(and(%';
+WHERE explain LIKE '%if(%';
 
 SELECT count() > 0 FROM
 (
     EXPLAIN actions = 1 SELECT id, bm25() FROM tab_bm25_bool WHERE (hasToken(body, 'raft') AND price > 10) OR hasToken(body, 'stream')
 )
-WHERE explain LIKE '%if(and(%';
+WHERE explain LIKE '%if(%';
 
 SELECT '-- the read step reports the scoring index, the number of scoring predicates and the parameters';
 SELECT count() > 0 FROM
