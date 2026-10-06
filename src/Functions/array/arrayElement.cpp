@@ -15,6 +15,7 @@
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeMap.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeNothing.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeObject.h>
@@ -2262,7 +2263,7 @@ ColumnPtr FunctionArrayElement<mode>::executeMap(
         col_map = typeid_cast<const ColumnMap *>(&col_const_map->getDataColumn());
 
     const auto & nested_column = col_map->getNestedColumn();
-    const auto & keys_data = col_map->getNestedData().getColumn(0);
+    ColumnPtr keys_column = col_map->getNestedData().getColumnPtr(0);
     const auto & values_data = col_map->getNestedData().getColumn(1);
     const auto & offsets = nested_column.getOffsets();
 
@@ -2273,6 +2274,15 @@ ColumnPtr FunctionArrayElement<mode>::executeMap(
     ColumnPtr index_column = arguments[1].column;
     if (isEnum(type_map.getKeyType()) && isStringOrFixedString(removeLowCardinality(arguments[1].type)))
         index_column = castColumn(arguments[1], type_map.getKeyType());
+
+    /// A `String` and a `FixedString` compare zero-padded, see `FixedStringZeroPadding.h`.
+    if (comparesZeroPadded(type_map.getKeyType(), arguments[1].type))
+    {
+        keys_column = removePaddingForComparison(keys_column, type_map.getKeyType(), arguments[1].type);
+        index_column = removePaddingForComparison(index_column, type_map.getKeyType(), arguments[1].type);
+    }
+
+    const auto & keys_data = *keys_column;
 
     /// At first step calculate indices in array of values for requested keys.
     auto indices_column = DataTypeNumber<UInt64>().createColumn();

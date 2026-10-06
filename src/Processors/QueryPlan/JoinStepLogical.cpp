@@ -20,6 +20,8 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/TypeTree.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/getLeastSupertype.h>
 #include <DataTypes/DataTypeTuple.h>
 
@@ -733,6 +735,21 @@ struct JoinPlanningContext
     bool is_prebuilt_hash_join{};
 };
 
+/// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`), so the keys are compared at
+/// their common type `String` without trailing zero bytes on both sides: `toFixedString('a', 3) = 'a\0'`.
+static bool isFixedStringVsString(const DataTypePtr & left_type, const DataTypePtr & right_type)
+{
+    return isStringOrFixedString(removeLowCardinalityAndNullable(left_type))
+        && isStringOrFixedString(removeLowCardinalityAndNullable(right_type)) && comparesZeroPadded(left_type, right_type);
+}
+
+static const ActionsDAG::Node * addTrimZeroBytes(ActionsDAG & dag, const ActionsDAG::NodeRawConstPtrs & nodes)
+{
+    auto string_type = std::make_shared<DataTypeString>();
+    const auto & zero_byte = dag.addColumn(string_type->createColumnConst(1, String(1, '\0')), string_type, "'\\0'_String");
+    return &dag.addFunction(FunctionFactory::instance().get("trimRight", nullptr), {nodes.at(0), &zero_byte}, {});
+}
+
 /** Convert the operands of an equality (or ASOF inequality) predicate in the JOIN ON section to a common type.
   * `allow_conversion_to_subtype` enables the fallback described in `JoinCommon::tryGetCommonSubtypeForJoinKeys`.
   * It is not applicable to null-safe comparisons, because there NULL matches NULL,
@@ -815,19 +832,24 @@ static void predicateOperandsToCommonType(
             return mapped_it->second;
         return &dag.addCast(*arg, common_type, {}, nullptr);
     };
+
+    bool trim_zero_bytes = !cast_to_subtype && isFixedStringVsString(left_type, right_type);
+
     if (!left_type->equals(*common_type))
         left_node = JoinActionRef::transform({left_node}, cast_transform);
+    if (trim_zero_bytes)
+        left_node = JoinActionRef::transform({left_node}, addTrimZeroBytes);
 
-    auto cast_right_node = [&]
+    auto transform_right_node = [&](auto && transform)
     {
         /// The build-side key name is the rendezvous between the shared runtime filter descriptors
         /// registered by the joinRuntimeFilter optimization and `HashJoin::publishSharedRuntimeFilters`;
-        /// keep the descriptors pointing at the cast key the join clause will use.
-        String name_before_cast = right_node.getColumnName();
-        right_node = JoinActionRef::transform({right_node}, cast_transform);
+        /// keep the descriptors pointing at the rewritten key the join clause will use.
+        String name_before = right_node.getColumnName();
+        right_node = JoinActionRef::transform({right_node}, transform);
         for (auto & descriptor : shared_runtime_filter_descriptors)
         {
-            if (descriptor.build_key_name == name_before_cast)
+            if (descriptor.build_key_name == name_before)
             {
                 descriptor.build_key_name = right_node.getColumnName();
                 descriptor.common_type = common_type;
@@ -840,8 +862,9 @@ static void predicateOperandsToCommonType(
         /// A `Join` table engine keeps the key declared by its storage. Under the subtype fallback
         /// the check above guarantees that a prebuilt hash table uses the subtype modulo the
         /// `LowCardinality` and `Nullable` wrappers, so its key must not be rewritten at all.
+        /// The same holds for the zero-byte normalization: the hash table is already built over the raw keys.
         if (!cast_to_subtype && !right_type->equals(*removeNullableOrLowCardinalityNullable(common_type)))
-            cast_right_node();
+            transform_right_node(cast_transform);
     }
     else if (planning_context.is_storage_join
         && (!cast_to_subtype || removeNullable(recursiveRemoveLowCardinality(right_type))->equals(*removeNullable(common_type))))
@@ -851,12 +874,14 @@ static void predicateOperandsToCommonType(
         /// a nullable probe key does not require converting the dictionary key to `Nullable`,
         /// which would turn it into a derived expression and disable the direct algorithm.
         if (!removeNullable(recursiveRemoveLowCardinality(right_type))->equals(*removeNullable(common_type)))
-            cast_right_node();
+            transform_right_node(cast_transform);
     }
     else
     {
         if (!right_type->equals(*common_type))
-            cast_right_node();
+            transform_right_node(cast_transform);
+        if (trim_zero_bytes)
+            transform_right_node(addTrimZeroBytes);
     }
 }
 
@@ -2566,6 +2591,23 @@ JoinStepLogical::preCalculateKeys(const SharedHeader & left_header, const Shared
         auto [predicate_op, lhs, rhs] = expr.asBinaryPredicate();
         if (predicate_op != JoinConditionOperator::Equals)
             continue;
+
+        bool is_key_pair = (lhs.fromLeft() && rhs.fromRight()) || (lhs.fromRight() && rhs.fromLeft());
+
+        /// The callers compare the extracted keys at their least supertype, so a `FixedString` vs `String` pair
+        /// has to leave here normalized: both sides cast to the common type and trimmed.
+        if (is_key_pair && isFixedStringVsString(lhs.getType(), rhs.getType()))
+        {
+            auto common_type = getLeastSupertype(DataTypes{lhs.getType(), rhs.getType()});
+            auto cast_transform = [&](ActionsDAG & dag, auto && nodes) { return &dag.addCast(*nodes.at(0), common_type, {}, nullptr); };
+            for (auto * operand : {&lhs, &rhs})
+            {
+                if (!operand->getType()->equals(*common_type))
+                    *operand = JoinActionRef::transform({*operand}, cast_transform);
+                *operand = JoinActionRef::transform({*operand}, addTrimZeroBytes);
+            }
+            expr = JoinActionRef::transform({lhs, rhs}, JoinActionRef::AddFunction(predicate_op));
+        }
 
         const auto * left_node = lhs.getNode();
         const auto * right_node = rhs.getNode();

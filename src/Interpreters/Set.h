@@ -102,6 +102,10 @@ public:
 
     static DataTypes getElementTypes(DataTypes types, bool transform_null_in);
 
+    /// The types a set built from a constant for `lhs IN constant` is looked up by: those of the left-hand side,
+    /// which the set's own key types may differ from (see `getSetElementsForConstantValue`).
+    static DataTypes getLookupTypes(const DataTypePtr & lhs_type, bool transform_null_in);
+
     /// Limitations on the maximum size of the set
     const SizeLimits limits;
 
@@ -139,6 +143,10 @@ private:
     /// Types for set_elements.
     DataTypes set_elements_types;
 
+    /// For a `String` key, the largest number of trailing zero bytes of an inserted value. A `FixedString` value looked
+    /// up in it compares zero-padded, so it matches a key with up to that many trailing zero bytes.
+    std::vector<size_t> max_trailing_zeros;
+
     LoggerPtr log;
 
     /// Do we need to additionally store all elements of the set in explicit form for subsequent use for index.
@@ -149,6 +157,13 @@ private:
 
     /// Whether the set was truncated due to overflow with OverflowMode::BREAK.
     std::atomic<bool> is_truncated = false;
+
+    /// Looks the keys `zero_padded_string_keys` up with every number of trailing zero bytes up to `max_trailing_zeros`.
+    void executeWithTrailingZeros(
+        ColumnRawPtrs key_columns,
+        const std::vector<size_t> & zero_padded_string_keys,
+        ColumnUInt8::Container & vec_res,
+        const PaddedPODArray<UInt8> * null_map) const;
 
     /// If in the left part columns contains the same types as the elements of the set.
     void executeOrdinary(

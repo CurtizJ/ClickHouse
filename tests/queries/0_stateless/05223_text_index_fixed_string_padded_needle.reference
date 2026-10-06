@@ -8,9 +8,10 @@ both padding forms equal the needle
 [1,3]
 [1,3]
 [1,3]
----- a padded needle declines the index
----- a needle that carries no padding still prunes
-[2]
+[1,3]
+[1,3]
+---- a FixedString needle declines the index
+---- a String needle still prunes
 [3]
 -- splitByNonAlpha tokenizer on a String column
 ---- the same rows with and without the index
@@ -26,32 +27,31 @@ both padding forms equal the needle
 ---- the same rows with and without the index
 [1,3]
 [1,3]
----- a padded needle declines the index
----- a needle that carries no padding still prunes
+---- a FixedString needle declines the index
+---- a String needle still prunes
 [2]
 -- splitByString tokenizer with the zero byte as a separator on a String column
 ---- the same rows with and without the index
 [1,3]
 [1,3]
----- a padded needle declines the index
----- a needle that carries no padding still prunes
+---- a FixedString needle declines the index
+---- a String needle still prunes
 [2]
 -- splitByString tokenizer with another separator on a String column
 ---- the same rows with and without the index
 [1,3]
 [1,3]
----- a padded needle declines the index
----- a needle that carries no padding still prunes
+---- a FixedString needle declines the index
+---- a String needle still prunes
 [2]
 -- array tokenizer on an Array(String) column
 ---- the same rows with and without the index
-[3]
-[3]
-[3]
-[3]
----- a padded element still prunes
-[3]
-[3]
+[1,3]
+[1,3]
+[1,3]
+[1,3]
+---- a FixedString needle declines the index
+---- a String needle still prunes
 [2]
 -- array tokenizer on a FixedString column
 ---- the same rows with and without the index
@@ -71,9 +71,10 @@ both padding forms equal the needle
 []
 ---- the needle is looked up at the column width and prunes
 [2]
+[2]
+[2]
 [1,3]
-[2]
-[2]
+---- a String needle with a literal trailing zero byte is looked up padded too
 [1,3]
 ---- a needle longer than the column declines the index
 -- array tokenizer on an Array(FixedString) column
@@ -82,30 +83,33 @@ both padding forms equal the needle
 [1,3]
 [1,3]
 [1,3]
-[]
-[]
+[1,3]
+[1,3]
 [1]
 [1]
 [1,3]
 [1,3]
 [1,3]
 [1,3]
-[]
-[]
+[1,3]
+[1,3]
 ---- the needle is looked up at the column width and prunes
 [2]
 [1]
 [2]
 [2]
----- a String needle with a literal trailing zero byte declines the index
+---- a String needle with a literal trailing zero byte prunes too
+[1,3]
+[1,3]
 -- array tokenizer on the keys of a Map(FixedString, UInt8) column
 ---- the same rows with and without the index
 [1]
 [1]
 [1]
 [1]
-[]
-[]
+[1]
+[1]
 ---- the needle is looked up at the column width and prunes
 [2]
----- a String needle with a literal trailing zero byte declines the index
+---- a String needle with a literal trailing zero byte prunes too
+[1]

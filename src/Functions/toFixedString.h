@@ -38,7 +38,15 @@ public:
     }
 
     size_t getNumberOfArguments() const override { return 2; }
-    bool isInjective(const ColumnsWithTypeAndName &) const override { return true; }
+    /// `'a'` and `'a\0'` become the same value, so only a `FixedString` no wider than the result keeps all values apart.
+    bool isInjective(const ColumnsWithTypeAndName & arguments) const override
+    {
+        if (arguments.size() != 2 || !arguments[0].type || !arguments[1].column || !isColumnConst(*arguments[1].column))
+            return false;
+
+        const auto * fixed_string_type = typeid_cast<const DataTypeFixedString *>(arguments[0].type.get());
+        return fixed_string_type && fixed_string_type->getN() <= arguments[1].column->getUInt(0);
+    }
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return true; }
 
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override

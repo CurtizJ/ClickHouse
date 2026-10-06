@@ -137,7 +137,7 @@ Note that the length of the `FixedString(N)` value is constant. The [length](/re
 
 Selecting data with `WHERE` clause return various result depending on how the condition is specified:
 
-- If equality operator `=` or `==` or `equals` function used, ClickHouse _doesn't_ take `\0` char into consideration, i.e. queries `SELECT * FROM FixedStringTable WHERE name = 'a';` and `SELECT * FROM FixedStringTable WHERE name = 'a\0';` return the same result.
+- Comparison and search functions compare a `FixedString` with a `String` or with another `FixedString` as if the shorter value were padded with null bytes, so ClickHouse _doesn't_ take trailing `\0` chars into consideration. This applies to the comparison operators, `IN`, `has`, `indexOf`, `countEqual`, `hasAny`, `hasAll`, `hasSubstr`, `mapContainsKey`, `mapContainsValue`, the map subscript `m[key]`, `transform` and `JOIN` keys, i.e. queries `SELECT * FROM FixedStringTable WHERE name = 'a';` and `SELECT * FROM FixedStringTable WHERE name = 'a\0';` return the same result. Two `String` values are still compared byte for byte: `'a' = 'a\0'` is `0`.
 - If `LIKE` clause is used, ClickHouse _does_ take `\0` char into consideration, so one may need to explicitly specify `\0` char in the filter condition.
 
 ```sql

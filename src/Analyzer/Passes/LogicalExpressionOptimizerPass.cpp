@@ -10,6 +10,7 @@
 #include <Common/NaNUtils.h>
 #include <Core/AccurateComparison.h>
 #include <Core/Settings.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeString.h>
@@ -449,6 +450,16 @@ static std::optional<Field> tryConvertToColumnType(const ConstantNode * constant
 
     if (from_type->equals(*expr_type))
         return constant_node->getValue();
+
+    /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`): the constant becomes the stored
+    /// value equal to it, and a constant equal to several stored values, or to none, forgoes the fold.
+    if (constant_node->getValue().getType() == Field::Types::String && isStringOrFixedString(removeLowCardinalityAndNullable(expr_type)))
+    {
+        auto match = matchStoredString(constant_node->getValue().safeGet<String>(), from_type, expr_type);
+        if (match.kind != StoredStringMatch::Kind::Exact)
+            return std::nullopt;
+        return Field(std::move(match.value));
+    }
 
     /// The constant becomes a bound the fold compares exactly, so a lossy conversion forgoes the fold.
     auto converted = tryConvertFieldToTypeExact(constant_node->getValue(), *expr_type, from_type.get());

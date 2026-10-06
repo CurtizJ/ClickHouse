@@ -1,4 +1,5 @@
 #include <Storages/MergeTree/MergeTreeIndexJSONSubcolumnHelper.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <Storages/MergeTree/RPNBuilder.h>
 
 #include <DataTypes/DataTypeEnum.h>
@@ -208,6 +209,11 @@ bool isJSONPathFilterSafe(
 
     /// Non-nullable type: missing path produces the type's default value.
     /// If comparing to the default, we cannot safely skip the granule.
+
+    /// A `String` and a `FixedString` compare zero-padded, see `FixedStringZeroPadding.h`.
+    if (value_field.getType() == Field::Types::String && isStringOrFixedString(removeLowCardinalityAndNullable(key_expression_type)))
+        return !matchStoredString(value_field.safeGet<String>(), value_type, key_expression_type).equalsDefault(key_expression_type);
+
     /// An `Enum` constant keeps its labels in its own type and the comparison uses the label rather
     /// than the underlying number, so it has to be converted with that type.
     DataTypePtr unwrapped_value_type;

@@ -50,7 +50,7 @@ SETTINGS optimize_functions_to_subcolumns = 0;
 
 DROP TABLE t_map_contains_value_subcolumn;
 
--- Keep the Map adapter's LowCardinality/FixedString coercion semantics.
+-- Keep the Map adapter's LowCardinality/FixedString semantics: a wider `FixedString` constant compares zero-padded.
 DROP TABLE IF EXISTS t_map_contains_value_low_cardinality;
 
 CREATE TABLE t_map_contains_value_low_cardinality
@@ -85,11 +85,11 @@ SETTINGS optimize_functions_to_subcolumns = 0;
 SELECT count()
 FROM t_map_contains_value_low_cardinality
 WHERE mapContainsValue(m, toFixedString('V0', 5))
-SETTINGS optimize_functions_to_subcolumns = 1; -- { serverError TOO_LARGE_STRING_SIZE }
+SETTINGS optimize_functions_to_subcolumns = 1;
 
 SELECT count()
 FROM t_map_contains_value_low_cardinality
 WHERE mapContainsValue(m, toFixedString('V0', 5))
-SETTINGS optimize_functions_to_subcolumns = 0; -- { serverError TOO_LARGE_STRING_SIZE }
+SETTINGS optimize_functions_to_subcolumns = 0;
 
 DROP TABLE t_map_contains_value_low_cardinality;

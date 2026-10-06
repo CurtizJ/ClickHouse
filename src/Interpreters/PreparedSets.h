@@ -139,6 +139,9 @@ public:
     bool isMutableDuringQuery() const override { return false; }
 
     DataTypes getTypes() const override;
+    /// The types `PreparedSets::findTuple` finds the set by.
+    const DataTypes & getLookupTypes() const { return lookup_types; }
+    void setLookupTypes(DataTypes lookup_types_) { lookup_types = std::move(lookup_types_); }
     Hash getHash() const override;
     /// Hash based on actual set element data, computed order-independently so that two IN-clause
     /// sets with the same values (regardless of insertion order or duplicates) hash equal. Lives
@@ -164,6 +167,7 @@ private:
     mutable Hash content_hash{};
     ASTPtr ast;
     SetPtr set;
+    DataTypes lookup_types;
     mutable SetKeyColumns set_key_columns;
     mutable OnceFlag fill_set_elements_once;
     mutable OnceFlag content_hash_once;
@@ -304,7 +308,8 @@ public:
     /// The set lives in a table (`ENGINE = Set`, or `SharedSet` in ClickHouse Cloud), so it is mutable:
     /// both hand over the table's own `Set` object, which an `INSERT` writes into in place.
     FutureSetFromStoragePtr addFromStorage(const Hash & key, ASTPtr ast, SetPtr set_, StorageID storage_id);
-    FutureSetFromTuplePtr addFromTuple(const Hash & key, ASTPtr ast, ColumnsWithTypeAndName block, const Settings & settings);
+    /// `lookup_types` are the types `findTuple` finds the set by, the set's own types by default.
+    FutureSetFromTuplePtr addFromTuple(const Hash & key, ASTPtr ast, ColumnsWithTypeAndName block, const Settings & settings, DataTypes lookup_types = {});
 
     FutureSetFromSubqueryPtr addFromSubquery(
         const Hash & key,

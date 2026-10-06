@@ -204,6 +204,10 @@ private:
     /// `mapContainsKeyValue(m, 'key', 'value')`: both pair tokens, searched as one `Any` query.
     bool traverseMapContainsKeyValueNode(const RPNBuilderFunctionTreeNode & function_node, RPNElement & out) const;
 
+    bool tryNormalizeNeedlePadding(String & needle, const DataTypePtr & needle_type) const;
+    bool tryNormalizeNeedlePadding(Field & value, const DataTypePtr & value_type) const;
+    bool isMapValueDefault(std::string_view value) const;
+
     VectorWithMemoryTracking<String> stringToTokens(const Field & field) const;
     VectorWithMemoryTracking<String> stringToTokens(std::string_view raw) const;
     VectorWithMemoryTracking<String> substringToTokens(const Field & field, bool is_prefix, bool is_suffix) const;
@@ -231,8 +235,8 @@ private:
     JSONIndexArgumentTypes json_argument_types;
     /// Whether the index is defined over an `Array` column, whose positions restart for every element.
     bool indexed_column_is_array = false;
-    /// N when the index is defined over a `FixedString(N)`, directly or as the array element type.
-    std::optional<size_t> indexed_fixed_string_size;
+    /// `String` or `FixedString(N)`: the type of the values the index stores terms of.
+    DataTypePtr indexed_string_type;
     std::optional<String> normalized_index_column_name;
     NameSet columns_shadowing_map_subcolumns;
     /// A private clone of the index tokenizer when it is stateful, so concurrent conditions do not

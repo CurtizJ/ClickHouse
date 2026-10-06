@@ -1,0 +1,196 @@
+-- tab_string
+equals	toFixedString(\'ab\', 2)	[1,2,3,4]
+IN literal	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+IN subquery	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+has	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+indexOf	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+countEqual	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+hasAny	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+hasAll	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+hasSubstr	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+has LowCardinality	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+mapContainsKey	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+mapContainsValue	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+has Map	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+subscript	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+transform	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+array equals	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+JOIN	toFixedString(\'ab\', 2)	[1,2,3,4]	1
+equals	toFixedString(\'ab\', 4)	[1,2,3,4]
+IN literal	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+IN subquery	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+has	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+indexOf	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+countEqual	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+hasAny	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+hasAll	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+hasSubstr	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+has LowCardinality	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+mapContainsKey	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+mapContainsValue	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+has Map	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+subscript	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+transform	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+array equals	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+JOIN	toFixedString(\'ab\', 4)	[1,2,3,4]	1
+equals	toFixedString(\'ab\', 6)	[1,2,3,4]
+IN literal	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+IN subquery	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+has	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+indexOf	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+countEqual	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+hasAny	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+hasAll	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+hasSubstr	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+has LowCardinality	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+mapContainsKey	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+mapContainsValue	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+has Map	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+subscript	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+transform	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+array equals	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+JOIN	toFixedString(\'ab\', 6)	[1,2,3,4]	1
+equals	\'ab\'	[1]
+IN literal	\'ab\'	[1]	1
+IN subquery	\'ab\'	[1]	1
+has	\'ab\'	[1]	1
+indexOf	\'ab\'	[1]	1
+countEqual	\'ab\'	[1]	1
+hasAny	\'ab\'	[1]	1
+hasAll	\'ab\'	[1]	1
+hasSubstr	\'ab\'	[1]	1
+has LowCardinality	\'ab\'	[1]	1
+mapContainsKey	\'ab\'	[1]	1
+mapContainsValue	\'ab\'	[1]	1
+has Map	\'ab\'	[1]	1
+subscript	\'ab\'	[1]	1
+transform	\'ab\'	[1]	1
+array equals	\'ab\'	[1]	1
+JOIN	\'ab\'	[1]	1
+equals	\'ab\0\'	[2]
+IN literal	\'ab\0\'	[2]	1
+IN subquery	\'ab\0\'	[2]	1
+has	\'ab\0\'	[2]	1
+indexOf	\'ab\0\'	[2]	1
+countEqual	\'ab\0\'	[2]	1
+hasAny	\'ab\0\'	[2]	1
+hasAll	\'ab\0\'	[2]	1
+hasSubstr	\'ab\0\'	[2]	1
+has LowCardinality	\'ab\0\'	[2]	1
+mapContainsKey	\'ab\0\'	[2]	1
+mapContainsValue	\'ab\0\'	[2]	1
+has Map	\'ab\0\'	[2]	1
+subscript	\'ab\0\'	[2]	1
+transform	\'ab\0\'	[2]	1
+array equals	\'ab\0\'	[2]	1
+JOIN	\'ab\0\'	[2]	1
+-- tab_fixed_string
+equals	toFixedString(\'ab\', 2)	[1]
+IN literal	toFixedString(\'ab\', 2)	[1]	1
+IN subquery	toFixedString(\'ab\', 2)	[1]	1
+has	toFixedString(\'ab\', 2)	[1]	1
+indexOf	toFixedString(\'ab\', 2)	[1]	1
+countEqual	toFixedString(\'ab\', 2)	[1]	1
+hasAny	toFixedString(\'ab\', 2)	[1]	1
+hasAll	toFixedString(\'ab\', 2)	[1]	1
+hasSubstr	toFixedString(\'ab\', 2)	[1]	1
+has LowCardinality	toFixedString(\'ab\', 2)	[1]	1
+mapContainsKey	toFixedString(\'ab\', 2)	[1]	1
+mapContainsValue	toFixedString(\'ab\', 2)	[1]	1
+has Map	toFixedString(\'ab\', 2)	[1]	1
+subscript	toFixedString(\'ab\', 2)	[1]	1
+transform	toFixedString(\'ab\', 2)	[1]	1
+array equals	toFixedString(\'ab\', 2)	[1]	1
+JOIN	toFixedString(\'ab\', 2)	[1]	1
+equals	toFixedString(\'ab\', 4)	[1]
+IN literal	toFixedString(\'ab\', 4)	[1]	1
+IN subquery	toFixedString(\'ab\', 4)	[1]	1
+has	toFixedString(\'ab\', 4)	[1]	1
+indexOf	toFixedString(\'ab\', 4)	[1]	1
+countEqual	toFixedString(\'ab\', 4)	[1]	1
+hasAny	toFixedString(\'ab\', 4)	[1]	1
+hasAll	toFixedString(\'ab\', 4)	[1]	1
+hasSubstr	toFixedString(\'ab\', 4)	[1]	1
+has LowCardinality	toFixedString(\'ab\', 4)	[1]	1
+mapContainsKey	toFixedString(\'ab\', 4)	[1]	1
+mapContainsValue	toFixedString(\'ab\', 4)	[1]	1
+has Map	toFixedString(\'ab\', 4)	[1]	1
+subscript	toFixedString(\'ab\', 4)	[1]	1
+transform	toFixedString(\'ab\', 4)	[1]	1
+array equals	toFixedString(\'ab\', 4)	[1]	1
+JOIN	toFixedString(\'ab\', 4)	[1]	1
+equals	toFixedString(\'ab\', 6)	[1]
+IN literal	toFixedString(\'ab\', 6)	[1]	1
+IN subquery	toFixedString(\'ab\', 6)	[1]	1
+has	toFixedString(\'ab\', 6)	[1]	1
+indexOf	toFixedString(\'ab\', 6)	[1]	1
+countEqual	toFixedString(\'ab\', 6)	[1]	1
+hasAny	toFixedString(\'ab\', 6)	[1]	1
+hasAll	toFixedString(\'ab\', 6)	[1]	1
+hasSubstr	toFixedString(\'ab\', 6)	[1]	1
+has LowCardinality	toFixedString(\'ab\', 6)	[1]	1
+mapContainsKey	toFixedString(\'ab\', 6)	[1]	1
+mapContainsValue	toFixedString(\'ab\', 6)	[1]	1
+has Map	toFixedString(\'ab\', 6)	[1]	1
+subscript	toFixedString(\'ab\', 6)	[1]	1
+transform	toFixedString(\'ab\', 6)	[1]	1
+array equals	toFixedString(\'ab\', 6)	[1]	1
+JOIN	toFixedString(\'ab\', 6)	[1]	1
+equals	\'ab\'	[1]
+IN literal	\'ab\'	[1]	1
+IN subquery	\'ab\'	[1]	1
+has	\'ab\'	[1]	1
+indexOf	\'ab\'	[1]	1
+countEqual	\'ab\'	[1]	1
+hasAny	\'ab\'	[1]	1
+hasAll	\'ab\'	[1]	1
+hasSubstr	\'ab\'	[1]	1
+has LowCardinality	\'ab\'	[1]	1
+mapContainsKey	\'ab\'	[1]	1
+mapContainsValue	\'ab\'	[1]	1
+has Map	\'ab\'	[1]	1
+subscript	\'ab\'	[1]	1
+transform	\'ab\'	[1]	1
+array equals	\'ab\'	[1]	1
+JOIN	\'ab\'	[1]	1
+equals	\'ab\0\'	[1]
+IN literal	\'ab\0\'	[1]	1
+IN subquery	\'ab\0\'	[1]	1
+has	\'ab\0\'	[1]	1
+indexOf	\'ab\0\'	[1]	1
+countEqual	\'ab\0\'	[1]	1
+hasAny	\'ab\0\'	[1]	1
+hasAll	\'ab\0\'	[1]	1
+hasSubstr	\'ab\0\'	[1]	1
+has LowCardinality	\'ab\0\'	[1]	1
+mapContainsKey	\'ab\0\'	[1]	1
+mapContainsValue	\'ab\0\'	[1]	1
+has Map	\'ab\0\'	[1]	1
+subscript	\'ab\0\'	[1]	1
+transform	\'ab\0\'	[1]	1
+array equals	\'ab\0\'	[1]	1
+JOIN	\'ab\0\'	[1]	1
+-- constant arguments
+toFixedString(\'ab\', 2) = \'ab\\0\'	1
+\'ab\' IN (toFixedString(\'ab\', 4))	1
+\'ab\\0\' IN (toFixedString(\'ab\', 2))	1
+toFixedString(\'ab\', 4) IN (\'ab\\0\')	1
+has([toFixedString(\'ab\', 4)], \'ab\')	1
+has([toFixedString(\'ab\', 4)], \'ab\\0\')	1
+has([\'ab\\0\'], toFixedString(\'ab\', 2))	1
+has([\'ab\'], toFixedString(\'ab\', 4))	1
+indexOf([\'x\', \'ab\\0\\0\'], toFixedString(\'ab\', 2))	2
+countEqual([\'ab\', \'ab\\0\', \'zz\'], toFixedString(\'ab\', 4))	2
+hasAny([\'ab\\0\'], [toFixedString(\'ab\', 4)])	1
+hasAll([toFixedString(\'ab\', 4)], [\'ab\\0\'])	1
+map(\'ab\\0\', 1)[toFixedString(\'ab\', 4)]	1
+map(toFixedString(\'ab\', 4), 1)[\'ab\\0\']	1
+map(toFixedString(\'ab\', 4), 1)[toFixedString(\'ab\', 6)]	1
+transform(toFixedString(\'ab\', 4), [\'ab\'], [\'hit\'], \'miss\')	hit
+transform(\'ab\\0\', [toFixedString(\'ab\', 4)], [\'hit\'], \'miss\')	hit
+transform(\'ab\\0\', [\'zz\'], [\'hit\'])	ab\0
+[toFixedString(\'ab\', 4)] = [\'ab\\0\']	1
+(toFixedString(\'ab\', 4), 1) = (\'ab\', 1)	1
+map(toFixedString(\'ab\', 4), 1) = map(\'ab\\0\', 1)	1
+-- String with String compares bytes
+0	0	0	0	0	0

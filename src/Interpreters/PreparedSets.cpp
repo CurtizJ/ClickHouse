@@ -790,18 +790,20 @@ String PreparedSets::toString(const PreparedSets::Hash & key, const DataTypes & 
     return buf.str();
 }
 
-FutureSetFromTuplePtr PreparedSets::addFromTuple(const Hash & key, ASTPtr ast, ColumnsWithTypeAndName block, const Settings & settings)
+FutureSetFromTuplePtr PreparedSets::addFromTuple(
+    const Hash & key, ASTPtr ast, ColumnsWithTypeAndName block, const Settings & settings, DataTypes lookup_types)
 {
     auto size_limits = getSizeLimitsForSet(settings);
     auto from_tuple = std::make_shared<FutureSetFromTuple>(
         key, std::move(ast), std::move(block),
         settings[Setting::transform_null_in], size_limits);
+    from_tuple->setLookupTypes(lookup_types.empty() ? from_tuple->getTypes() : std::move(lookup_types));
 
-    const auto & set_types = from_tuple->getTypes();
+    const auto & set_types = from_tuple->getLookupTypes();
     auto & sets_by_hash = sets_from_tuple[key];
 
     for (const auto & set : sets_by_hash)
-        if (equals(set->getTypes(), set_types))
+        if (equals(set->getLookupTypes(), set_types))
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Duplicate set: {}", toString(key, set_types));
 
     sets_by_hash.push_back(from_tuple);
@@ -867,7 +869,7 @@ FutureSetFromTuplePtr PreparedSets::findTuple(const Hash & key, const DataTypes 
         return nullptr;
 
     for (const auto & set : it->second)
-        if (equals(set->getTypes(), types))
+        if (equals(set->getLookupTypes(), types))
             return set;
 
     return nullptr;

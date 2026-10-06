@@ -37,6 +37,8 @@
 #include <Common/typeid_cast.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeFixedString.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeVariant.h>
@@ -47,6 +49,7 @@
 #include <Columns/ColumnSet.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnTuple.h>
+#include <Columns/ColumnString.h>
 #include <Core/Settings.h>
 #include <Interpreters/convertFieldToType.h>
 #include <Interpreters/Set.h>
@@ -3141,6 +3144,48 @@ static bool tryPrepareSetColumnsForIndex(
             set_element_type = transformed_set_type;
         }
 
+        /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`): replace each element by the
+        /// stored key value equal to it. An element no key value equals cannot match, and an element equal to several
+        /// key values is not one point.
+        if (isStringOrFixedString(removeLowCardinalityAndNullable(set_element_type))
+            && isStringOrFixedString(removeLowCardinalityAndNullable(key_column_type))
+            && comparesZeroPadded(set_element_type, key_column_type))
+        {
+            const auto full_column = set_column->convertToFullIfWrapped()->convertToFullColumnIfLowCardinality();
+            const auto * nullable_column = typeid_cast<const ColumnNullable *>(full_column.get());
+            const IColumn & values = nullable_column ? nullable_column->getNestedColumn() : *full_column;
+
+            auto stored = ColumnString::create();
+            for (size_t i = 0; i < values.size(); ++i)
+            {
+                StoredStringMatch match{StoredStringMatch::Kind::Exact, {}};
+                if (!nullable_column || !nullable_column->isNullAt(i))
+                    match = matchStoredString(values.getDataAt(i), set_element_type, key_column_type);
+
+                if (match.kind == StoredStringMatch::Kind::WithTrailingZeros)
+                    return false;
+                if (match.kind == StoredStringMatch::Kind::None)
+                {
+                    filter[i] = 0;
+                    filter_used = true;
+                }
+                stored->insertData(match.value.data(), match.value.size());
+            }
+
+            DataTypePtr string_type = std::make_shared<DataTypeString>();
+            if (nullable_column)
+            {
+                set_column = ColumnNullable::create(std::move(stored), nullable_column->getNullMapColumnPtr());
+                set_element_type = makeNullable(string_type);
+            }
+            else
+            {
+                set_column = std::move(stored);
+                set_element_type = string_type;
+            }
+            transformed_set_columns[set_element_index] = set_column;
+        }
+
         if (canBeSafelyCast(set_element_type, key_column_type))
         {
             transformed_set_columns[set_element_index] = castColumn({set_column, set_element_type, {}}, key_column_type);
@@ -5061,41 +5106,20 @@ bool KeyCondition::extractAtomFromTree(const RPNBuilderTreeNode & node, const Bu
 
                     if (!should_keep_original_string_constant)
                     {
-                        /// A `FixedString(N)` constant is stored as a `String` Field of N bytes,
-                        /// right-padded with '\0', and compared zero-padded, so it can match more than
-                        /// the single padded value while `convertFieldToType` below builds a point
-                        /// range from the padding:
-                        ///   - against a `String` key it matches the family `value` + trailing '\0'*
-                        ///     (`'abc'`, `'abc\0'`, ...), not a point;
-                        ///   - against a narrower `FixedString(M)` key (N > M) it keeps the N padded
-                        ///     bytes, which no longer map into the key domain.
-                        /// Either way the point range is unsound and prunes matching granules, so
-                        /// decline index analysis (fall back to a full scan). A wider-or-equal
-                        /// `FixedString(M)` key (M >= N) pads the constant into exactly one key value,
-                        /// so pruning stays correct and is left untouched.
-                        /// Strip `LowCardinality` and `Nullable` first: a wrapped constant such as
-                        /// `toFixedString(x, N)` with a non-literal length (`LowCardinality(FixedString(N))`)
-                        /// or `CAST(... AS LowCardinality(Nullable(FixedString(N))))` carries the same padded
-                        /// bytes and comparison semantics. `tryGetConstant` only peels an outer `Nullable`, so
-                        /// a `LowCardinality(Nullable(FixedString(N)))` constant reaches here with the inner
-                        /// `Nullable` intact; peel both wrappers so no variant slips past this guard (the key
-                        /// type is already `LowCardinality`/`Nullable`-stripped above).
-                        /// The rule applies to the erased constant's active member type; an active type that
-                        /// cannot be determined counts as possibly padded, so the range is declined.
-                        DataTypePtr const_type_unwrapped = removeLowCardinalityAndNullable(const_type);
-                        if (WhichDataType(const_type_unwrapped).isVariant() || WhichDataType(const_type_unwrapped).isDynamic())
+                        /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`): the point is the
+                        /// stored key value equal to the constant. A `FixedString` constant against a `String` key equals several
+                        /// key values and is declined, as is a constant longer than a `FixedString` key. An erased constant whose
+                        /// active type cannot be determined counts as `FixedString`.
+                        if (isStringOrFixedString(key_expr_type_not_null))
                         {
-                            const auto active_type = tryGetActiveTypeOfErasedConstant(func.getArgumentAt(const_arg_pos));
-                            const_type_unwrapped = active_type ? removeLowCardinalityAndNullable(active_type) : nullptr;
-                        }
+                            DataTypePtr const_type_unwrapped = removeLowCardinalityAndNullable(const_type);
+                            if (WhichDataType(const_type_unwrapped).isVariant() || WhichDataType(const_type_unwrapped).isDynamic())
+                                const_type_unwrapped = tryGetActiveTypeOfErasedConstant(func.getArgumentAt(const_arg_pos));
 
-                        if ((!const_type_unwrapped || WhichDataType(const_type_unwrapped).isFixedString())
-                            && isStringOrFixedString(key_expr_type_not_null))
-                        {
-                            const size_t const_bytes = const_value.safeGet<String>().size();
-                            const auto * fixed_key = typeid_cast<const DataTypeFixedString *>(key_expr_type_not_null.get());
-                            if (!fixed_key || fixed_key->getN() < const_bytes)
+                            auto match = matchStoredString(const_value.safeGet<String>(), const_type_unwrapped, key_expr_type_not_null);
+                            if (match.kind != StoredStringMatch::Kind::Exact)
                                 return false;
+                            const_value = std::move(match.value);
                         }
 
                         /// With validation off, `equals`/`notEquals` fold an unknown enum literal to a

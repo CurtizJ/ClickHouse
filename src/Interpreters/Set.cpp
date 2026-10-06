@@ -36,6 +36,8 @@
 #include <base/range.h>
 #include <base/sort.h>
 #include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 
 
 namespace DB
@@ -131,6 +133,18 @@ DataTypes Set::getElementTypes(DataTypes types, bool transform_null_in)
 }
 
 
+DataTypes Set::getLookupTypes(const DataTypePtr & lhs_type, bool transform_null_in)
+{
+    DataTypes types = {lhs_type};
+    const auto * lhs_tuple_type = typeid_cast<const DataTypeTuple *>(lhs_type.get());
+
+    /// Do not unpack if empty tuple or single element tuple
+    if (lhs_tuple_type && lhs_tuple_type->getElements().size() > 1)
+        types = lhs_tuple_type->getElements();
+
+    return getElementTypes(std::move(types), transform_null_in);
+}
+
 void Set::setHeader(const ColumnsWithTypeAndName & header)
 {
     std::lock_guard lock(rwlock);
@@ -139,6 +153,7 @@ void Set::setHeader(const ColumnsWithTypeAndName & header)
         return;
 
     keys_size = header.size();
+    max_trailing_zeros.assign(keys_size, 0);
     ColumnRawPtrs key_columns;
     key_columns.reserve(keys_size);
     data_types.reserve(keys_size);
@@ -253,6 +268,21 @@ bool Set::insertFromColumns(const Columns & columns, SetKeyColumns & holder)
     ColumnPtr null_map_holder;
     if (!transform_null_in)
         null_map_holder = extractNestedColumnsAndNullMap(holder.key_columns, null_map);
+
+    for (size_t i = 0; i < keys_size; ++i)
+    {
+        const auto * column_nullable = typeid_cast<const ColumnNullable *>(holder.key_columns[i]);
+        const auto * column_string
+            = typeid_cast<const ColumnString *>(column_nullable ? &column_nullable->getNestedColumn() : holder.key_columns[i]);
+        if (!column_string)
+            continue;
+
+        for (size_t row = 0; row < rows; ++row)
+        {
+            const auto value = column_string->getDataAt(row);
+            max_trailing_zeros[i] = std::max(max_trailing_zeros[i], value.size() - withoutTrailingZeros(value).size());
+        }
+    }
 
     switch (data.type)
     {
@@ -475,6 +505,9 @@ ColumnPtr Set::execute(const ColumnsWithTypeAndName & columns, bool negative) co
     ConstNullMapPtr null_map{};
     ColumnPtr null_map_holder;
 
+    /// `String` keys looked up by a value without trailing zero bytes.
+    std::vector<size_t> zero_padded_string_keys;
+
     for (size_t i = 0; i < num_key_columns; ++i)
     {
         ColumnPtr result;
@@ -482,6 +515,19 @@ ColumnPtr Set::execute(const ColumnsWithTypeAndName & columns, bool negative) co
         const auto & column_before_cast = columns.at(i);
         ColumnWithTypeAndName column_to_cast
             = {column_before_cast.column->convertToFullColumnIfConst(), column_before_cast.type, column_before_cast.name};
+
+        /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`): look the value up without
+        /// the trailing zero bytes the rule ignores. The cast below pads it to a `FixedString` key; a `String` key is
+        /// looked up with every number of trailing zero bytes it has, see `max_trailing_zeros`.
+        if (isStringOrFixedString(removeLowCardinalityAndNullable(column_to_cast.type))
+            && comparesZeroPadded(column_to_cast.type, data_types[i]))
+        {
+            DataTypePtr string_type = std::make_shared<DataTypeString>();
+            column_to_cast.column = removeTrailingZeros(column_to_cast.column);
+            column_to_cast.type = isNullableOrLowCardinalityNullable(column_to_cast.type) ? makeNullable(string_type) : string_type;
+            if (isString(removeNullable(data_types[i])) && max_trailing_zeros[i])
+                zero_padded_string_keys.push_back(i);
+        }
 
         /// Since we have optional support for Nullable(Tuple), if `data_types[i]` is `Tuple(...)` type, then
         /// we will enter the `castColumnAccurateOrNull` path; however, it can lead to casted column type
@@ -606,9 +652,73 @@ ColumnPtr Set::execute(const ColumnsWithTypeAndName & columns, bool negative) co
     if (!transform_null_in)
         null_map_holder = extractNestedColumnsAndNullMap(key_columns, null_map);
 
-    executeOrdinary(key_columns, vec_res, negative, null_map);
+    if (zero_padded_string_keys.empty())
+    {
+        executeOrdinary(key_columns, vec_res, negative, null_map);
+        return res;
+    }
+
+    executeWithTrailingZeros(key_columns, zero_padded_string_keys, vec_res, null_map);
+    if (negative)
+        for (auto & value : vec_res)
+            value = !value;
 
     return res;
+}
+
+/// `column` with `count` zero bytes appended to every value.
+static ColumnPtr appendZeros(const IColumn & column, size_t count)
+{
+    if (const auto * column_nullable = typeid_cast<const ColumnNullable *>(&column))
+        return ColumnNullable::create(appendZeros(column_nullable->getNestedColumn(), count), column_nullable->getNullMapColumnPtr());
+
+    const auto & column_string = assert_cast<const ColumnString &>(column);
+    auto result = ColumnString::create();
+    result->reserve(column_string.size());
+    String value;
+    for (size_t row = 0; row < column_string.size(); ++row)
+    {
+        value = column_string.getDataAt(row);
+        value.append(count, '\0');
+        result->insertData(value.data(), value.size());
+    }
+    return result;
+}
+
+void Set::executeWithTrailingZeros(
+    ColumnRawPtrs key_columns,
+    const std::vector<size_t> & zero_padded_string_keys,
+    ColumnUInt8::Container & vec_res,
+    ConstNullMapPtr null_map) const
+{
+    const ColumnRawPtrs stripped_columns = key_columns;
+    std::vector<size_t> appended(zero_padded_string_keys.size(), 0);
+    Columns padded_columns(zero_padded_string_keys.size());
+    ColumnUInt8::Container found(vec_res.size());
+
+    executeOrdinary(key_columns, vec_res, false, null_map);
+    while (true)
+    {
+        /// The next combination of the numbers of zero bytes appended to the keys.
+        size_t position = 0;
+        while (position < appended.size() && appended[position] == max_trailing_zeros[zero_padded_string_keys[position]])
+        {
+            appended[position] = 0;
+            key_columns[zero_padded_string_keys[position]] = stripped_columns[zero_padded_string_keys[position]];
+            ++position;
+        }
+        if (position == appended.size())
+            break;
+
+        const size_t key = zero_padded_string_keys[position];
+        ++appended[position];
+        padded_columns[position] = appendZeros(*stripped_columns[key], appended[position]);
+        key_columns[key] = padded_columns[position].get();
+
+        executeOrdinary(key_columns, found, false, null_map);
+        for (size_t row = 0; row < vec_res.size(); ++row)
+            vec_res[row] |= found[row];
+    }
 }
 
 bool Set::hasNull() const

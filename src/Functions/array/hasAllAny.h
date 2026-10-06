@@ -8,6 +8,7 @@
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeNothing.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/getLeastSupertype.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnsNumber.h>
@@ -67,8 +68,9 @@ public:
             = getLeastSupertype(DataTypes{std::from_range_t{}, arguments | std::views::transform([](auto & elem) { return elem.type; })});
 
         Columns preprocessed_columns(num_args);
+        /// The elements compare zero-padded when a `FixedString` is involved, see `FixedStringZeroPadding.h`.
         for (size_t i = 0; i < num_args; ++i)
-            preprocessed_columns[i] = castColumn(arguments[i], common_type);
+            preprocessed_columns[i] = removePaddingForComparison(castColumn(arguments[i], common_type), arguments[0].type, arguments[1].type);
 
         VectorWithMemoryTracking<std::unique_ptr<GatherUtils::IArraySource>> sources;
 

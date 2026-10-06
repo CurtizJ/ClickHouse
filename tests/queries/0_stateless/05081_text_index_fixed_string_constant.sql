@@ -353,7 +353,7 @@ INSERT INTO tab_array VALUES (1, ['hello']), (2, ['world']), (3, ['hello']);
 INSERT INTO tab_array_ngrambf VALUES (1, ['hello']), (2, ['world']), (3, ['hello']);
 INSERT INTO tab_map VALUES (1, map('hello', 'world')), (2, map('foo', 'bar')), (3, map('hello', 'world'));
 
-SELECT '-- hasAny and hasAll ignore the padding';
+SELECT '-- hasAny and hasAll compare zero-padded';
 SELECT count() FROM tab_array WHERE hasAny(arr, [toFixedString('hello', 10)]);
 SELECT count() FROM tab_array WHERE hasAny(arr, [toFixedString('hello', 10)]) SETTINGS use_skip_indexes = 0, query_plan_direct_read_from_text_index = 0;
 SELECT count() FROM tab_array WHERE hasAll(arr, [toFixedString('hello', 10)]);
@@ -363,16 +363,16 @@ SELECT count() FROM tab_array_ngrambf WHERE hasAny(arr, [toFixedString('hello', 
 SELECT count() FROM tab_array_ngrambf WHERE hasAll(arr, [toFixedString('hello', 10)]);
 SELECT count() FROM tab_array_ngrambf WHERE hasAll(arr, [toFixedString('hello', 10)]) SETTINGS use_skip_indexes = 0;
 
--- The functions below compare the raw padded bytes, so their terms must keep the padding.
--- `text(tokenizer = array)` answers them by exact direct read, where a stripped term would return
--- rows the predicate rejects.
-SELECT '-- has keeps the padding';
+-- The functions below compare zero-padded as well. A `FixedString` constant equals `String` values with
+-- any number of trailing zero bytes, which `text(tokenizer = array)` stores as different terms, so the
+-- index is not used for them and the result is the full scan's.
+SELECT '-- has compares zero-padded';
 SELECT count() FROM tab_array WHERE has(arr, toFixedString('hello', 10));
 SELECT count() FROM tab_array WHERE has(arr, toFixedString('hello', 10)) SETTINGS use_skip_indexes = 0, query_plan_direct_read_from_text_index = 0;
 SELECT count() FROM tab_array WHERE has(arr, 'hello');
 SELECT count() FROM tab_array WHERE has(arr, 'hello') SETTINGS use_skip_indexes = 0, query_plan_direct_read_from_text_index = 0;
 
-SELECT '-- mapContainsKey and mapContainsValue keep the padding';
+SELECT '-- mapContainsKey and mapContainsValue compare zero-padded';
 SELECT count() FROM tab_map WHERE mapContainsKey(m, toFixedString('hello', 10));
 SELECT count() FROM tab_map WHERE mapContainsKey(m, toFixedString('hello', 10)) SETTINGS use_skip_indexes = 0, query_plan_direct_read_from_text_index = 0;
 SELECT count() FROM tab_map WHERE mapContainsValue(m, toFixedString('world', 10));

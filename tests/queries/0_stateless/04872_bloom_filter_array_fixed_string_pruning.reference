@@ -30,27 +30,24 @@ CREATE TABLE p_lcnstr (id UInt64, v Array(LowCardinality(Nullable(String))), IND
 INSERT INTO p_lcnstr SELECT number, [if(number = 7, 'V0', concat('z', toString(number)))] FROM numbers(64);
 SELECT 'prune str has Str', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_str WHERE has(v,'V0')) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
 prune str has Str	1
-SELECT 'prune str hasAny FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_str WHERE hasAny(v,[toFixedString('V0',3)])) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune str hasAny FS3	1
--- `has` over a bare `String` element keeps hashing the padded form, so a `FixedString(3)` constant
--- selects the granule holding 'V0\0' and not the one holding 'V0'. Asserting the exact granule the
--- index picks pins the representation: a >0-reduction test would also pass if the index pruned
--- everything away.
+SELECT 'decline str hasAny FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_str WHERE hasAny(v,[toFixedString('V0',3)]));
+decline str hasAny FS3	1
+-- A `FixedString(3)` constant equals a bare `String` element with any number of trailing zero bytes,
+-- so `has` and `hasAny` select both 'V0' and 'V0\0', and the index declines instead of pruning either.
 CREATE TABLE q_str (id UInt64, v Array(String), INDEX idx v TYPE bloom_filter GRANULARITY 1) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 INSERT INTO q_str SELECT number, [multiIf(number = 7, 'V0', number = 11, 'V0\0', concat('z', toString(number)))] FROM numbers(64);
 SELECT 'padded str has FS3', (SELECT count() FROM q_str WHERE has(v,toFixedString('V0',3))) = (SELECT count() FROM q_str WHERE has(v,toFixedString('V0',3)) SETTINGS use_skip_indexes=0);
 padded str has FS3	1
 SELECT 'padded str has FS3 id', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE has(v,toFixedString('V0',3)) ORDER BY id)) = (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE has(v,toFixedString('V0',3)) ORDER BY id SETTINGS use_skip_indexes=0));
 padded str has FS3 id	1
--- On byte-identical data `has` matches the padded row and `hasAny` matches the unpadded one. Pinning
--- the absolute ids is what proves each predicate keeps its own representation: a keyed-vs-unkeyed
--- comparison alone stays green if a change moves both sides together.
-SELECT 'padded str has FS3 is 11', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE has(v,toFixedString('V0',3)) ORDER BY id)) = [11];
-padded str has FS3 is 11	1
-SELECT 'unpadded str hasAny FS3 is 7', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE hasAny(v,[toFixedString('V0',3)]) ORDER BY id)) = [7];
-unpadded str hasAny FS3 is 7	1
-SELECT 'prune str has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM q_str WHERE has(v,toFixedString('V0',3))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune str has FS3	1
+-- Pinning the absolute ids proves both predicates follow `equals`: a keyed-vs-unkeyed comparison alone
+-- stays green if a change moves both sides together.
+SELECT 'padded str has FS3 is 7 and 11', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE has(v,toFixedString('V0',3)) ORDER BY id)) = [7, 11];
+padded str has FS3 is 7 and 11	1
+SELECT 'unpadded str hasAny FS3 is 7 and 11', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE hasAny(v,[toFixedString('V0',3)]) ORDER BY id)) = [7, 11];
+unpadded str hasAny FS3 is 7 and 11	1
+SELECT 'decline str has FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM q_str WHERE has(v,toFixedString('V0',3)));
+decline str has FS3	1
 SELECT 'padded str hasAny FS3 id', (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE hasAny(v,[toFixedString('V0',3)]) ORDER BY id)) = (SELECT groupArray(id) FROM (SELECT id FROM q_str WHERE hasAny(v,[toFixedString('V0',3)]) ORDER BY id SETTINGS use_skip_indexes=0));
 padded str hasAny FS3 id	1
 SELECT 'prune fs3 has FS5', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_fs3 WHERE has(v,toFixedString('V0',5))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
@@ -63,29 +60,27 @@ SELECT 'prune fs3 hasAll FS5', count() > 0 FROM (EXPLAIN indexes = 1 SELECT coun
 prune fs3 hasAll FS5	1
 SELECT 'prune fs3 has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_fs3 WHERE has(v,toFixedString('V0',3))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
 prune fs3 has FS3	1
-SELECT 'prune lcstr has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcstr WHERE has(v,toFixedString('V0',3))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune lcstr has FS3	1
-SELECT 'prune lcstr hasAny FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcstr WHERE hasAny(v,[toFixedString('V0',3)])) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune lcstr hasAny FS3	1
+SELECT 'decline lcstr has FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcstr WHERE has(v,toFixedString('V0',3)));
+decline lcstr has FS3	1
+SELECT 'decline lcstr hasAny FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcstr WHERE hasAny(v,[toFixedString('V0',3)]));
+decline lcstr hasAny FS3	1
 SELECT 'prune lcstr has Str', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcstr WHERE has(v,'V0')) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
 prune lcstr has Str	1
-SELECT 'prune lcnstr has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcnstr WHERE has(v,toFixedString('V0',3))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune lcnstr has FS3	1
-SELECT 'prune lcnstr hasAny FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcnstr WHERE hasAny(v,[toFixedString('V0',3)])) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune lcnstr hasAny FS3	1
+SELECT 'decline lcnstr has FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcnstr WHERE has(v,toFixedString('V0',3)));
+decline lcnstr has FS3	1
+SELECT 'decline lcnstr hasAny FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcnstr WHERE hasAny(v,[toFixedString('V0',3)]));
+decline lcnstr hasAny FS3	1
 SELECT 'prune lcnstr has FS3 is 7', (SELECT groupArray(id) FROM (SELECT id FROM p_lcnstr WHERE has(v,toFixedString('V0',3)) ORDER BY id)) = [7];
 prune lcnstr has FS3 is 7	1
--- Two properties in one cell. The query must still PLAN, so analysis has to swallow the failed cast
--- rather than propagate it: a rethrow errors the whole statement. And the `idx` block must be ABSENT,
+-- Two properties in one cell. The query must still PLAN: analysis must not throw on a constant that
+-- does not fit the element width even without its padding. And the `idx` block must be ABSENT,
 -- so the decline is real rather than a successful prune of a value the function can never match. The
 -- `Name:` line is emitted only for a named index, and the always-present `PrimaryKey` entry carries no
 -- name, so a granule-count predicate cannot stand in for this.
 SELECT 'decline fs3 has unrepresentable FS5', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_fs3 WHERE has(v,toFixedString('WXYZ',5)));
 decline fs3 has unrepresentable FS5	1
--- `LowCardinality(FixedString(N))` is the one element type where the two coercion modes could differ,
--- and the whole case for coercing rather than declining is that pruning survives. The four cells
--- above that use this wrapper are result comparisons, which would also pass if analysis declined
--- entirely, so pin both modes here: `has`/`indexOf` take Direct, `hasAny`/`hasAll` take Supertype.
+-- `LowCardinality(FixedString(N))`: the four cells above that use this wrapper are result comparisons,
+-- which would also pass if analysis declined entirely, so pin the pruning here.
 SELECT 'prune lcfs3 has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcfs3 WHERE has(v,toFixedString('V0',3))) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
 prune lcfs3 has FS3	1
 SELECT 'prune lcfs3 indexOf FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_lcfs3 WHERE indexOf(v,toFixedString('V0',3)) = 1) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
@@ -109,8 +104,8 @@ SELECT 'num hasAny', (SELECT count() FROM p_num WHERE hasAny(v,[999])) = (SELECT
 num hasAny	1
 SELECT 'prune num has', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_num WHERE has(v,999)) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
 prune num has	1
--- `has(<const array>, <indexed scalar>)` shares `createColumnFromConstantArray`, whose runtime is a
--- `Field`-level `accurateEquals` and therefore needs the padded form. Deliberately left untouched.
+-- `has(<const array>, <indexed scalar>)`: a `FixedString(3)` element equals the `String` scalar with any
+-- number of trailing zero bytes, so the index declines, while a `String` element keeps pruning.
 -- The indexed column must be a SCALAR: with an array column this form does not use the index at all,
 -- which would make every assertion below vacuous.
 CREATE TABLE o_sc (id UInt64, s String) ENGINE = Log;
@@ -123,12 +118,13 @@ SELECT 'const-array has FS5', (SELECT count() FROM o_sc WHERE has([toFixedString
 const-array has FS5	1
 SELECT 'const-array has Str', (SELECT count() FROM o_sc WHERE has(['V0'], s)) = (SELECT count() FROM k_sc WHERE has(['V0'], s));
 const-array has Str	1
-SELECT 'const-array has FS3 id', (SELECT groupArray(id) FROM (SELECT id FROM k_sc WHERE has([toFixedString('V0',3)], s) ORDER BY id)) = [1];
-const-array has FS3 id	1
-SELECT 'prune const-array has FS3', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM k_sc WHERE has([toFixedString('V0',3)], s)) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
-prune const-array has FS3	1
--- Multi-element constant arrays: the coercion is batched over the whole array, so a non-first
--- element must survive both hops in its own position. Rows carry two elements so `hasAll` genuinely
+SELECT 'const-array has FS3 ids', (SELECT groupArray(id) FROM (SELECT id FROM k_sc WHERE has([toFixedString('V0',3)], s) ORDER BY id)) = [0, 1, 2];
+const-array has FS3 ids	1
+SELECT 'decline const-array has FS3', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM k_sc WHERE has([toFixedString('V0',3)], s));
+decline const-array has FS3	1
+SELECT 'prune const-array has Str', count() > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM k_sc WHERE has(['V0'], s)) WHERE explain LIKE '%Granules: %/%' AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) > 0 AND toUInt64OrZero(extract(explain,'Granules: (\d+)/')) < toUInt64OrZero(extract(explain,'Granules: \d+/(\d+)'));
+prune const-array has Str	1
+-- Multi-element constant arrays: every element is converted in its own position. Rows carry two elements so `hasAll` genuinely
 -- needs both. Every constant shares one width: a mixed-width literal array types as `Array(String)`,
 -- which would reach the helper with a different element type and probe another path.
 CREATE TABLE o_fs3m (id UInt64, v Array(FixedString(3))) ENGINE = Log;
@@ -161,12 +157,10 @@ SELECT 'prune fs3m hasAny ids are 5 7 11', (SELECT groupArray(id) FROM (SELECT i
 prune fs3m hasAny ids are 5 7 11	1
 SELECT 'prune fs3m hasAll ids are 7', (SELECT groupArray(id) FROM (SELECT id FROM p_fs3m WHERE hasAll(v,[toFixedString('V0',5),toFixedString('V0A',5)]) ORDER BY id)) = [7];
 prune fs3m hasAll ids are 7	1
--- One unrepresentable element declines the WHOLE predicate, so the index must not be applied even
--- though the other element is representable and present in the data. The result cell above cannot see
--- this: hashing only the valid `V0` and dropping `WXYZ` selects exactly the rows `hasAny` returns, so
--- the answer stays right while the contract is broken. Only the plan shows it.
-SELECT 'decline fs3m hasAny later unrepresentable', countIf(explain LIKE '%Name: idx%') = 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_fs3m WHERE hasAny(v,[toFixedString('V0',5),toFixedString('WXYZ',5)]));
-decline fs3m hasAny later unrepresentable	1
+-- An element no stored value can equal is dropped: `WXYZ` does not fit `FixedString(3)` even without its
+-- padding, so the index is applied for `V0` alone and selects exactly the rows `hasAny` returns.
+SELECT 'prune fs3m hasAny later unrepresentable', countIf(explain LIKE '%Name: idx%') > 0 FROM (EXPLAIN indexes = 1 SELECT count() FROM p_fs3m WHERE hasAny(v,[toFixedString('V0',5),toFixedString('WXYZ',5)]));
+prune fs3m hasAny later unrepresentable	1
 DROP TABLE p_str;
 DROP TABLE p_fs3;
 DROP TABLE p_lcstr;

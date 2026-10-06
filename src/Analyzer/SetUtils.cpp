@@ -7,6 +7,9 @@
 #include <Columns/ColumnTuple.h>
 #include <Columns/ColumnsNumber.h>
 #include <DataTypes/DataTypeArray.h>
+#include <DataTypes/DataTypeFixedString.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeTuple.h>
@@ -186,6 +189,64 @@ const ColumnTuple & getMemberTuple(const ColumnPtr & member_column, ColumnPtr & 
     return assert_cast<const ColumnTuple &>(*holder);
 }
 
+/// A `String` key compares zero-padded with a `FixedString` member (see `FixedStringZeroPadding.h`), which a set of
+/// `String` values cannot express. Such a key is built as a `FixedString` wide enough for every member instead, and the
+/// set then pads the values it looks up. Its `String` members compare zero-padded too.
+DataTypes zeroPaddedKeyTypes(const SetMembers & members, DataTypes key_types)
+{
+    for (size_t i = 0; i < key_types.size(); ++i)
+    {
+        if (!isString(removeLowCardinalityAndNullable(key_types[i])))
+            continue;
+
+        bool has_fixed_string = false;
+        bool all_strings = true;
+        size_t width = 1;
+        for (const auto & member : members)
+        {
+            if (member.column->isNullAt(0))
+                continue;
+
+            DataTypePtr type = member.type;
+            Field value = (*member.column)[0];
+            if (key_types.size() > 1)
+            {
+                const DataTypeTuple * tuple_type = getTupleType(member.type);
+                if (!tuple_type || tuple_type->getElements().size() != key_types.size())
+                {
+                    all_strings = false;
+                    break;
+                }
+                type = tuple_type->getElement(i);
+                value = value.safeGet<Tuple>()[i];
+            }
+
+            type = removeLowCardinalityAndNullable(type);
+            if (value.isNull())
+                continue;
+            if (const auto * fixed_string_type = typeid_cast<const DataTypeFixedString *>(type.get()))
+            {
+                has_fixed_string = true;
+                width = std::max(width, fixed_string_type->getN());
+            }
+            else if (isString(type))
+                width = std::max(width, value.safeGet<String>().size());
+            else
+            {
+                all_strings = false;
+                break;
+            }
+        }
+
+        if (has_fixed_string && all_strings)
+        {
+            DataTypePtr fixed_string_type = std::make_shared<DataTypeFixedString>(width);
+            key_types[i] = removeLowCardinality(key_types[i])->isNullable() ? makeNullable(fixed_string_type) : fixed_string_type;
+        }
+    }
+    return key_types;
+}
+
 /// Build the converted set columns from the set members (each a size-1 column). Column-native
 /// counterpart of the previous `Field`-based `createBlockFromCollection`.
 ///
@@ -193,8 +254,9 @@ const ColumnTuple & getMemberTuple(const ColumnPtr & member_column, ColumnPtr & 
 /// - single-key: [1], [2], [3] (each member a scalar), or Tuple members for a `Nullable(Tuple)` LHS;
 /// - multi-key: each member a Tuple that is unpacked into `lhs_unpacked_types.size()` columns.
 ColumnsWithTypeAndName createBlockFromCollection(
-    const SetMembers & members, const DataTypes & lhs_unpacked_types, GetSetElementParams params)
+    const SetMembers & members, const DataTypes & lhs_types, GetSetElementParams params)
 {
+    const DataTypes lhs_unpacked_types = zeroPaddedKeyTypes(members, lhs_types);
     size_t num_elements = lhs_unpacked_types.size();
 
     /// Fast path: single key column (lhs_unpacked_types.size() == 1)
@@ -303,11 +365,24 @@ ColumnsWithTypeAndName createBlockFromCollection(
             return res;
         }
 
+        /// A wider `FixedString`, or a `String` with trailing zero bytes, still equals the value of a `FixedString` key padded
+        /// to its width, see `FixedStringZeroPadding.h`.
+        const bool pad_to_key = isFixedString(removeLowCardinalityAndNullable(lhs_type));
+
         MutableColumnPtr column = lhs_type->createColumn();
         column->reserve(members.size());
         for (const auto & member : members)
         {
-            auto converted = convertColumnToTypeCheckEnum(*member.column, member.type, lhs_type, params.forbid_unknown_enum_values);
+            ColumnPtr member_column = member.column;
+            DataTypePtr member_type = member.type;
+            if (pad_to_key && isStringOrFixedString(removeLowCardinalityAndNullable(member_type)))
+            {
+                DataTypePtr string_type = std::make_shared<DataTypeString>();
+                member_column = removeTrailingZeros(member_column);
+                member_type = isNullableOrLowCardinalityNullable(member_type) ? makeNullable(string_type) : string_type;
+            }
+
+            auto converted = convertColumnToTypeCheckEnum(*member_column, member_type, lhs_type, params.forbid_unknown_enum_values);
 
             bool need_insert_null = params.transform_null_in && column->isNullable();
             if (converted && (!(*converted)->isNullAt(0) || need_insert_null))

@@ -3,6 +3,7 @@
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnNullable.h>
+#include <Columns/ColumnString.h>
 #include <Columns/ColumnTuple.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/FieldAccurateComparison.h>
@@ -12,7 +13,10 @@
 #include <DataTypes/DataTypeFixedString.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeMap.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeMapHelpers.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <IO/ReadBufferFromString.h>
 #include <IO/WriteHelpers.h>
@@ -229,12 +233,15 @@ struct MapIndexInfo
     bool has_keys_index = false;
     bool has_values_index = false;
     Field key_field;
+    /// The declared type of `key_field`.
+    DataTypePtr key_type;
 };
 
 /// Try to resolve a Map column against the bloom filter index header by the map column name
 /// and the key as a Field. Returns std::nullopt if neither `mapKeys(<col>)` nor `mapValues(<col>)`
 /// is present in the index.
-std::optional<MapIndexInfo> tryResolveMapIndexInfo(const String & map_column_name, const Field & key_field, const Block & header)
+std::optional<MapIndexInfo> tryResolveMapIndexInfo(
+    const String & map_column_name, const Field & key_field, const DataTypePtr & key_type, const Block & header)
 {
     auto map_keys_index_column_name = fmt::format("mapKeys({})", map_column_name);
     auto map_values_index_column_name = fmt::format("mapValues({})", map_column_name);
@@ -247,6 +254,7 @@ std::optional<MapIndexInfo> tryResolveMapIndexInfo(const String & map_column_nam
 
     MapIndexInfo info;
     info.key_field = key_field;
+    info.key_type = key_type;
     if (keys_position)
     {
         info.has_keys_index = true;
@@ -274,7 +282,7 @@ std::optional<MapIndexInfo> tryParseMapSubcolumn(
 
     auto map_keys_index_column_name = fmt::format("mapKeys({})", map_column_name);
     if (!header.has(map_keys_index_column_name))
-        return tryResolveMapIndexInfo(map_column_name, {}, header);
+        return tryResolveMapIndexInfo(map_column_name, {}, nullptr, header);
 
     /// Deserialize the key from its text representation using the key type from the index header.
     size_t keys_position = header.getPositionByName(map_keys_index_column_name);
@@ -289,7 +297,7 @@ std::optional<MapIndexInfo> tryParseMapSubcolumn(
     Field key_field;
     key_column->get(0, key_field);
 
-    return tryResolveMapIndexInfo(map_column_name, key_field, header);
+    return tryResolveMapIndexInfo(map_column_name, key_field, key_type, header);
 }
 
 /// Try to resolve a `MapIndexInfo` from a key node that is either an `arrayElement(map, key)`
@@ -310,7 +318,7 @@ std::optional<MapIndexInfo> tryResolveMapInfoFromNode(
             if (!second_argument.tryGetConstant(constant_value, constant_type))
                 return std::nullopt;
 
-            return tryResolveMapIndexInfo(first_argument.getColumnName(), constant_value, header);
+            return tryResolveMapIndexInfo(first_argument.getColumnName(), constant_value, constant_type, header);
         }
     }
 
@@ -603,6 +611,84 @@ static bool bloomFilterHashDomainMatches(const DataTypePtr & value_type, const D
     return (isInteger(value) && isInteger(element)) || value->equals(*element);
 }
 
+/// Whether values of these types are compared as strings.
+static bool comparesAsStrings(const DataTypePtr & value_type, const DataTypePtr & element_type)
+{
+    return value_type && isStringOrFixedString(removeLowCardinalityAndNullable(value_type))
+        && isStringOrFixedString(removeLowCardinalityAndNullable(element_type));
+}
+
+/// A string constant compares zero-padded with a `FixedString` (see `FixedStringZeroPadding.h`), while the index holds
+/// the hash of the exact stored bytes. The stored values of `element_type` equal to a string constant; `std::nullopt`
+/// for other constants.
+static std::optional<StoredStringMatch> tryMatchStoredString(const Field & value, const DataTypePtr & value_type, const DataTypePtr & element_type)
+{
+    if (value.getType() != Field::Types::String || !isStringOrFixedString(removeLowCardinalityAndNullable(element_type)))
+        return std::nullopt;
+
+    return matchStoredString(value.safeGet<String>(), value_type, element_type);
+}
+
+/// Converts a constant to hash against stored values of `element_type`; a null `Field` declines the index.
+static Field convertConstantForHash(const Field & value, const DataTypePtr & value_type, const DataTypePtr & element_type)
+{
+    if (auto match = tryMatchStoredString(value, value_type, element_type))
+        return match->kind == StoredStringMatch::Kind::Exact ? Field(std::move(match->value)) : Field();
+
+    return convertFieldToType(value, *element_type, value_type.get());
+}
+
+/// Converts the elements of an `IN` set to hash against stored values of `element_type`; `nullptr` declines the index.
+/// A string element no stored value equals is dropped.
+static ColumnPtr convertSetForHash(const ColumnPtr & column, const DataTypePtr & type, const DataTypePtr & element_type)
+{
+    if (!comparesAsStrings(type, element_type))
+        return castColumn(ColumnWithTypeAndName{column, type, ""}, element_type);
+
+    const auto full_column = column->convertToFullIfWrapped()->convertToFullColumnIfLowCardinality();
+    const auto * nullable_column = typeid_cast<const ColumnNullable *>(full_column.get());
+    const IColumn & values = nullable_column ? nullable_column->getNestedColumn() : *full_column;
+
+    auto stored = ColumnString::create();
+    auto null_map = ColumnUInt8::create();
+    for (size_t row = 0; row < full_column->size(); ++row)
+    {
+        if (nullable_column && nullable_column->isNullAt(row))
+        {
+            stored->insertDefault();
+            null_map->insertValue(1);
+            continue;
+        }
+
+        auto match = matchStoredString(values.getDataAt(row), type, element_type);
+        if (match.kind == StoredStringMatch::Kind::WithTrailingZeros)
+            return nullptr;
+        if (match.kind == StoredStringMatch::Kind::None)
+            continue;
+
+        stored->insertData(match.value.data(), match.value.size());
+        null_map->insertValue(0);
+    }
+
+    DataTypePtr stored_type = std::make_shared<DataTypeString>();
+    ColumnPtr stored_column = std::move(stored);
+    if (nullable_column)
+    {
+        stored_type = makeNullable(stored_type);
+        stored_column = ColumnNullable::create(stored_column, std::move(null_map));
+    }
+    return castColumn(ColumnWithTypeAndName{stored_column, stored_type, ""}, element_type);
+}
+
+/// Whether a constant equals the value an absent map key reads: the default of `map_value_type`.
+static bool equalsAbsentMapValue(const Field & value, const DataTypePtr & value_type, const DataTypePtr & map_value_type)
+{
+    if (auto match = tryMatchStoredString(value, value_type, map_value_type))
+        return match->equalsDefault(map_value_type);
+
+    return value == value_type->getDefault();
+}
+
 bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
     const String & function_name,
     const RPNBuilderTreeNode & wrapped_key_node,
@@ -616,7 +702,6 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
 
     if (header.has(key_node_column_name))
     {
-        size_t row_size = column->size();
         size_t position = header.getPositionByName(key_node_column_name);
         const DataTypePtr & index_type = header.getByPosition(position).type;
 
@@ -625,7 +710,10 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
         if (nullable_column && !index_type->isNullable() && std::ranges::any_of(nullable_column->getNullMapData(), [](UInt8 is_null) { return is_null != 0; }))
             return false;
 
-        const auto & converted_column = castColumn(ColumnWithTypeAndName{column, type, ""}, index_type);
+        const auto converted_column = convertSetForHash(column, type, index_type);
+        if (!converted_column)
+            return false;
+        const size_t row_size = converted_column->size();
 
         /// An `Array` index holds one hash per element, so a set array is looked up by its elements
         /// and an empty one has no hash that can stand for it. Contribute no predicate at all: a
@@ -722,8 +810,10 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
         if (!prepared_set)
             return false;
 
-        auto default_column_to_check = type->createColumnConstWithDefaultValue(1)->convertToFullColumnIfConst();
-        ColumnWithTypeAndName default_column_with_type_to_check{default_column_to_check, type, ""};
+        /// The set is asked in the type of the map value, so that it compares as `IN` does.
+        const auto map_value_type = key_node.getDAGNode()->result_type;
+        auto default_column_to_check = map_value_type->createColumnConstWithDefaultValue(1)->convertToFullColumnIfConst();
+        ColumnWithTypeAndName default_column_with_type_to_check{default_column_to_check, map_value_type, ""};
         ColumnsWithTypeAndName default_columns_with_type_to_check = {default_column_with_type_to_check};
         auto set_contains_default_value_predicate_column = prepared_set->execute(default_columns_with_type_to_check, false /*negative*/);
         const auto & set_contains_default_value_predicate_column_typed = assert_cast<const ColumnUInt8 &>(*set_contains_default_value_predicate_column);
@@ -737,18 +827,23 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
             size_t position = map_info->keys_index_position;
             const DataTypePtr & index_type = header.getByPosition(position).type;
             const DataTypePtr actual_type = BloomFilter::getPrimitiveType(index_type);
-            out.predicate.emplace_back(std::make_pair(position, BloomFilterHash::hashWithField(actual_type.get(), map_info->key_field)));
+            Field key = convertConstantForHash(map_info->key_field, map_info->key_type, actual_type);
+            if (key.isNull())
+                return false;
+            out.predicate.emplace_back(std::make_pair(position, BloomFilterHash::hashWithField(actual_type.get(), key)));
         }
         else if (map_info->has_values_index)
         {
             /// For mapValues we serialize set with bloom filter
-            size_t row_size = column->size();
             size_t position = map_info->values_index_position;
             const DataTypePtr & index_type = header.getByPosition(position).type;
             const auto & array_type = assert_cast<const DataTypeArray &>(*index_type);
             const auto & array_nested_type = array_type.getNestedType();
-            const auto & converted_column = castColumn(ColumnWithTypeAndName{column, type, ""}, array_nested_type);
-            out.predicate.emplace_back(std::make_pair(position, BloomFilterHash::hashWithColumn(array_nested_type, converted_column, 0, row_size)));
+            const auto converted_column = convertSetForHash(column, type, array_nested_type);
+            if (!converted_column)
+                return false;
+            out.predicate.emplace_back(std::make_pair(
+                position, BloomFilterHash::hashWithColumn(array_nested_type, converted_column, 0, converted_column->size())));
         }
         else
         {
@@ -783,86 +878,20 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeIn(
         return false;
 
     const auto & array_nested_type = array_type->getNestedType();
-    if (!bloomFilterHashDomainMatches(type, array_nested_type))
+    if (!comparesAsStrings(type, array_nested_type) && !bloomFilterHashDomainMatches(type, array_nested_type))
         return false;
 
-    const auto & converted_column = castColumn(ColumnWithTypeAndName{column, type, ""}, array_nested_type);
+    const auto converted_column = convertSetForHash(column, type, array_nested_type);
+    if (!converted_column)
+        return false;
     out.predicate.emplace_back(
-        std::make_pair(position, BloomFilterHash::hashWithColumn(array_nested_type, converted_column, 0, column->size())));
+        std::make_pair(position, BloomFilterHash::hashWithColumn(array_nested_type, converted_column, 0, converted_column->size())));
     out.function = RPNElement::FUNCTION_HAS_ANY;
     return true;
 }
 
 
-/// The array-search functions coerce the constant with CAST before comparing it to the elements:
-/// `hasAny`/`hasAll`, and `has`/`indexOf` over a `FixedString` element, cast both sides to the least
-/// supertype (hasAllAny.h, arrayIndex.h `executeGeneric`), and `has`/`indexOf` over a `LowCardinality`
-/// element cast the constant straight to the dictionary type (LowCardinalityExecutionHelpers.h
-/// `dictionaryIndexForConstant`). A CAST of `FixedString` to `String` strips the trailing zero
-/// padding, while `convertFieldToType` keeps it, so the index hashed a value the function never
-/// compares and wrongly pruned granules.
-///
-/// Replicate that coercion at the `Field` level: strip the padding of a `FixedString` constant, then
-/// re-pad it to the width of the element type, which is the stored form of every element the function
-/// can match. Returns a null `Field` (the `convertFieldToType` convention) when no stored element can
-/// match, or when the runtime CAST would throw `TOO_LARGE_STRING_SIZE`; the caller must then decline
-/// the index, so that the error stays reachable instead of turning into silently pruned granules.
-static Field coerceStringFieldLikeSearchFunction(
-    const Field & field, const DataTypePtr & value_type, const DataTypePtr & actual_type, bool cast_to_supertype)
-{
-    if (field.isNull())
-        return {};
-
-    String value = field.safeGet<String>();
-    const auto * fixed_string_type = typeid_cast<const DataTypeFixedString *>(actual_type.get());
-
-    if (isFixedString(removeLowCardinalityAndNullable(value_type)))
-    {
-        /// The direct cast to a dictionary type rejects a `FixedString` constant wider than the
-        /// element up front, by width alone, while the supertype cast strips the padding first.
-        if (!cast_to_supertype && fixed_string_type && value.size() > fixed_string_type->getN())
-            return {};
-
-        value.resize(value.find_last_not_of('\0') + 1);
-    }
-
-    if (fixed_string_type)
-    {
-        if (value.size() > fixed_string_type->getN())
-            return {};
-
-        value.resize(fixed_string_type->getN(), '\0');
-    }
-
-    return Field(std::move(value));
-}
-
-/// True for the element/constant types whose comparison `coerceStringFieldLikeSearchFunction`
-/// replicates. Numeric elements take `executeIntegral`, which compares without coercing.
-static bool searchFunctionCoercesConstant(const DataTypePtr & value_type, const DataTypePtr & actual_type)
-{
-    return value_type
-        && isStringOrFixedString(removeLowCardinalityAndNullable(value_type))
-        && isStringOrFixedString(actual_type);
-}
-
-/// Convert a constant for hashing against the elements of an indexed array column, the way the
-/// functions built on arrayIndex.h (`has`, `indexOf`, `mapContainsKey`, `mapContainsValue`,
-/// `mapContains`, and `has` over a `Map`) compare it. Over a plain `String` element they compare
-/// the constant's raw padded bytes (arrayIndex.h `executeString`), so the padded form is the value
-/// to hash. The test must read the type before `getPrimitiveType` strips `LowCardinality`, whose
-/// elements do coerce.
-static Field convertConstantForArrayIndexFunction(
-    const Field & value_field, const DataTypePtr & value_type, const DataTypePtr & nested_type, const DataTypePtr & actual_type)
-{
-    if (WhichDataType(removeNullable(nested_type)).isString() || !searchFunctionCoercesConstant(value_type, actual_type))
-        return convertFieldToType(value_field, *actual_type, value_type.get());
-
-    return coerceStringFieldLikeSearchFunction(value_field, value_type, actual_type, /*cast_to_supertype=*/ !nested_type->lowCardinality());
-}
-
-static ColumnPtr createColumnFromConstantArray(
-    const Field & value_field, const DataTypePtr & value_type, const DataTypePtr & actual_type, bool coerce_like_search_function)
+static ColumnPtr createColumnFromConstantArray(const Field & value_field, const DataTypePtr & value_type, const DataTypePtr & actual_type)
 {
     if (value_field.getType() != Field::Types::Array)
         return nullptr;
@@ -876,9 +905,7 @@ static ColumnPtr createColumnFromConstantArray(
         if (const auto * value_array_type = typeid_cast<const DataTypeArray *>(removeLowCardinalityAndNullable(value_type).get()))
             element_type = value_array_type->getNestedType();
 
-    const bool coerce = coerce_like_search_function && element_type && searchFunctionCoercesConstant(element_type, actual_type);
     const bool is_nullable = actual_type->isNullable();
-    const auto * fixed_string_type = typeid_cast<const DataTypeFixedString *>(actual_type.get());
     auto mutable_column = actual_type->createColumn();
 
     for (const auto & f : value_field.safeGet<Array>())
@@ -886,19 +913,17 @@ static ColumnPtr createColumnFromConstantArray(
         if ((f.isNull() && !is_nullable) || f.isDecimal(f.getType())) /// NOLINT(readability-static-accessed-through-instance)
             return nullptr;
 
-        /// `has(<constant array>, <indexed scalar>)` compares the `Field`s without a cast.
-        /// An over-wide value therefore cannot match a narrower `FixedString` scalar, but
-        /// `ColumnFixedString::insert` would throw while preparing the index. Decline the
-        /// index and let the function evaluate normally instead.
-        if (!coerce && fixed_string_type && f.getType() == Field::Types::String
-            && f.safeGet<String>().size() > fixed_string_type->getN())
+        if (auto match = tryMatchStoredString(f, element_type, actual_type))
         {
-            return nullptr;
+            if (match->kind == StoredStringMatch::Kind::WithTrailingZeros)
+                return nullptr;
+            /// An element no stored value equals is not looked up.
+            if (match->kind == StoredStringMatch::Kind::Exact)
+                mutable_column->insert(Field(std::move(match->value)));
+            continue;
         }
 
-        Field converted = coerce
-            ? coerceStringFieldLikeSearchFunction(f, element_type, actual_type, /*cast_to_supertype=*/ true)
-            : convertFieldToType(f, *actual_type, element_type.get());
+        Field converted = convertFieldToType(f, *actual_type, element_type.get());
         if (converted.isNull())
             return nullptr;
 
@@ -1009,7 +1034,9 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
             {
                 size_t position = header.getPositionByName(array_column_name);
                 const auto * array_type = typeid_cast<const DataTypeArray *>(header.getByPosition(position).type.get());
-                if (array_type && bloomFilterHashDomainMatches(value_type, array_type->getNestedType()))
+                if (array_type
+                    && (comparesAsStrings(value_type, array_type->getNestedType())
+                        || bloomFilterHashDomainMatches(value_type, array_type->getNestedType())))
                 {
                     const DataTypePtr actual_type = BloomFilter::getPrimitiveType(array_type->getNestedType());
                     if (!validate_enum_literals_in_operators && isUnknownEnumElement(*actual_type, value_field))
@@ -1018,7 +1045,7 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
                         return true;
                     }
 
-                    auto converted_field = convertFieldToType(value_field, *actual_type, value_type.get());
+                    auto converted_field = convertConstantForHash(value_field, value_type, actual_type);
                     if (converted_field.isNull())
                         return false;
 
@@ -1046,13 +1073,8 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
                 if (function_name == "has" || indexOfCanUseBloomFilter(parent))
                 {
                     out.function = RPNElement::FUNCTION_HAS;
-                    /// The function coerces the constant by the element type it sees, which may differ in `LowCardinality`.
-                    DataTypePtr nested_type = array_type->getNestedType();
-                    if (const auto * wrapped_array_type = typeid_cast<const DataTypeArray *>(wrapped_key_node.getDAGNode()->result_type.get()))
-                        nested_type = wrapped_array_type->getNestedType();
-
                     const DataTypePtr actual_type = BloomFilter::getPrimitiveType(array_type->getNestedType());
-                    Field converted_field = convertConstantForArrayIndexFunction(value_field, value_type, nested_type, actual_type);
+                    Field converted_field = convertConstantForHash(value_field, value_type, actual_type);
                     if (converted_field.isNull())
                         return false;
 
@@ -1061,10 +1083,8 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
             }
             else if (function_name == "has")
             {
-                /// `has(<constant array>, <indexed scalar>)` compares `Field`s directly
-                /// (arrayIndex.h `executeConst`), so it needs the padded form and no coercion.
                 const DataTypePtr actual_type = BloomFilter::getPrimitiveType(index_type);
-                ColumnPtr column = createColumnFromConstantArray(value_field, value_type, actual_type, /*coerce_like_search_function=*/ false);
+                ColumnPtr column = createColumnFromConstantArray(value_field, value_type, actual_type);
 
                 if (!column)
                     return false;
@@ -1079,7 +1099,7 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
                 return false;
 
             const DataTypePtr actual_type = BloomFilter::getPrimitiveType(array_type->getNestedType());
-            ColumnPtr column = createColumnFromConstantArray(value_field, value_type, actual_type, /*coerce_like_search_function=*/ true);
+            ColumnPtr column = createColumnFromConstantArray(value_field, value_type, actual_type);
 
             if (!column)
                 return false;
@@ -1097,26 +1117,6 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
             out.function = RPNElement::FUNCTION_EQUALS;
             const DataTypePtr actual_type = BloomFilter::getPrimitiveType(index_type);
 
-            /// Where equality compares zero-padded, the constant can equal a stored value of a different byte
-            /// length, while the index holds only the hash of each value's exact bytes. It is then usable only
-            /// for a `FixedString(N)` index at least as wide, where padding gives the one value that can match.
-            if (isStringOrFixedString(actual_type) && value_field.getType() == Field::Types::String)
-            {
-                /// A `Variant` or `Dynamic` constant carries the nested padded value under its
-                /// declared type, so an active `FixedString` alternative cannot be told from a `String` one.
-                const WhichDataType which_constant(removeLowCardinalityAndNullable(value_type));
-                const bool constant_may_be_fixed_string
-                    = which_constant.isFixedString() || which_constant.isVariant() || which_constant.isDynamic();
-                const size_t constant_bytes = value_field.safeGet<String>().size();
-                const auto * fixed_index_type = typeid_cast<const DataTypeFixedString *>(actual_type.get());
-
-                if (constant_may_be_fixed_string && !fixed_index_type)
-                    return false;
-
-                if (fixed_index_type && fixed_index_type->getN() < constant_bytes)
-                    return false;
-            }
-
             /// With validation off, `equals` against a name the enum lacks is constant false for every row,
             /// so the conversion below must not throw; `KeyCondition` folds the same way.
             if (function_name == "equals" && !validate_enum_literals_in_operators && isUnknownEnumElement(*actual_type, value_field))
@@ -1125,7 +1125,7 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
                 return true;
             }
 
-            auto converted_field = convertFieldToType(value_field, *actual_type, value_type.get());
+            auto converted_field = convertConstantForHash(value_field, value_type, actual_type);
             if (converted_field.isNull())
                 return false;
 
@@ -1170,35 +1170,9 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
         if (!array_type)
             return false;
 
-        /// `mapContainsKey`/`mapContainsValue`/`mapContains`, and `has` over a `Map`, are adapters
-        /// of the same arrayIndex.h machinery, so the constant must be coerced the same way as for
-        /// `has` over an array. The `mapKeys`/`mapValues` index expression strips the
-        /// `LowCardinality` wrapper of the key/value type, so the coercion mode must be read from
-        /// the `Map` type itself, not from the index header.
-        DataTypePtr element_type;
-        if (const auto * map_type = typeid_cast<const DataTypeMap *>(key_node.getDAGNode()->result_type.get()))
-        {
-            element_type = function_name == "mapContainsValue" ? map_type->getValueType() : map_type->getKeyType();
-
-            /// The `mapContains*` adapters run over the keys/values subcolumn, which keeps the
-            /// wrapper, so they compare against the dictionary. `has` over a `Map` instead goes
-            /// through `executeMap`, which rewrites the map to an array of its keys and strips
-            /// `LowCardinality` from both arguments before comparing (arrayIndex.h), so it compares
-            /// the raw padded bytes exactly like `has` over an `Array(String)`.
-            if (function_name == "has")
-                element_type = recursiveRemoveLowCardinality(element_type);
-        }
-
         out.function = RPNElement::FUNCTION_HAS;
         const DataTypePtr actual_type = BloomFilter::getPrimitiveType(array_type->getNestedType());
-
-        /// Without the `Map` type the padded and the coerced form cannot be told apart.
-        if (!element_type && searchFunctionCoercesConstant(value_type, actual_type))
-            return false;
-
-        Field converted_field = element_type
-            ? convertConstantForArrayIndexFunction(value_field, value_type, element_type, actual_type)
-            : convertFieldToType(value_field, *actual_type, value_type.get());
+        Field converted_field = convertConstantForHash(value_field, value_type, actual_type);
         if (converted_field.isNull())
             return false;
 
@@ -1243,31 +1217,37 @@ bool MergeTreeIndexConditionBloomFilter::traverseTreeEquals(
               * We cannot skip keys that does not exist in map if comparison is with default type value because
               * that way we skip necessary granules where the map key does not exist.
               */
-            if (value_field == value_type->getDefault())
+            if (equalsAbsentMapValue(value_field, value_type, key_node.getDAGNode()->result_type))
                 return false;
 
             size_t position = 0;
             Field const_value;
+            DataTypePtr const_type;
 
             if (map_info->has_keys_index)
             {
                 position = map_info->keys_index_position;
                 const_value = map_info->key_field;
+                const_type = map_info->key_type;
             }
             else if (map_info->has_values_index)
             {
                 position = map_info->values_index_position;
                 const_value = value_field;
+                const_type = value_type;
             }
             else
             {
                 return false;
             }
 
-            out.function = RPNElement::FUNCTION_EQUALS;
-
             const auto & index_type = header.getByPosition(position).type;
             const auto actual_type = BloomFilter::getPrimitiveType(index_type);
+            const_value = convertConstantForHash(const_value, const_type, actual_type);
+            if (const_value.isNull())
+                return false;
+
+            out.function = RPNElement::FUNCTION_EQUALS;
             out.predicate.emplace_back(std::make_pair(position, BloomFilterHash::hashWithField(actual_type.get(), const_value)));
 
             return true;

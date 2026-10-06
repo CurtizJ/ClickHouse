@@ -75,7 +75,7 @@ Bloom Filter Index
 2
 2
 Functions
--- hasAny and hasAll ignore the padding
+-- hasAny and hasAll compare zero-padded
 2
 2
 2
@@ -84,16 +84,16 @@ Functions
 2
 2
 2
--- has keeps the padding
-0
-0
+-- has compares zero-padded
 2
 2
--- mapContainsKey and mapContainsValue keep the padding
-0
-0
-0
-0
+2
+2
+-- mapContainsKey and mapContainsValue compare zero-padded
+2
+2
+2
+2
 2
 2
 -- startsWith and endsWith keep the padding

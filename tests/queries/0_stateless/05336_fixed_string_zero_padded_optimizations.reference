@@ -1,0 +1,31 @@
+-- redundant comparisons
+[1,5]
+[1,5]
+[0,2]
+[0,2]
+[]
+[]
+[]
+[]
+-- chain of equalities to IN
+[0,1,2,3,4,5,6,7]
+[0,1,2,3,4,5,6,7]
+[0,1,2,3]
+[0,1,2,3]
+[3,7]
+[3,7]
+-- arrayExists to has
+[0,1,2,4,5,6]
+[0,1,2,4,5,6]
+-- toFixedString is not injective for a String
+2
+2
+2
+2
+2
+2
+-- read in order: a String key compared with a FixedString constant is not fixed
+[0,1,2,4,5,6]
+[0,1,2,4,5,6]
+[0,2]
+[0,2]

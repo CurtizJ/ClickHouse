@@ -36,9 +36,11 @@
 #include <DataTypes/DataTypeMapHelpers.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeFixedString.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnTuple.h>
+#include <Columns/ColumnFixedString.h>
 #include <Columns/ColumnSet.h>
 #include <Functions/FunctionHelpers.h>
 
@@ -137,16 +139,7 @@ void TextSearchQuery::initializeHash()
     hash = hash_state.get128();
 }
 
-/// The type under `Nullable`, `LowCardinality` and one level of `Array`.
-static DataTypePtr removeArrayNullableLowCardinality(const DataTypePtr & type)
-{
-    auto inner_type = removeNullable(removeLowCardinality(type));
-    if (const auto * array_type = typeid_cast<const DataTypeArray *>(inner_type.get()))
-        inner_type = removeNullable(removeLowCardinality(array_type->getNestedType()));
-    return inner_type;
-}
-
-/// Appending zero bytes keeps every term of a value, so `FixedString` padding never hides one.
+/// Appending zero bytes keeps every term of a value.
 static bool tokenizerSplitsAtZeroByte(ITokenizer::Type type)
 {
     return type == ITokenizer::Type::SplitByNonAlpha
@@ -168,17 +161,14 @@ static bool isIndexedColumnArray(const Block & header)
     return isArray(removeNullableOrLowCardinalityNullable(header.getByPosition(0).type));
 }
 
-static std::optional<size_t> tryGetIndexedFixedStringSize(const Block & header)
+/// The type of the values the index stores terms of: the element type of an `Array` column.
+static DataTypePtr getIndexedStringType(const Block & header)
 {
     /// A text index is always defined on a single expression.
     if (header.columns() != 1)
-        return std::nullopt;
+        return std::make_shared<DataTypeString>();
 
-    auto element_type = removeArrayNullableLowCardinality(header.getByPosition(0).type);
-    if (const auto * fixed_string_type = typeid_cast<const DataTypeFixedString *>(element_type.get()))
-        return fixed_string_type->getN();
-
-    return std::nullopt;
+    return MergeTreeIndexText::getNestedDataType(header.getByPosition(0).type);
 }
 
 MergeTreeIndexConditionText::MergeTreeIndexConditionText(
@@ -196,7 +186,7 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     , header(index_sample_block)
     , json_argument_types(std::move(json_argument_types_))
     , indexed_column_is_array(isIndexedColumnArray(header))
-    , indexed_fixed_string_size(tryGetIndexedFixedStringSize(header))
+    , indexed_string_type(getIndexedStringType(header))
     , normalized_index_column_name(normalized_index_column_name_)
     , columns_shadowing_map_subcolumns(std::move(columns_shadowing_map_subcolumns_))
     , owned_tokenizer(tokenizer_ && tokenizer_->isStateful() ? std::shared_ptr<const ITokenizer>(tokenizer_->clone()) : nullptr)
@@ -1111,73 +1101,37 @@ static void validateRegexpPatterns(const Array & patterns, const Settings & sett
 #endif
 }
 
-/// How a function treats the trailing zero bytes of a `FixedString` needle.
-enum class FixedStringPaddingSemantics
+/// The functions comparing the needle with a whole value. A `FixedString` on either side drops trailing zero bytes,
+/// so every value they match equals the needle up to trailing zero bytes.
+static bool comparesWholeValue(const String & function_name)
 {
-    NeedleAsTyped,   /// `has`, `mapContainsKey`, `mapContainsValue`
-    NeedleStripped,  /// `hasAny`, `hasAll`: the needle is cast to `String`
-    BothStripped,    /// `equals`, `IN`: the value loses its trailing zero bytes as well
-};
-
-/// What stays constant while one needle is normalized.
-struct FixedStringNeedleContext
-{
-    FixedStringPaddingSemantics semantics;
-    std::optional<size_t> indexed_fixed_string_size;
-    bool padding_never_in_terms;
-};
-
-static std::optional<FixedStringPaddingSemantics> fixedStringPaddingSemantics(const String & function_name)
-{
-    if (function_name == "equals")
-        return FixedStringPaddingSemantics::BothStripped;
-    if (function_name == "hasAny" || function_name == "hasAll")
-        return FixedStringPaddingSemantics::NeedleStripped;
-    if (function_name == "has" || function_name == "mapContainsKey" || function_name == "mapContainsValue")
-        return FixedStringPaddingSemantics::NeedleAsTyped;
-    return std::nullopt;
+    return function_name == "equals" || function_name == "has" || function_name == "hasAny" || function_name == "hasAll"
+        || function_name == "mapContainsKey" || function_name == "mapContainsValue";
 }
 
-static std::string_view withoutTrailingZeros(std::string_view value)
+/// Rewrites the needle of such a comparison in place to a form whose terms every matching value has; false when there is none.
+bool MergeTreeIndexConditionText::tryNormalizeNeedlePadding(String & needle, const DataTypePtr & needle_type) const
 {
-    return value.substr(0, value.find_last_not_of('\0') + 1);
-}
-
-/// Strips or re-pads the needle's trailing zero bytes in place to the form the index stores; false when no single form covers every match.
-static bool tryNormalizeNeedlePadding(String & needle, bool needle_is_fixed_string, const FixedStringNeedleContext & context)
-{
-    const bool both_stripped = context.semantics == FixedStringPaddingSemantics::BothStripped;
-    const size_t stripped_size = withoutTrailingZeros(needle).size();
-
-    if (context.indexed_fixed_string_size)
+    auto match = matchStoredString(needle, needle_type, indexed_string_type);
+    switch (match.kind)
     {
-        /// The column stores its values padded to N and compares them without the padding.
-        if (both_stripped || needle_is_fixed_string)
-            needle.resize(stripped_size);
-        /// A `String` needle keeps its zero bytes for these functions and then matches nothing.
-        else if (needle.ends_with('\0'))
+        case StoredStringMatch::Kind::None:
             return false;
-
-        if (needle.size() > *context.indexed_fixed_string_size)
-            return false;
-
-        needle.resize(*context.indexed_fixed_string_size, '\0');
-        return true;
+        case StoredStringMatch::Kind::Exact:
+            break;
+        case StoredStringMatch::Kind::WithTrailingZeros:
+            /// The terms of the value are in every value with zero bytes appended only if the tokenizer splits at the zero byte.
+            if (has_preprocessor || !tokenizerSplitsAtZeroByte(tokenizer->getType()))
+                return false;
+            break;
     }
 
-    if (!needle_is_fixed_string || context.semantics == FixedStringPaddingSemantics::NeedleAsTyped)
-        return true;
-
-    /// A value with any number of trailing zero bytes matches, so one lookup covers them only if none can end up in a term.
-    if (both_stripped && stripped_size != needle.size() && !context.padding_never_in_terms)
-        return false;
-
-    needle.resize(stripped_size);
+    needle = std::move(match.value);
     return true;
 }
 
 /// Same, elementwise for arrays.
-static bool tryNormalizeNeedlePadding(Field & value, const DataTypePtr & value_type, const FixedStringNeedleContext & context)
+bool MergeTreeIndexConditionText::tryNormalizeNeedlePadding(Field & value, const DataTypePtr & value_type) const
 {
     auto inner_type = removeNullable(removeLowCardinality(value_type));
 
@@ -1186,7 +1140,7 @@ static bool tryNormalizeNeedlePadding(Field & value, const DataTypePtr & value_t
     {
         for (auto & element : value.safeGet<Array>())
         {
-            if (!tryNormalizeNeedlePadding(element, array_type->getNestedType(), context))
+            if (!tryNormalizeNeedlePadding(element, array_type->getNestedType()))
                 return false;
         }
         return true;
@@ -1195,20 +1149,14 @@ static bool tryNormalizeNeedlePadding(Field & value, const DataTypePtr & value_t
     if (value.getType() != Field::Types::String)
         return true;
 
-    return tryNormalizeNeedlePadding(value.safeGet<String>(), isFixedString(inner_type), context);
+    return tryNormalizeNeedlePadding(value.safeGet<String>(), inner_type);
 }
 
 /// The value an absent map key reads: `''`, or all NUL when the value type is `FixedString`.
 /// `mapValues` stores neither.
-static bool isMapValueDefault(std::string_view value, const Block & header)
+bool MergeTreeIndexConditionText::isMapValueDefault(std::string_view value) const
 {
-    /// A text index is always defined on a single expression.
-    chassert(header.columns() == 1);
-    auto value_type = removeNullable(removeLowCardinality(header.getByPosition(0).type));
-    if (const auto * array_type = typeid_cast<const DataTypeArray *>(value_type.get()))
-        value_type = removeNullable(removeLowCardinality(array_type->getNestedType()));
-
-    return value.empty() || (isFixedString(value_type) && value.find_first_not_of('\0') == std::string_view::npos);
+    return value.empty() || (isFixedString(indexed_string_type) && value.find_first_not_of('\0') == std::string_view::npos);
 }
 
 bool MergeTreeIndexConditionText::traverseFunctionNode(
@@ -1268,7 +1216,7 @@ bool MergeTreeIndexConditionText::traverseFunctionNode(
             auto & [map_column_name, _] = *parsed;
             if (header.has(fmt::format("mapValues({})", map_column_name))
                 && value_field.getType() == Field::Types::String
-                && !isMapValueDefault(value_field.safeGet<String>(), header))
+                && !isMapValueDefault(value_field.safeGet<String>()))
             {
                 has_index_column = true;
                 direct_read_mode = getHintOrNoneMode();
@@ -1284,18 +1232,8 @@ bool MergeTreeIndexConditionText::traverseFunctionNode(
     if (!value_data_type.isStringOrFixedString() && !value_data_type.isArray())
         return false;
 
-    /// A `FixedString` on either side drops trailing zero bytes in the comparison.
-    if (auto semantics = fixedStringPaddingSemantics(function_name);
-        semantics && (indexed_fixed_string_size || isFixedString(removeArrayNullableLowCardinality(value_type))))
-    {
-        const FixedStringNeedleContext context{
-            .semantics = *semantics,
-            .indexed_fixed_string_size = indexed_fixed_string_size,
-            .padding_never_in_terms = !has_preprocessor && tokenizerSplitsAtZeroByte(tokenizer->getType()),
-        };
-        if (!tryNormalizeNeedlePadding(value_field, value_type, context))
-            return false;
-    }
+    if (comparesWholeValue(function_name) && !tryNormalizeNeedlePadding(value_field, value_type))
+        return false;
 
     const auto & settings = getContext()->getSettingsRef();
 
@@ -2146,7 +2084,7 @@ bool MergeTreeIndexConditionText::traverseMapElementValueNode(const RPNBuilderTr
     /// for functions like `func(arrayElement(m, 'const_key'), ...)`.
     /// If index can be used, than we can analyze the index as for scalar string column
     /// because `arrayElement(m, 'const_key')` projects Array(String) to String.
-    if (const_value.getType() != Field::Types::String || isMapValueDefault(const_value.safeGet<String>(), header))
+    if (const_value.getType() != Field::Types::String || isMapValueDefault(const_value.safeGet<String>()))
         return false;
 
     return hasIndexForMapElementValue(index_column_node);
@@ -2280,14 +2218,12 @@ bool MergeTreeIndexConditionText::tryPrepareSetForTextSearch(
         return false;
 
     size_t total_row_count = prepared_set->getTotalRowCount();
-    const bool set_is_fixed_string = WhichDataType(set_column_values.getDataType()).isFixedString();
-    /// `IN` casts the value to the set's type, so a `FixedString` on either side drops trailing zero bytes like `equals`.
-    const bool has_fixed_string = set_is_fixed_string || indexed_fixed_string_size.has_value();
-    const FixedStringNeedleContext context{
-        .semantics = FixedStringPaddingSemantics::BothStripped,
-        .indexed_fixed_string_size = indexed_fixed_string_size,
-        .padding_never_in_terms = !has_preprocessor && tokenizerSplitsAtZeroByte(tokenizer->getType()),
-    };
+    /// `IN` compares a set element with the value like `equals`, see tryNormalizeNeedlePadding.
+    const auto * set_fixed_string_column = typeid_cast<const ColumnFixedString *>(&set_column_values);
+    const DataTypePtr set_element_type = set_fixed_string_column
+        ? DataTypePtr(std::make_shared<DataTypeFixedString>(set_fixed_string_column->getN()))
+        : DataTypePtr(std::make_shared<DataTypeString>());
+    const bool has_fixed_string = set_fixed_string_column || isFixedString(indexed_string_type);
     String normalized;
 
     for (size_t row = 0; row < total_row_count; ++row)
@@ -2305,7 +2241,7 @@ bool MergeTreeIndexConditionText::tryPrepareSetForTextSearch(
         if (has_fixed_string)
         {
             normalized.assign(element);
-            if (!tryNormalizeNeedlePadding(normalized, set_is_fixed_string, context))
+            if (!tryNormalizeNeedlePadding(normalized, set_element_type))
             {
                 out.text_search_queries.clear();
                 return false;
@@ -2316,7 +2252,7 @@ bool MergeTreeIndexConditionText::tryPrepareSetForTextSearch(
         /// Reject the index usage when there is an empty string in the set.
         /// The condition with such a predicate will be always true on granule.
         /// See MergeTreeIndexGranuleText::hasAllQueryTokensOrEmpty.
-        if (element.empty() || (has_index_for_map_element_value && isMapValueDefault(element, header)))
+        if (element.empty() || (has_index_for_map_element_value && isMapValueDefault(element)))
         {
             out.text_search_queries.clear();
             return false;

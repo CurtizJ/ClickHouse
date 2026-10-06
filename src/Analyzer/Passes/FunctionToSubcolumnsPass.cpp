@@ -1,4 +1,6 @@
 #include <Analyzer/Passes/FunctionToSubcolumnsPass.h>
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/IDataType.h>
 #include <DataTypes/DataTypeString.h>
 
@@ -401,9 +403,21 @@ void optimizeFunctionArrayElementForMap(QueryTreeNodePtr & node, FunctionNode & 
 
     const auto & data_type_map = assert_cast<const DataTypeMap &>(*ctx.column.type);
     const auto & key_type = data_type_map.getKeyType();
+    Field key = second_argument_constant_node->getValue();
+
+    /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`): the subcolumn is that of the
+    /// stored key equal to the constant, and a constant equal to several stored keys has no single subcolumn.
+    if (key.getType() == Field::Types::String && isStringOrFixedString(removeLowCardinalityAndNullable(key_type)))
+    {
+        auto match = matchStoredString(key.safeGet<String>(), second_argument_constant_node->getResultType(), key_type);
+        if (match.kind != StoredStringMatch::Kind::Exact)
+            return;
+        key = std::move(match.value);
+    }
+
     auto tmp_key_column = key_type->createColumn();
     /// Verify that the constant value is compatible with the map's key type.
-    if (!tmp_key_column->tryInsert(second_argument_constant_node->getValue()))
+    if (!tmp_key_column->tryInsert(key))
     {
         /// A map with Enum keys can also be indexed by the name of the enum value,
         /// so convert the name to the numeric value of the enum.
@@ -651,14 +665,6 @@ void optimizeFunctionHasForMap(QueryTreeNodePtr &, FunctionNode & function_node,
 {
     /// Replace `has(map_argument, argument)` and `notHas(map_argument, argument)` with the same
     /// function over `map_argument.keys`.
-    const auto & data_type_map = assert_cast<const DataTypeMap &>(*ctx.column.type);
-
-    /// The Map implementation removes LowCardinality before comparing keys. Rewriting to the
-    /// keys subcolumn would use the Array(LowCardinality) path and can change comparisons for
-    /// values such as a FixedString needle wider than the Map key type.
-    if (WhichDataType(data_type_map.getKeyType()).isLowCardinality())
-        return;
-
     if (optimizeMapFunctionToKeys(function_node, ctx))
     {
         const auto function_name = function_node.getFunctionName();

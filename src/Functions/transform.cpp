@@ -12,6 +12,7 @@
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/getLeastSupertype.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunction.h>
@@ -71,6 +72,11 @@ namespace
         ColumnPtr from_column;
         ColumnPtr to_column;
         ColumnPtr default_column;
+
+        /// Set when the input and the elements of the `from` array compare zero-padded (see `FixedStringZeroPadding.h`):
+        /// both are then looked up in this type, without the trailing zero bytes the rule ignores.
+        DataTypePtr zero_padded_lookup_type;
+        DataTypePtr from_element_type;
 
         bool is_empty = false;
     };
@@ -181,6 +187,14 @@ namespace
             if (isColumnConst(*in))
                 return executeConst(arguments, result_type, input_rows_count);
 
+            ColumnPtr in_zero_padded;
+            if (cache->zero_padded_lookup_type)
+            {
+                in_zero_padded = removePaddingForComparison(
+                    castColumn(arguments[0], cache->zero_padded_lookup_type), arguments[0].type, cache->from_element_type);
+                in = in_zero_padded.get();
+            }
+
             ColumnPtr default_non_const;
             if (!cache->default_column && arguments.size() == 4)
             {
@@ -202,6 +216,10 @@ namespace
             ColumnPtr in_cast = arguments[0].column;
             if (arguments.size() == 3)
                 in_cast = castColumn(arguments[0], result_type);
+
+            /// An unmatched value is returned as it is, not without its trailing zero bytes.
+            if (cache->zero_padded_lookup_type && !cache->default_column && !default_non_const)
+                default_non_const = in_cast;
 
             auto column_result = result_type->createColumn();
             if (cache->is_empty)
@@ -731,13 +749,25 @@ namespace
         const DataTypePtr & from_array_nested_type
             = typeid_cast<const DataTypeArray &>(*arguments[1].type).getNestedType();
 
-        cache->from_column = castColumn(
-            {
-                from_column_uncast,
-                from_array_nested_type,
-                arguments[1].name
-            },
-            from_type);
+        if (comparesZeroPadded(from_type, from_array_nested_type))
+        {
+            cache->zero_padded_lookup_type = recursiveRemoveLowCardinality(getLeastSupertype(DataTypes{from_type, from_array_nested_type}));
+            cache->from_element_type = from_array_nested_type;
+            cache->from_column = removePaddingForComparison(
+                castColumn({from_column_uncast, from_array_nested_type, arguments[1].name}, cache->zero_padded_lookup_type),
+                from_type,
+                from_array_nested_type);
+        }
+        else
+        {
+            cache->from_column = castColumn(
+                {
+                    from_column_uncast,
+                    from_array_nested_type,
+                    arguments[1].name
+                },
+                from_type);
+        }
 
         cache->to_column = castColumn(
             {
@@ -787,13 +817,16 @@ namespace
             }
         }
 
-        WhichDataType which(from_type);
+        const DataTypePtr & lookup_type = cache->zero_padded_lookup_type ? cache->zero_padded_lookup_type : from_type;
+        WhichDataType which(lookup_type);
 
         /// A `String`/`FixedString` entry that is not an `Enum` member is already rejected by the cast
         /// above, and comparing it below would put the member's numeric value against its name.
         /// A numeric entry is cast without a membership check, so it still needs the comparison.
         const bool cast_checked_enum_membership = isEnum(removeNullable(from_type))
             && isStringOrFixedString(removeNullable(from_array_nested_type));
+        /// A zero-padded entry is kept as it is: an entry no input value equals is never looked up.
+        const bool keep_every_entry = cast_checked_enum_membership || cache->zero_padded_lookup_type;
 
         /// Field may be of Float type, but for the purpose of bitwise equality we can treat them as UInt64
         if (isNativeNumber(which) || which.isDecimal32() || which.isDecimal64() || which.isEnum())
@@ -802,7 +835,7 @@ namespace
             auto & table = *cache->table_num_to_idx;
             for (size_t i = 0; i < size; ++i)
             {
-                if (cast_checked_enum_membership || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
+                if (keep_every_entry || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
                 {
                     UInt64 key = 0;
                     auto * dst = reinterpret_cast<char *>(&key);
@@ -819,13 +852,13 @@ namespace
                 }
             }
         }
-        else if (from_type->isValueUnambiguouslyRepresentedInContiguousMemoryRegion())
+        else if (lookup_type->isValueUnambiguouslyRepresentedInContiguousMemoryRegion())
         {
             cache->table_string_to_idx = std::make_unique<TransformCache::StringToIdx>();
             auto & table = *cache->table_string_to_idx;
             for (size_t i = 0; i < size; ++i)
             {
-                if (cast_checked_enum_membership || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
+                if (keep_every_entry || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
                 {
                     std::string_view ref = cache->from_column->getDataAt(i);
                     table.insertIfNotPresent(ref, i);
@@ -838,7 +871,7 @@ namespace
             auto & table = *cache->table_anything_to_idx;
             for (size_t i = 0; i < size; ++i)
             {
-                if (cast_checked_enum_membership || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
+                if (keep_every_entry || accurateEquals((*cache->from_column)[i], (*from_column_uncast)[i]))
                 {
                     SipHash hash;
                     cache->from_column->updateHashWithValue(i, hash);

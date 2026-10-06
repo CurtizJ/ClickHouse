@@ -19,7 +19,7 @@ foo	foo
 foo	foo
 foo	foo
 bar	bar
-\N
+3
 ...tuple values...
 (1,'foo')	\N
 ...map values...

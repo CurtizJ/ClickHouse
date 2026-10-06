@@ -570,10 +570,12 @@ Field stripFixedStringPaddingForTerms(const Field & field, const DataTypePtr & t
     return field;
 }
 
-/// These functions compare a `FixedString` constant through the `String` supertype, which drops the trailing zero padding.
+/// These functions compare a `FixedString` constant zero-padded, see `FixedStringZeroPadding.h`.
 bool functionIgnoresFixedStringPadding(const String & function_name)
 {
-    return function_name == "equals" || function_name == "notEquals" || function_name == "hasAny" || function_name == "hasAll";
+    return function_name == "equals" || function_name == "notEquals" || function_name == "has" || function_name == "hasAny"
+        || function_name == "hasAll" || function_name == "mapContainsKey" || function_name == "mapContainsValue"
+        || function_name == "mapContains";
 }
 
 }

@@ -12,9 +12,8 @@ SETTINGS index_granularity = 1;
 
 INSERT INTO test_not_has_fs VALUES (toFixedString('V0', 3)), (toFixedString('abc', 3));
 
--- `has` compares the original `String` element with the `FixedString` value byte-for-byte, so the
--- unpadded literal 'V0' does not match the stored 'V0\0'. The set index would pad the element to
--- `FixedString(3)` and match, so no set atom must be built: `notHas` must return the row.
+-- `has` compares the `String` element with the `FixedString` value zero-padded, so the literal 'V0'
+-- matches the stored 'V0\0'.
 SELECT count() FROM test_not_has_fs WHERE notHas(['V0'], fs) SETTINGS optimize_rewrite_has_to_in = 0;
 SELECT count() FROM test_not_has_fs WHERE has(['V0'], fs) SETTINGS optimize_rewrite_has_to_in = 0;
 SELECT trimLeft(explain) FROM (EXPLAIN indexes = 1 SELECT count() FROM test_not_has_fs WHERE notHas(['V0'], fs) SETTINGS optimize_rewrite_has_to_in = 0) WHERE explain LIKE '%Condition%' OR explain LIKE '%Granules:%/%';
@@ -26,8 +25,8 @@ SELECT trimLeft(explain) FROM (EXPLAIN indexes = 1 SELECT count() FROM test_not_
 
 DROP TABLE test_not_has_fs;
 
--- The other direction: `FixedString` element against a `String` key is declined as well, because
--- the cast to `String` keeps the zero bytes while comparisons could involve padding differences.
+-- The other direction: a `FixedString` element matches a `String` key with any number of trailing
+-- zero bytes, so no exact set atom is built.
 DROP TABLE IF EXISTS test_not_has_s;
 CREATE TABLE test_not_has_s (s String) ENGINE = MergeTree
 ORDER BY s

@@ -83,8 +83,8 @@ WHERE notHas(m, 'debug')
 ORDER BY id
 SETTINGS optimize_functions_to_subcolumns = 0;
 
--- LowCardinality Map keys must not be rewritten. Map comparison strips LowCardinality before
--- comparing, so a wider FixedString needle has different semantics from the keys subcolumn.
+-- LowCardinality Map keys are rewritten too: the keys subcolumn compares a FixedString needle
+-- zero-padded, as the Map does.
 DROP TABLE IF EXISTS t_map_has_subcolumn_lc;
 
 CREATE TABLE t_map_has_subcolumn_lc
@@ -101,11 +101,11 @@ INSERT INTO t_map_has_subcolumn_lc VALUES
     (2, {'X': 3}),
     (3, {});
 
-SELECT count() = 0
+SELECT count() > 0
 FROM (EXPLAIN actions = 1 SELECT id FROM t_map_has_subcolumn_lc WHERE has(m, toFixedString('K1', 3)))
 WHERE explain LIKE '%m.keys%';
 
-SELECT count() = 0
+SELECT count() > 0
 FROM (EXPLAIN actions = 1 SELECT id FROM t_map_has_subcolumn_lc WHERE notHas(m, toFixedString('K1', 3)))
 WHERE explain LIKE '%m.keys%';
 

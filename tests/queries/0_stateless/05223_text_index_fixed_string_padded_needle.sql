@@ -25,17 +25,20 @@ INSERT INTO t_text_padded_needle SELECT 3, 'hello';
 SELECT '---- the same rows with and without the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id);
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 5) ORDER BY id) SETTINGS use_skip_indexes = 0;
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 5) ORDER BY id);
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT toFixedString('hello', 10)) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT toFixedString('hello', 10)) ORDER BY id);
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT fs FROM t_text_padded_needles) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT fs FROM t_text_padded_needles) ORDER BY id);
 
-SELECT '---- a padded needle declines the index';
+SELECT '---- a FixedString needle declines the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT fs FROM t_text_padded_needles) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+-- Even without padding: `equals` also matches the value followed by zero bytes.
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
 
-SELECT '---- a needle that carries no padding still prunes';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT '---- a String needle still prunes';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = 'hello' ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
@@ -65,7 +68,7 @@ DROP TABLE t_text_padded_needle;
 
 SELECT '-- splitByNonAlpha tokenizer with a preprocessor on a String column';
 
--- A preprocessor may rewrite the padding forms apart, so a padded needle declines the index.
+-- A preprocessor may rewrite the padding forms apart, so a FixedString needle declines the index.
 CREATE TABLE t_text_padded_needle (id UInt32, s String, INDEX tix s TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(s)))
 ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 
@@ -77,17 +80,18 @@ SELECT '---- the same rows with and without the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id);
 
-SELECT '---- a padded needle declines the index';
+SELECT '---- a FixedString needle declines the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
 
-SELECT '---- a needle that carries no padding still prunes';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT '---- a String needle still prunes';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = 'world' ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 
 SELECT '-- splitByString tokenizer with the zero byte as a separator on a String column';
 
--- The separators are not inspected, so every `splitByString` index declines a padded needle.
+-- The separators are not inspected, so every `splitByString` index declines a FixedString needle.
 CREATE TABLE t_text_padded_needle (id UInt32, s String, INDEX tix s TYPE text(tokenizer = splitByString(['\0'])))
 ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 
@@ -99,17 +103,18 @@ SELECT '---- the same rows with and without the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id);
 
-SELECT '---- a padded needle declines the index';
+SELECT '---- a FixedString needle declines the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
 
-SELECT '---- a needle that carries no padding still prunes';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT '---- a String needle still prunes';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = 'world' ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 
 SELECT '-- splitByString tokenizer with another separator on a String column';
 
--- The zero byte is not a separator here, so the two padding forms are two terms and the index declines.
+-- The zero byte is not a separator here, so the padding forms are different terms and the index declines.
 CREATE TABLE t_text_padded_needle (id UInt32, s String, INDEX tix s TYPE text(tokenizer = splitByString([','])))
 ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 
@@ -121,17 +126,18 @@ SELECT '---- the same rows with and without the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id);
 
-SELECT '---- a padded needle declines the index';
+SELECT '---- a FixedString needle declines the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello', 10) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
 
-SELECT '---- a needle that carries no padding still prunes';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 5) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT '---- a String needle still prunes';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = 'world' ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 
 SELECT '-- array tokenizer on an Array(String) column';
 
--- `hasAny` and `hasAll` drop only the needle's padding, so the stripped form is the only match.
+-- A FixedString needle equals elements with any number of trailing zero bytes, which are different terms, so it declines the index.
 CREATE TABLE t_text_padded_needle (id UInt32, arr Array(String), INDEX tix arr TYPE text(tokenizer = array))
 ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 
@@ -145,10 +151,12 @@ SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAll(arr, [toFixedString('hello', 10), toFixedString('foo', 10)]) ORDER BY id) SETTINGS use_skip_indexes = 0;
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAll(arr, [toFixedString('hello', 10), toFixedString('foo', 10)]) ORDER BY id);
 
-SELECT '---- a padded element still prunes';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, [toFixedString('hello', 10)]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAll(arr, [toFixedString('hello', 10), toFixedString('foo', 10)]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, [toFixedString('world', 10)]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT '---- a FixedString needle declines the index';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, [toFixedString('hello', 10)]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAll(arr, [toFixedString('hello', 10), toFixedString('foo', 10)]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+
+SELECT '---- a String needle still prunes';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, ['world']) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 
@@ -180,10 +188,12 @@ SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixe
 
 SELECT '---- the needle is looked up at the column width and prunes';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = 'world' ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = concat('hello', unhex('00')) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('world', 10) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT toFixedString('world', 6)) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s IN (SELECT fs FROM t_text_padded_needles) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+
+SELECT '---- a String needle with a literal trailing zero byte is looked up padded too';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = concat('hello', unhex('00')) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 SELECT '---- a needle longer than the column declines the index';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE s = toFixedString('hello, world', 12) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
@@ -192,7 +202,7 @@ DROP TABLE t_text_padded_needle;
 
 SELECT '-- array tokenizer on an Array(FixedString) column';
 
--- A `String` needle keeps its trailing zero bytes and matches nothing; exact direct read must not answer it.
+-- Every needle compares zero-padded with the elements, so it is looked up padded to the element width.
 CREATE TABLE t_text_padded_needle (id UInt32, arr Array(FixedString(6)), INDEX tix arr TYPE text(tokenizer = array))
 ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1;
 
@@ -222,9 +232,9 @@ SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAll(arr
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE has(arr, 'world') ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE has(arr, toFixedString('world', 10)) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
-SELECT '---- a String needle with a literal trailing zero byte declines the index';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, [concat('hello', unhex('00'))]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE has(arr, concat('hello', unhex('00'))) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT '---- a String needle with a literal trailing zero byte prunes too';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE hasAny(arr, [concat('hello', unhex('00'))]) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE has(arr, concat('hello', unhex('00'))) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 
@@ -247,8 +257,8 @@ SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE mapContain
 SELECT '---- the needle is looked up at the column width and prunes';
 SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE mapContainsKey(m, 'world') ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
-SELECT '---- a String needle with a literal trailing zero byte declines the index';
-SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE mapContainsKey(m, concat('hello', unhex('00'))) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix'; -- { serverError INDEX_NOT_USED }
+SELECT '---- a String needle with a literal trailing zero byte prunes too';
+SELECT groupArray(id) FROM (SELECT id FROM t_text_padded_needle WHERE mapContainsKey(m, concat('hello', unhex('00'))) ORDER BY id) SETTINGS force_data_skipping_indices = 'tix';
 
 DROP TABLE t_text_padded_needle;
 DROP TABLE t_text_padded_needles;

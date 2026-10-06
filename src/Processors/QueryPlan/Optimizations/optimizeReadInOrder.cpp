@@ -1,4 +1,6 @@
 #include <Columns/ColumnConst.h>
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
@@ -222,6 +224,28 @@ using FixedColumns = std::unordered_set<const ActionsDAG::Node *>;
 
 /// Right now we find only simple cases like 'and(..., and(..., and(column = value, ...), ...'
 /// Injective functions are supported here. For a condition 'injectiveFunction(x) = 5' column 'x' is fixed.
+/// Whether `equals` of a column with constants holds for several values of the column: a `FixedString` constant also
+/// equals a `String` value with trailing zero bytes appended, see `FixedStringZeroPadding.h`.
+bool equalsMatchesSeveralValues(const ActionsDAG::Node & equals, const ActionsDAG::Node & column)
+{
+    if (!isStringOrFixedString(removeLowCardinalityAndNullable(column.result_type)))
+        return false;
+
+    for (const auto * child : equals.children)
+    {
+        const auto * column_const = child->column ? typeid_cast<const ColumnConst *>(child->column.get()) : nullptr;
+        if (!column_const)
+            continue;
+
+        Field value = column_const->getField();
+        if (value.getType() == Field::Types::String
+            && matchStoredString(value.safeGet<String>(), child->result_type, column.result_type).kind
+                == StoredStringMatch::Kind::WithTrailingZeros)
+            return true;
+    }
+    return false;
+}
+
 void appendFixedColumnsFromFilterExpression(const ActionsDAG::Node & filter_expression, FixedColumns & fixed_columns)
 {
     std::stack<const ActionsDAG::Node *> stack;
@@ -253,7 +277,8 @@ void appendFixedColumnsFromFilterExpression(const ActionsDAG::Node & filter_expr
                         maybe_fixed_column = child;
                 }
 
-                if (maybe_fixed_column && num_constant_columns + 1 == node->children.size())
+                if (maybe_fixed_column && num_constant_columns + 1 == node->children.size()
+                    && !equalsMatchesSeveralValues(*node, *maybe_fixed_column))
                 {
                     //std::cerr << "====== Added fixed column " << maybe_fixed_column->result_name << ' ' << static_cast<const void *>(maybe_fixed_column) << std::endl;
                     fixed_columns.insert(maybe_fixed_column);

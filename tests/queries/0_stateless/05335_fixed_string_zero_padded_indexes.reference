@@ -1,0 +1,296 @@
+-- String column
+primary key	v = toFixedString(\'ab\', 2)	3	1
+minmax	v = toFixedString(\'ab\', 2)	3	1
+set	v = toFixedString(\'ab\', 2)	3	1
+bloom_filter	v = toFixedString(\'ab\', 2)	3	1
+tokenbf_v1	v = toFixedString(\'ab\', 2)	3	1
+ngrambf_v1	v = toFixedString(\'ab\', 2)	3	1
+text_array	v = toFixedString(\'ab\', 2)	3	1
+text_splitByNonAlpha	v = toFixedString(\'ab\', 2)	3	1
+primary key	v IN (toFixedString(\'ab\', 2))	3	1
+minmax	v IN (toFixedString(\'ab\', 2))	3	1
+set	v IN (toFixedString(\'ab\', 2))	3	1
+bloom_filter	v IN (toFixedString(\'ab\', 2))	3	1
+tokenbf_v1	v IN (toFixedString(\'ab\', 2))	3	1
+ngrambf_v1	v IN (toFixedString(\'ab\', 2))	3	1
+text_array	v IN (toFixedString(\'ab\', 2))	3	1
+text_splitByNonAlpha	v IN (toFixedString(\'ab\', 2))	3	1
+primary key	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+minmax	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+set	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+bloom_filter	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+tokenbf_v1	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+ngrambf_v1	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+text_array	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+text_splitByNonAlpha	v IN (SELECT toFixedString(\'ab\', 2))	3	1
+primary key	v = toFixedString(\'ab\', 4)	3	1
+minmax	v = toFixedString(\'ab\', 4)	3	1
+set	v = toFixedString(\'ab\', 4)	3	1
+bloom_filter	v = toFixedString(\'ab\', 4)	3	1
+tokenbf_v1	v = toFixedString(\'ab\', 4)	3	1
+ngrambf_v1	v = toFixedString(\'ab\', 4)	3	1
+text_array	v = toFixedString(\'ab\', 4)	3	1
+text_splitByNonAlpha	v = toFixedString(\'ab\', 4)	3	1
+primary key	v IN (toFixedString(\'ab\', 4))	3	1
+minmax	v IN (toFixedString(\'ab\', 4))	3	1
+set	v IN (toFixedString(\'ab\', 4))	3	1
+bloom_filter	v IN (toFixedString(\'ab\', 4))	3	1
+tokenbf_v1	v IN (toFixedString(\'ab\', 4))	3	1
+ngrambf_v1	v IN (toFixedString(\'ab\', 4))	3	1
+text_array	v IN (toFixedString(\'ab\', 4))	3	1
+text_splitByNonAlpha	v IN (toFixedString(\'ab\', 4))	3	1
+primary key	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+minmax	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+set	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+bloom_filter	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+tokenbf_v1	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+ngrambf_v1	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+text_array	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+text_splitByNonAlpha	v IN (SELECT toFixedString(\'ab\', 4))	3	1
+primary key	v = \'ab\'	1	1
+minmax	v = \'ab\'	1	1
+set	v = \'ab\'	1	1
+bloom_filter	v = \'ab\'	1	1
+tokenbf_v1	v = \'ab\'	1	1
+ngrambf_v1	v = \'ab\'	1	1
+text_array	v = \'ab\'	1	1
+text_splitByNonAlpha	v = \'ab\'	1	1
+primary key	v IN (\'ab\')	1	1
+minmax	v IN (\'ab\')	1	1
+set	v IN (\'ab\')	1	1
+bloom_filter	v IN (\'ab\')	1	1
+tokenbf_v1	v IN (\'ab\')	1	1
+ngrambf_v1	v IN (\'ab\')	1	1
+text_array	v IN (\'ab\')	1	1
+text_splitByNonAlpha	v IN (\'ab\')	1	1
+primary key	v IN (SELECT \'ab\')	1	1
+minmax	v IN (SELECT \'ab\')	1	1
+set	v IN (SELECT \'ab\')	1	1
+bloom_filter	v IN (SELECT \'ab\')	1	1
+tokenbf_v1	v IN (SELECT \'ab\')	1	1
+ngrambf_v1	v IN (SELECT \'ab\')	1	1
+text_array	v IN (SELECT \'ab\')	1	1
+text_splitByNonAlpha	v IN (SELECT \'ab\')	1	1
+primary key	v = \'ab\\0\'	1	1
+minmax	v = \'ab\\0\'	1	1
+set	v = \'ab\\0\'	1	1
+bloom_filter	v = \'ab\\0\'	1	1
+tokenbf_v1	v = \'ab\\0\'	1	1
+ngrambf_v1	v = \'ab\\0\'	1	1
+text_array	v = \'ab\\0\'	1	1
+text_splitByNonAlpha	v = \'ab\\0\'	1	1
+primary key	v IN (\'ab\\0\')	1	1
+minmax	v IN (\'ab\\0\')	1	1
+set	v IN (\'ab\\0\')	1	1
+bloom_filter	v IN (\'ab\\0\')	1	1
+tokenbf_v1	v IN (\'ab\\0\')	1	1
+ngrambf_v1	v IN (\'ab\\0\')	1	1
+text_array	v IN (\'ab\\0\')	1	1
+text_splitByNonAlpha	v IN (\'ab\\0\')	1	1
+primary key	v IN (SELECT \'ab\\0\')	1	1
+minmax	v IN (SELECT \'ab\\0\')	1	1
+set	v IN (SELECT \'ab\\0\')	1	1
+bloom_filter	v IN (SELECT \'ab\\0\')	1	1
+tokenbf_v1	v IN (SELECT \'ab\\0\')	1	1
+ngrambf_v1	v IN (SELECT \'ab\\0\')	1	1
+text_array	v IN (SELECT \'ab\\0\')	1	1
+text_splitByNonAlpha	v IN (SELECT \'ab\\0\')	1	1
+primary key	v IN (\'ab\', \'zz\')	2	1
+minmax	v IN (\'ab\', \'zz\')	2	1
+set	v IN (\'ab\', \'zz\')	2	1
+bloom_filter	v IN (\'ab\', \'zz\')	2	1
+tokenbf_v1	v IN (\'ab\', \'zz\')	2	1
+ngrambf_v1	v IN (\'ab\', \'zz\')	2	1
+text_array	v IN (\'ab\', \'zz\')	2	1
+text_splitByNonAlpha	v IN (\'ab\', \'zz\')	2	1
+-- FixedString(4) column
+primary key	v = toFixedString(\'ab\', 2)	1	1
+minmax	v = toFixedString(\'ab\', 2)	1	1
+set	v = toFixedString(\'ab\', 2)	1	1
+bloom_filter	v = toFixedString(\'ab\', 2)	1	1
+tokenbf_v1	v = toFixedString(\'ab\', 2)	1	1
+ngrambf_v1	v = toFixedString(\'ab\', 2)	1	1
+text_array	v = toFixedString(\'ab\', 2)	1	1
+text_splitByNonAlpha	v = toFixedString(\'ab\', 2)	1	1
+primary key	v IN (toFixedString(\'ab\', 2))	1	1
+minmax	v IN (toFixedString(\'ab\', 2))	1	1
+set	v IN (toFixedString(\'ab\', 2))	1	1
+bloom_filter	v IN (toFixedString(\'ab\', 2))	1	1
+tokenbf_v1	v IN (toFixedString(\'ab\', 2))	1	1
+ngrambf_v1	v IN (toFixedString(\'ab\', 2))	1	1
+text_array	v IN (toFixedString(\'ab\', 2))	1	1
+text_splitByNonAlpha	v IN (toFixedString(\'ab\', 2))	1	1
+primary key	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+minmax	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+set	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+bloom_filter	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+tokenbf_v1	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+ngrambf_v1	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+text_array	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+text_splitByNonAlpha	v IN (SELECT toFixedString(\'ab\', 2))	1	1
+primary key	v = toFixedString(\'ab\', 6)	1	1
+minmax	v = toFixedString(\'ab\', 6)	1	1
+set	v = toFixedString(\'ab\', 6)	1	1
+bloom_filter	v = toFixedString(\'ab\', 6)	1	1
+tokenbf_v1	v = toFixedString(\'ab\', 6)	1	1
+ngrambf_v1	v = toFixedString(\'ab\', 6)	1	1
+text_array	v = toFixedString(\'ab\', 6)	1	1
+text_splitByNonAlpha	v = toFixedString(\'ab\', 6)	1	1
+primary key	v IN (toFixedString(\'ab\', 6))	1	1
+minmax	v IN (toFixedString(\'ab\', 6))	1	1
+set	v IN (toFixedString(\'ab\', 6))	1	1
+bloom_filter	v IN (toFixedString(\'ab\', 6))	1	1
+tokenbf_v1	v IN (toFixedString(\'ab\', 6))	1	1
+ngrambf_v1	v IN (toFixedString(\'ab\', 6))	1	1
+text_array	v IN (toFixedString(\'ab\', 6))	1	1
+text_splitByNonAlpha	v IN (toFixedString(\'ab\', 6))	1	1
+primary key	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+minmax	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+set	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+bloom_filter	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+tokenbf_v1	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+ngrambf_v1	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+text_array	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+text_splitByNonAlpha	v IN (SELECT toFixedString(\'ab\', 6))	1	1
+primary key	v = \'ab\'	1	1
+minmax	v = \'ab\'	1	1
+set	v = \'ab\'	1	1
+bloom_filter	v = \'ab\'	1	1
+tokenbf_v1	v = \'ab\'	1	1
+ngrambf_v1	v = \'ab\'	1	1
+text_array	v = \'ab\'	1	1
+text_splitByNonAlpha	v = \'ab\'	1	1
+primary key	v IN (\'ab\')	1	1
+minmax	v IN (\'ab\')	1	1
+set	v IN (\'ab\')	1	1
+bloom_filter	v IN (\'ab\')	1	1
+tokenbf_v1	v IN (\'ab\')	1	1
+ngrambf_v1	v IN (\'ab\')	1	1
+text_array	v IN (\'ab\')	1	1
+text_splitByNonAlpha	v IN (\'ab\')	1	1
+primary key	v IN (SELECT \'ab\')	1	1
+minmax	v IN (SELECT \'ab\')	1	1
+set	v IN (SELECT \'ab\')	1	1
+bloom_filter	v IN (SELECT \'ab\')	1	1
+tokenbf_v1	v IN (SELECT \'ab\')	1	1
+ngrambf_v1	v IN (SELECT \'ab\')	1	1
+text_array	v IN (SELECT \'ab\')	1	1
+text_splitByNonAlpha	v IN (SELECT \'ab\')	1	1
+primary key	v = \'ab\\0\'	1	1
+minmax	v = \'ab\\0\'	1	1
+set	v = \'ab\\0\'	1	1
+bloom_filter	v = \'ab\\0\'	1	1
+tokenbf_v1	v = \'ab\\0\'	1	1
+ngrambf_v1	v = \'ab\\0\'	1	1
+text_array	v = \'ab\\0\'	1	1
+text_splitByNonAlpha	v = \'ab\\0\'	1	1
+primary key	v IN (\'ab\\0\')	1	1
+minmax	v IN (\'ab\\0\')	1	1
+set	v IN (\'ab\\0\')	1	1
+bloom_filter	v IN (\'ab\\0\')	1	1
+tokenbf_v1	v IN (\'ab\\0\')	1	1
+ngrambf_v1	v IN (\'ab\\0\')	1	1
+text_array	v IN (\'ab\\0\')	1	1
+text_splitByNonAlpha	v IN (\'ab\\0\')	1	1
+primary key	v IN (SELECT \'ab\\0\')	1	1
+minmax	v IN (SELECT \'ab\\0\')	1	1
+set	v IN (SELECT \'ab\\0\')	1	1
+bloom_filter	v IN (SELECT \'ab\\0\')	1	1
+tokenbf_v1	v IN (SELECT \'ab\\0\')	1	1
+ngrambf_v1	v IN (SELECT \'ab\\0\')	1	1
+text_array	v IN (SELECT \'ab\\0\')	1	1
+text_splitByNonAlpha	v IN (SELECT \'ab\\0\')	1	1
+primary key	v = \'ab\\0\\0\\0\\0\'	1	1
+minmax	v = \'ab\\0\\0\\0\\0\'	1	1
+set	v = \'ab\\0\\0\\0\\0\'	1	1
+bloom_filter	v = \'ab\\0\\0\\0\\0\'	1	1
+tokenbf_v1	v = \'ab\\0\\0\\0\\0\'	1	1
+ngrambf_v1	v = \'ab\\0\\0\\0\\0\'	1	1
+text_array	v = \'ab\\0\\0\\0\\0\'	1	1
+text_splitByNonAlpha	v = \'ab\\0\\0\\0\\0\'	1	1
+primary key	v IN (\'ab\\0\\0\\0\\0\')	1	1
+minmax	v IN (\'ab\\0\\0\\0\\0\')	1	1
+set	v IN (\'ab\\0\\0\\0\\0\')	1	1
+bloom_filter	v IN (\'ab\\0\\0\\0\\0\')	1	1
+tokenbf_v1	v IN (\'ab\\0\\0\\0\\0\')	1	1
+ngrambf_v1	v IN (\'ab\\0\\0\\0\\0\')	1	1
+text_array	v IN (\'ab\\0\\0\\0\\0\')	1	1
+text_splitByNonAlpha	v IN (\'ab\\0\\0\\0\\0\')	1	1
+primary key	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+minmax	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+set	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+bloom_filter	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+tokenbf_v1	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+ngrambf_v1	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+text_array	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+text_splitByNonAlpha	v IN (SELECT \'ab\\0\\0\\0\\0\')	1	1
+primary key	v IN (\'ab\', \'zz\')	2	1
+minmax	v IN (\'ab\', \'zz\')	2	1
+set	v IN (\'ab\', \'zz\')	2	1
+bloom_filter	v IN (\'ab\', \'zz\')	2	1
+tokenbf_v1	v IN (\'ab\', \'zz\')	2	1
+ngrambf_v1	v IN (\'ab\', \'zz\')	2	1
+text_array	v IN (\'ab\', \'zz\')	2	1
+text_splitByNonAlpha	v IN (\'ab\', \'zz\')	2	1
+-- the index is still used for the stored value equal to the constant
+tab_f_primary_key	v = toFixedString(\'ab\', 6)	1
+tab_f_primary_key	v = \'ab\\0\'	1
+tab_f_primary_key	v IN (SELECT toFixedString(\'ab\', 6))	1
+tab_s_primary_key	v = \'ab\'	1
+tab_f_bloom_filter	v = toFixedString(\'ab\', 6)	1
+tab_f_bloom_filter	v IN (SELECT toFixedString(\'ab\', 6))	1
+tab_f_text_array	v = \'ab\\0\'	1
+tab_s_text_splitByNonAlpha	v = toFixedString(\'ab\', 4)	3
+tab_s_tokenbf_v1	v = toFixedString(\'ab\', 4)	3
+-- a FixedString constant equals several String values, so an exact lookup declines
+-- Array and Map columns
+tab_array_string	has(a, toFixedString(\'ab\', 2))	3	1
+tab_array_string	hasAny(a, [toFixedString(\'ab\', 2)])	3	1
+tab_array_string	hasAll(a, [toFixedString(\'ab\', 2)])	3	1
+tab_array_string	indexOf(a, toFixedString(\'ab\', 2)) != 0	3	1
+tab_array_string	arrayJoin(a) = toFixedString(\'ab\', 2)	3	1
+tab_array_string	has(a, toFixedString(\'ab\', 6))	3	1
+tab_array_string	hasAny(a, [toFixedString(\'ab\', 6)])	3	1
+tab_array_string	hasAll(a, [toFixedString(\'ab\', 6)])	3	1
+tab_array_string	indexOf(a, toFixedString(\'ab\', 6)) != 0	3	1
+tab_array_string	arrayJoin(a) = toFixedString(\'ab\', 6)	3	1
+tab_array_string	has(a, \'ab\')	1	1
+tab_array_string	hasAny(a, [\'ab\'])	1	1
+tab_array_string	hasAll(a, [\'ab\'])	1	1
+tab_array_string	indexOf(a, \'ab\') != 0	1	1
+tab_array_string	arrayJoin(a) = \'ab\'	1	1
+tab_array_string	has(a, \'ab\\0\')	1	1
+tab_array_string	hasAny(a, [\'ab\\0\'])	1	1
+tab_array_string	hasAll(a, [\'ab\\0\'])	1	1
+tab_array_string	indexOf(a, \'ab\\0\') != 0	1	1
+tab_array_string	arrayJoin(a) = \'ab\\0\'	1	1
+tab_array_fixed_string	has(a, toFixedString(\'ab\', 2))	1	1
+tab_array_fixed_string	hasAny(a, [toFixedString(\'ab\', 2)])	1	1
+tab_array_fixed_string	hasAll(a, [toFixedString(\'ab\', 2)])	1	1
+tab_array_fixed_string	indexOf(a, toFixedString(\'ab\', 2)) != 0	1	1
+tab_array_fixed_string	arrayJoin(a) = toFixedString(\'ab\', 2)	1	1
+tab_array_fixed_string	has(a, toFixedString(\'ab\', 6))	1	1
+tab_array_fixed_string	hasAny(a, [toFixedString(\'ab\', 6)])	1	1
+tab_array_fixed_string	hasAll(a, [toFixedString(\'ab\', 6)])	1	1
+tab_array_fixed_string	indexOf(a, toFixedString(\'ab\', 6)) != 0	1	1
+tab_array_fixed_string	arrayJoin(a) = toFixedString(\'ab\', 6)	1	1
+tab_array_fixed_string	has(a, \'ab\')	1	1
+tab_array_fixed_string	hasAny(a, [\'ab\'])	1	1
+tab_array_fixed_string	hasAll(a, [\'ab\'])	1	1
+tab_array_fixed_string	indexOf(a, \'ab\') != 0	1	1
+tab_array_fixed_string	arrayJoin(a) = \'ab\'	1	1
+tab_array_fixed_string	has(a, \'ab\\0\')	1	1
+tab_array_fixed_string	hasAny(a, [\'ab\\0\'])	1	1
+tab_array_fixed_string	hasAll(a, [\'ab\\0\'])	1	1
+tab_array_fixed_string	indexOf(a, \'ab\\0\') != 0	1	1
+tab_array_fixed_string	arrayJoin(a) = \'ab\\0\'	1	1
+tab_map	mapContainsKey(m, \'ab\')	1	1
+tab_map	mapContainsKey(m, toFixedString(\'ab\', 6))	1	1
+tab_map	m[\'ab\'] = \'cd\'	1	1
+tab_map	m[toFixedString(\'ab\', 2)] = \'cd\\0\'	1	1
+tab_map	m[\'ab\'] IN (\'cd\', \'xx\')	1	1
+tab_map	m[\'ab\'] IN (SELECT toFixedString(\'cd\', 6))	1	1
+tab_map	m[\'xx\'] = \'\'	2	1
+tab_map	m[\'xx\'] = toFixedString(\'\', 2)	2	1
+tab_map	m[\'xx\'] IN (SELECT \'\\0\')	2	1
+tab_map	mapContainsValue(m, \'cd\\0\')	1	1

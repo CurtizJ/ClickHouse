@@ -31,6 +31,7 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/NumberTraits.h>
 #include <DataTypes/getLeastSupertype.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <Functions/ComparisonOrderDomain.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/IFunctionAdaptors.h>
@@ -1454,9 +1455,10 @@ private:
 
     ColumnPtr executeGeneric(const ColumnWithTypeAndName & c0, const ColumnWithTypeAndName & c1) const
     {
+        /// A `FixedString` inside an `Array`, `Map` or `Tuple` compares zero-padded, see `FixedStringZeroPadding.h`.
         DataTypePtr common_type = getLeastSupertype(DataTypes{c0.type, c1.type});
-        ColumnPtr c0_converted = castColumn(c0, common_type);
-        ColumnPtr c1_converted = castColumn(c1, common_type);
+        ColumnPtr c0_converted = removePaddingForComparison(castColumn(c0, common_type), c0.type, c1.type);
+        ColumnPtr c1_converted = removePaddingForComparison(castColumn(c1, common_type), c0.type, c1.type);
 
         return executeGenericIdenticalTypes(c0_converted.get(), c1_converted.get());
     }

@@ -12,6 +12,7 @@
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/FixedStringZeroPadding.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/getLeastSupertype.h>
 #include <Columns/ColumnArray.h>
@@ -784,6 +785,28 @@ private:
         return executeArrayImpl(new_arguments, result_type);
     }
 
+    /// A `String` and a `FixedString` compare zero-padded (see `FixedStringZeroPadding.h`), while every comparison
+    /// below compares bytes. Bring the pair to the type the two meet in and remove the trailing zero bytes the rule
+    /// ignores, so that what is compared here is what `equals` compares.
+    ColumnPtr executeZeroPadded(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type) const
+    {
+        const auto * array_type = checkAndGetDataType<DataTypeArray>(arguments[0].type.get());
+        if (!array_type || !comparesZeroPadded(array_type->getNestedType(), arguments[1].type))
+            return nullptr;
+
+        const auto common_type = getLeastSupertype(DataTypes{array_type->getNestedType(), arguments[1].type});
+        const auto common_array_type = std::make_shared<DataTypeArray>(common_type);
+        const auto needle_array_type = std::make_shared<DataTypeArray>(arguments[1].type);
+
+        ColumnsWithTypeAndName new_arguments = arguments;
+        new_arguments[0].column = removePaddingForComparison(castColumn(arguments[0], common_array_type), arguments[0].type, needle_array_type);
+        new_arguments[0].type = common_array_type;
+        new_arguments[1].column = removePaddingForComparison(castColumn(arguments[1], common_type), array_type->getNestedType(), arguments[1].type);
+        new_arguments[1].type = common_type;
+
+        return executeArrayImpl(new_arguments, result_type);
+    }
+
     /** If one or both arguments passed to this function are nullable,
       * we create a new column that contains non-nullable arguments:
       *
@@ -800,6 +823,9 @@ private:
     ColumnPtr executeArrayImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type) const
     {
         if (auto res = executeDifferentDateTimeUnits(arguments, result_type))
+            return res;
+
+        if (auto res = executeZeroPadded(arguments, result_type))
             return res;
 
         const ColumnPtr & ptr = arguments[0].column;
@@ -1063,6 +1089,10 @@ private:
 
         const auto & array_type  = assert_cast<const DataTypeArray &>(*arguments[0].type);
         const auto target_type = recursiveRemoveLowCardinality(array_type.getNestedType());
+
+        /// A dictionary index denotes one spelling, while a zero-padded comparison can match several.
+        if (comparesZeroPadded(target_type, arguments[1].type))
+            return nullptr;
 
         /// A float zero equals two byte-distinct dictionary entries, -0.0 and 0.0, and a single index
         /// cannot denote both, so leave a zero needle to the path that compares values. The needle
