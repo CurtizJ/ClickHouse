@@ -31,8 +31,29 @@ SETTINGS allow_experimental_text_index_scoring = 1;
 INSERT INTO tab_bm25_auto_pr SELECT number, concat(toString(number), multiIf(number % 10 = 0, ' error error', number % 10 = 5, ' error', ' noise')) FROM numbers(1000);
 
 -- The automatic-parallel-replicas heuristic builds an alternative plan without index analysis; it
--- must not reject the query at planning time. The plan substitution is skipped for queries reading
--- the score column, so the executed (local) plan still fills it.
-SELECT count(), uniqExact(round(bm25(), 4)) FROM tab_bm25_auto_pr WHERE hasToken(str, 'error');
+-- must not reject the query at planning time. The optimization is skipped for a query computing
+-- `bm25()`, so the executed (local) plan still computes the score.
+SELECT count(), uniqExact(round(bm25(), 4)) FROM tab_bm25_auto_pr WHERE hasToken(str, 'error')
+SETTINGS log_comment = 'query_bm25';
+
+-- A query the optimization supports, so that the check below does not pass trivially when the optimization
+-- does not run at all.
+SELECT count(), sum(id) FROM tab_bm25_auto_pr WHERE id > 5
+SETTINGS log_comment = 'query_supported';
+
+SET enable_parallel_replicas = 0, automatic_parallel_replicas_mode = 0;
+
+SYSTEM FLUSH LOGS query_log;
+
+-- `automatic_parallel_replicas_mode = 2` only collects the dataflow statistics of the queries the optimization
+-- supports, so a skipped query leaves both counters at zero.
+SELECT
+    log_comment,
+    ProfileEvents['RuntimeDataflowStatisticsInputBytes'] > 0,
+    ProfileEvents['RuntimeDataflowStatisticsOutputBytes'] > 0
+FROM system.query_log
+WHERE event_date >= yesterday() AND event_time >= now() - INTERVAL 15 MINUTE
+    AND current_database = currentDatabase() AND type = 'QueryFinish' AND log_comment IN ('query_bm25', 'query_supported')
+ORDER BY log_comment;
 
 DROP TABLE tab_bm25_auto_pr;

@@ -32,6 +32,27 @@ CREATE TABLE tab_bm25_err
 ENGINE = MergeTree
 ORDER BY id; -- { serverError SUPPORT_IS_DISABLED }
 
+SELECT '-- scoring = ''bm25'' requires a posting list codec';
+CREATE TABLE tab_bm25_err
+(
+    id UInt32,
+    body String,
+    INDEX idx_body(body) TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'none', scoring = 'bm25') GRANULARITY 1
+)
+ENGINE = MergeTree
+ORDER BY id
+SETTINGS allow_experimental_text_index_scoring = 1; -- { serverError SUPPORT_IS_DISABLED }
+
+SELECT '-- scoring = ''bm25'' requires a tokenizer that supports scoring';
+CREATE TABLE tab_bm25_err (id UInt32, body String)
+ENGINE = MergeTree
+ORDER BY id
+SETTINGS allow_experimental_text_index_scoring = 1;
+
+ALTER TABLE tab_bm25_err ADD INDEX idx_body(body) TYPE text(tokenizer = ngrams(3), posting_list_codec = 'bitpacking', scoring = 'bm25') GRANULARITY 1; -- { serverError BAD_ARGUMENTS }
+
+DROP TABLE tab_bm25_err;
+
 CREATE TABLE tab_bm25_err
 (
     id UInt32,

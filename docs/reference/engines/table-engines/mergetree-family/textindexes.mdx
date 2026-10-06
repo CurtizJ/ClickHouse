@@ -605,6 +605,12 @@ The score follows the boolean structure of the filter, as the `bool` query of Lu
 For example, for `WHERE hasAllTokens(str, ['consensus', 'raft']) OR hasToken(str, 'stream')` a row containing `stream` and `raft` but not `consensus` is scored for `stream` only.
 The `EXPLAIN` of such a query shows the scoring text index, the number of scoring predicates and the parameters in the `BM25 scoring` line of the `ReadFromMergeTree` step.
 
+The collection statistics of the score (the number of rows, the average document length and the document frequencies of the tokens) are collected from the parts the query reads, which has the following consequences:
+
+- A query that computes `bm25` throws a `BAD_ARGUMENTS` exception while a part has rows deleted by a [lightweight `DELETE`](/reference/statements/delete) or has pending [lightweight updates](/reference/statements/update), because the statistics stored in the index would be stale. Run [`ALTER TABLE ... APPLY DELETED MASK`](/reference/statements/alter/apply-deleted-mask), [`ALTER TABLE ... APPLY PATCHES`](/reference/statements/alter/apply-patches) or `OPTIMIZE TABLE ... FINAL` first.
+- In a `Distributed` query each shard scores its rows with the statistics of its own parts, so the scores of rows from different shards are computed against different collections.
+- A query that computes `bm25` does not use [automatic parallel replicas](/reference/settings/session-settings/automatic-parallel#automatic_parallel_replicas_mode).
+
 <Warning>
 This argument is experimental and should only be used for testing.
 Set MergeTree setting [`allow_experimental_text_index_scoring`](/reference/settings/merge-tree-settings/allow-experimental) to enable storing BM25 scoring data.
