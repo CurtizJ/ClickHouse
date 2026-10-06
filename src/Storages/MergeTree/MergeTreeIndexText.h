@@ -12,7 +12,7 @@
 #include <Common/HashTable/HashMap.h>
 #include <Common/VectorWithMemoryTracking.h>
 #include <Common/logger_useful.h>
-#include <Storages/MergeTree/TextIndexPositionData.h>
+#include <Storages/MergeTree/TextIndexBlockedPositionsCodec.h>
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
 #include <Formats/MarkInCompressedFile.h>
 
