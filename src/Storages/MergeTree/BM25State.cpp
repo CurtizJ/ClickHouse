@@ -5,13 +5,9 @@
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
-#include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReadTask.h>
-#include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
-#include <Storages/MergeTree/TextIndexAnalyzer.h>
-#include <Storages/MergeTree/TextIndexUtils.h>
 #include <Common/CurrentThread.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <Common/ProfileEvents.h>
@@ -49,52 +45,6 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-namespace
-{
-
-/// Opens the part's text index sparse index stream and deserializes its granule
-std::shared_ptr<const MergeTreeIndexGranuleText> loadTextIndexGranuleForStats(
-    const DataPartPtr & part,
-    const MergeTreeIndexText & text_index,
-    const MergeTreeIndexConditionText & condition_text,
-    const MergeTreeIndexFormat & index_format,
-    const MergeTreeReaderSettings & reader_settings)
-{
-    auto substreams = text_index.getSubstreams();
-    LoadedMergeTreeDataPartInfoForReader part_info(part, std::make_shared<AlterConversions>());
-
-    /// The stream names and sizes come from the part's checksums, so no storage request is needed here.
-    auto sparse_index_stream = makeTextIndexInputStream(
-        part_info,
-        text_index.getFileName(),
-        substreams[0],
-        reader_settings,
-        /*expected_buffer_size=*/ std::nullopt);
-
-    sparse_index_stream->seekToStart();
-
-    /// The analysis opens the dictionary stream itself.
-    MergeTreeIndexInputStreams streams;
-    streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
-
-    MergeTreeIndexDeserializationState state
-    {
-        .version = index_format.version,
-        .condition = &condition_text,
-        .part_info = part_info,
-        .index = text_index,
-        .readable_ranges = nullptr,
-        .text_index_read_postings = false,
-        .reader_settings = reader_settings,
-    };
-
-    auto granule = text_index.createIndexGranule();
-    granule->deserializeBinaryWithMultipleStreams(streams, state);
-    return std::dynamic_pointer_cast<const MergeTreeIndexGranuleText>(std::move(granule));
-}
-
-}
-
 BM25GlobalStatsBuilder::BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_, BM25Params params_)
     : index_with_condition(std::move(index_with_condition_))
     , params(params_)
@@ -119,8 +69,7 @@ void BM25GlobalStatsBuilder::addPart(const DataPartPtr & part, const MergeTreeRe
     if (part->isEmpty())
         return;
 
-    auto index_format = text_index->getDeserializedFormat(*part, text_index->getFileName());
-    if (!index_format)
+    if (!text_index->getDeserializedFormat(*part, text_index->getFileName()))
     {
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "Cannot compute text score: the text index '{}' is not materialized in part '{}'. "
@@ -128,14 +77,12 @@ void BM25GlobalStatsBuilder::addPart(const DataPartPtr & part, const MergeTreeRe
             text_index->index.name, part->name, text_index->index.name);
     }
 
-    auto granule = loadTextIndexGranuleForStats(part, *text_index, *condition_text, index_format, reader_settings);
-    if (!granule)
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index '{}' produced a granule of an unexpected type", text_index->index.name);
-    }
+    /// The document frequencies do not depend on the filter, so the tokens are looked up regardless of the search queries.
+    LoadedMergeTreeDataPartInfoForReader part_info(part, std::make_shared<AlterConversions>());
+    auto tokens_lookup = lookupTextIndexTokens(part_info, *text_index, *condition_text, scoring_token_names, reader_settings);
 
-    const auto & scoring_stats = granule->getTextIndexScoringStats();
-    if (granule->getTextIndexScoringKind() != TextIndexScoringKind::BM25)
+    const auto & scoring_stats = tokens_lookup.header->scoring_stats;
+    if (tokens_lookup.header->scoring != TextIndexScoringKind::BM25)
     {
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "Cannot compute text score: the text index '{}' in part '{}' was written without BM25 scoring data. "
@@ -145,13 +92,12 @@ void BM25GlobalStatsBuilder::addPart(const DataPartPtr & part, const MergeTreeRe
 
     num_docs.fetch_add(scoring_stats.num_docs, std::memory_order_relaxed);
     sum_doc_length.fetch_add(scoring_stats.sum_doc_length, std::memory_order_relaxed);
-    const auto & token_infos = granule->getAnalyzer().getAllTokenInfos();
 
     for (size_t i = 0; i < scoring_token_names.size(); ++i)
     {
-        auto it = token_infos.find(scoring_token_names[i]);
+        auto it = tokens_lookup.token_infos.find(scoring_token_names[i]);
 
-        if (it != token_infos.end() && it->second)
+        if (it != tokens_lookup.token_infos.end())
             document_frequencies[i].fetch_add(it->second->cardinality, std::memory_order_relaxed);
     }
 }

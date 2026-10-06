@@ -550,9 +550,6 @@ private:
     /// Returns tokens that are not in the cache and need to be read from the dictionary file.
     std::vector<String> fillTokensFromCache(MergeTreeIndexDeserializationState & state);
 
-    std::pair<std::vector<size_t>, NameSet> matchTokens(const ColumnString & all_tokens, std::vector<std::string_view> needed_tokens);
-
-    std::shared_ptr<TextIndexHeader> loadHeader(MergeTreeIndexReaderStream & header_stream, MergeTreeIndexDeserializationState & state);
     /// Reads the single-segment posting lists of the needed tokens and folds them into the analyzer.
     /// Opens the postings stream itself, once the tokens are known, with a buffer that fits the largest of the lists.
     void analyzePostings(PostingsSerialization & postings_serialization, MergeTreeIndexDeserializationState & state);
@@ -581,6 +578,22 @@ private:
     /// for the scoring cursors of the query, keyed by the block's offset in the postings file.
     absl::flat_hash_map<UInt64, ScoringPostingsPtr> scoring_postings_by_offset;
 };
+
+/// The header of the text index of a data part and the infos of the looked up tokens present in its dictionary.
+struct TextIndexTokensLookup
+{
+    std::shared_ptr<TextIndexHeader> header;
+    TokenToPostingsInfosMap token_infos;
+};
+
+/// Reads the header of the text index of a data part and looks up `tokens` in its dictionary, through the caches of `condition_text`.
+/// Unlike the analysis of a granule, which stops looking up the tokens of the search queries that cannot match, it looks up every token.
+TextIndexTokensLookup lookupTextIndexTokens(
+    const IMergeTreeDataPartInfoForReader & part_info,
+    const IMergeTreeIndex & index,
+    const MergeTreeIndexConditionText & condition_text,
+    const std::vector<String> & tokens,
+    const MergeTreeReaderSettings & reader_settings);
 
 /// Text index granule created on writing of the index.
 /// It differs from MergeTreeIndexGranuleText because it
