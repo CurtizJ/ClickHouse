@@ -2977,7 +2977,7 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
     return std::make_shared<MergeTreeIndexText>(std::move(metadata_snapshot), index, index_params, std::move(tokenizer), std::move(posting_list_codec));
 }
 
-void textIndexValidator(const IndexDescription & index, bool /*attach*/, const MergeTreeSettings & settings)
+void textIndexValidator(const IndexDescription & index, bool attach, const MergeTreeSettings & settings)
 {
     auto options = convertArgumentsToOptionsMap(index.arguments);
 
@@ -3030,8 +3030,8 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
             reject_argument(ARGUMENT_POSITIONS);
     }
 
-    String posting_list_codec_name = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC)
-        .value_or(settings[MergeTreeSetting::text_index_posting_list_codec].toString());
+    auto posting_list_codec_argument = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC);
+    String posting_list_codec_name = posting_list_codec_argument.value_or(settings[MergeTreeSetting::text_index_posting_list_codec].toString());
 
     auto posting_list_codec = PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, index.name);
     TextIndexScoringKind scoring = parseTextIndexScoringKind(extractFieldOption<String>(options, ARGUMENT_SCORING).value_or("none"));
@@ -3047,11 +3047,22 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
 
     if (scoring != TextIndexScoringKind::None)
     {
-        if (!settings[MergeTreeSetting::allow_experimental_text_index_scoring])
+        /// Only on fresh DDL: an existing index must stay loadable after the setting is turned off.
+        if (!attach && !settings[MergeTreeSetting::allow_experimental_text_index_scoring])
         {
             throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
                 "Text index scoring '{}' is experimental. Enable it with the MergeTree setting "
                 "`allow_experimental_text_index_scoring = 1`.", toString(scoring));
+        }
+
+        /// The table setting can be changed by `ALTER TABLE ... MODIFY SETTING`, e.g. to `none`, which would make
+        /// the stored index definition invalid, so the codec of a scoring index must be a part of the definition.
+        if (!attach && !posting_list_codec_argument)
+        {
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Text index scoring '{}' requires the '{}' argument in the index definition: "
+                "the codec cannot be taken from the MergeTree setting `text_index_posting_list_codec`",
+                toString(scoring), ARGUMENT_POSTING_LIST_CODEC);
         }
 
         /// BM25 scoring relies on the per-block term-frequency payload that cannot be stored in the `none` codec.

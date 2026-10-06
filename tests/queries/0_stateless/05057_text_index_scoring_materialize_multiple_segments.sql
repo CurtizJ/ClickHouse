@@ -24,7 +24,7 @@ CREATE TABLE tab_mat_scoring
 )
 ENGINE = MergeTree ORDER BY id
 SETTINGS min_bytes_for_wide_part = 0, min_rows_for_wide_part = 0, min_bytes_for_full_part_storage = 0, index_granularity = 1024,
-         text_index_posting_list_codec = 'bitpacking', text_index_max_processed_tokens_before_flush = 10000,
+         text_index_max_processed_tokens_before_flush = 10000,
          allow_experimental_text_index_scoring = 1;
 
 -- 'common': every row; 'freq<n>': 200 rows each; 'mid<n>': 8 rows each; 'filler' varies the document lengths.
@@ -36,7 +36,7 @@ FROM numbers(20000);
 -- BM25 statistics are per part: both tables must consist of a single part.
 OPTIMIZE TABLE tab_mat_scoring FINAL;
 
-ALTER TABLE tab_mat_scoring ADD INDEX idx(s) TYPE text(tokenizer = splitByNonAlpha, scoring = 'bm25');
+ALTER TABLE tab_mat_scoring ADD INDEX idx(s) TYPE text(tokenizer = splitByNonAlpha, posting_list_codec = 'bitpacking', scoring = 'bm25');
 ALTER TABLE tab_mat_scoring MATERIALIZE INDEX idx;
 
 SYSTEM FLUSH LOGS part_log;
@@ -58,11 +58,11 @@ CREATE TABLE tab_mat_scoring_ref
 (
     id UInt64,
     s String,
-    INDEX idx(s) TYPE text(tokenizer = splitByNonAlpha, scoring = 'bm25')
+    INDEX idx(s) TYPE text(tokenizer = splitByNonAlpha, posting_list_codec = 'bitpacking', scoring = 'bm25')
 )
 ENGINE = MergeTree ORDER BY id
 SETTINGS min_bytes_for_wide_part = 0, min_rows_for_wide_part = 0, index_granularity = 1024,
-         text_index_posting_list_codec = 'bitpacking', allow_experimental_text_index_scoring = 1;
+         allow_experimental_text_index_scoring = 1;
 
 INSERT INTO tab_mat_scoring_ref SELECT id, s FROM tab_mat_scoring;
 OPTIMIZE TABLE tab_mat_scoring_ref FINAL;
