@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
+#include <Storages/MergeTree/PostingListScoringCursor.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Storages/MergeTree/IPostingListCodec.h>
