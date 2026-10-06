@@ -117,11 +117,24 @@ private:
 
     PostingListCursorPtr makeLazyCursor(std::string_view token, const TokenPostingsInfo & token_info);
 
-    /// Fills the score column `column_idx` for rows [row_offset, row_offset + num_rows) of `from_mark`, and the
-    /// match column of the same predicate (`score_match_column`) in the same pass over the scoring cursors.
-    void fillColumnScores(MutableColumns & res_columns, size_t column_idx, size_t from_mark, size_t row_offset, size_t num_rows);
+    /// Scoring state of one scoring predicate of the query.
+    struct ScoreLeaf
+    {
+        /// Positions in `columns_to_read` of the BM25 score column of the predicate and of its match column.
+        size_t score_column = 0;
+        size_t match_column = 0;
+        /// `hasAllTokens` uses the intersection scorer, `hasToken` / `hasAnyTokens` the union scorer.
+        bool intersect = false;
+        /// Built per granule by `initializeScoreLeaves`: one cursor per distinct token of the predicate present
+        /// in this part, sorted by ascending cardinality. Empty when the predicate matches no row: the columns stay 0.
+        std::vector<ScoreCursor> cursors;
+    };
 
-    /// Builds the scoring cursors of every score column (see `score_leaves`).
+    /// Fills the score column and the match column of `leaf` for rows [row_offset, row_offset + num_rows)
+    /// of `from_mark` in one pass over the scoring cursors.
+    void fillColumnScores(MutableColumns & res_columns, ScoreLeaf & leaf, size_t from_mark, size_t row_offset, size_t num_rows);
+
+    /// Builds the scoring cursors of every leaf of `score_leaves`.
     void initializeScoreLeaves();
     std::shared_ptr<PostingListScoringCursor> makeScoringCursor(const String & token, const TokenPostingsInfo & token_info);
 
@@ -197,27 +210,11 @@ private:
     /// Query-global BM25 state (statistics and per-token weights); null when the query reads no scores.
     BM25StatePtr bm25_score_state;
 
-    /// Per column: true for a BM25 score column, false for a match column.
-    std::vector<bool> is_score_column;
-    /// Per score column: the match column of the same predicate, filled in the same pass (see `classifyVirtualColumns`).
-    std::vector<size_t> score_match_column;
-    /// Per match column: true when its score column fills it, so the posting-list paths skip it.
-    std::vector<bool> filled_with_score;
-
-    /// Scoring state of one score column (one scoring predicate of the query).
-    struct ScoreLeaf
-    {
-        /// One cursor per distinct token of the predicate present in this part, sorted by ascending cardinality.
-        std::vector<ScoreCursor> cursors;
-        /// `hasAllTokens` uses the intersection scorer, `hasToken` / `hasAnyTokens` the union scorer.
-        bool intersect = false;
-        /// False when the predicate matches no row of the part (a required token is absent): the column stays 0.
-        bool can_match = false;
-    };
-
-    /// Parallel to `columns_to_read`; empty for match columns.
+    /// One leaf per score column, paired with the match column of the same predicate in the constructor.
     std::vector<ScoreLeaf> score_leaves;
     bool score_leaves_initialized = false;
+    /// Per column: true for the score and match columns of `score_leaves`, so the posting-list paths skip them.
+    std::vector<bool> filled_with_score;
     /// Reads the part's `.dl` document lengths for the rows of the current read step.
     std::unique_ptr<TextIndexDocLengthsReader> score_doc_lengths;
 };

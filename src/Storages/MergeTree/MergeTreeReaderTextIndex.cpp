@@ -57,6 +57,12 @@ namespace ErrorCodes
     extern const int BAD_ARGUMENTS;
 }
 
+/// A `Float32` virtual column is the BM25 score of its search query, a `UInt8` one is its match.
+static bool isScoreColumn(const NameAndTypePair & column)
+{
+    return WhichDataType(column.type).isFloat32();
+}
+
 MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     const IMergeTreeReader * main_reader_,
     MergeTreeIndexWithCondition index_,
@@ -81,7 +87,6 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     , bm25_score_state(std::move(bm25_score_state_))
 {
     search_queries.reserve(columns_.size());
-    is_score_column.reserve(columns_.size());
 
     for (const auto & column : columns_)
     {
@@ -92,25 +97,59 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
                 column.name, column.type->getName());
         }
 
-        /// A `Float32` virtual column is the BM25 score of its search query, a `UInt8` one is its match.
-        WhichDataType which(column.type);
-        if (which.isFloat32())
+        if (isScoreColumn(column))
         {
             if (!bm25_score_state)
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Column '{}' is read by the text index reader, but the BM25 query state is not set", column.name);
         }
-        else if (!which.isUInt8())
+        else if (!WhichDataType(column.type).isUInt8())
         {
             throw Exception(ErrorCodes::LOGICAL_ERROR,
                 "Column {} with type {} should not be filled by text index reader",
                 column.name, column.type->getName());
         }
 
-        is_score_column.push_back(which.isFloat32());
         search_queries.push_back(condition_text->getSearchQueryForVirtualColumn(column.name));
     }
 
-    score_leaves.resize(columns_.size());
+    /// The match column of a scoring predicate is filled in the same pass over the scoring cursors as its
+    /// score column: a row matches exactly when it receives a score contribution (any token for the union
+    /// scorer, all tokens for the intersection scorer), so the postings are decoded once for both columns.
+    /// The planner reads the score column only along with the match column of the same predicate.
+    filled_with_score.resize(columns_to_read.size(), false);
+
+    for (size_t score_idx = 0; score_idx < columns_to_read.size(); ++score_idx)
+    {
+        if (!isScoreColumn(columns_to_read[score_idx]))
+            continue;
+
+        const auto & score_query = *search_queries[score_idx];
+        std::optional<size_t> match_idx;
+
+        for (size_t i = 0; i < columns_to_read.size(); ++i)
+        {
+            if (!isScoreColumn(columns_to_read[i]) && search_queries[i]->getHash() == score_query.getHash())
+                match_idx = i;
+        }
+
+        if (!match_idx)
+        {
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Score column {} of the text index '{}' is read without the match column of its predicate {}",
+                columns_to_read[score_idx].name, index.index->index.name, score_query.getFunctionName());
+        }
+
+        score_leaves.push_back(ScoreLeaf
+        {
+            .score_column = score_idx,
+            .match_column = *match_idx,
+            .intersect = score_query.getSearchMode() == TextSearchMode::All,
+            .cursors = {},
+        });
+
+        filled_with_score[score_idx] = true;
+        filled_with_score[*match_idx] = true;
+    }
 
     auto data_part = getDataPart();
     auto index_format = index.index->getDeserializedFormat(*data_part, index.index->getFileName());
@@ -154,9 +193,6 @@ void MergeTreeReaderTextIndex::setIndexGranule(MergeTreeIndexGranulePtr index_gr
 
     /// Phrase search results are cached per granule; drop them when the granule changes.
     phrase_search_doc_ids.clear();
-    /// Scoring cursors reference the previous granule's token infos; rebuild them on the next fill.
-    score_leaves.assign(score_leaves.size(), {});
-    score_leaves_initialized = false;
     auto postings_codec = PostingListCodecFactory::createPostingListCodec(granule->getPostingsCodecType());
 
     /// Lazy mode requires the per-segment block-index section (from `V1_WithCodec` onward) and
@@ -325,8 +361,6 @@ void MergeTreeReaderTextIndex::classifyVirtualColumns()
 {
     is_always_true.resize(columns_to_read.size(), false);
     use_fallback.resize(columns_to_read.size(), false);
-    score_match_column.resize(columns_to_read.size());
-    filled_with_score.resize(columns_to_read.size(), false);
 
     const auto & analyzer = granule->getAnalyzer();
 
@@ -336,7 +370,7 @@ void MergeTreeReaderTextIndex::classifyVirtualColumns()
         const auto & search_query = search_queries[i];
 
         /// The score columns are filled from the scoring cursors.
-        if (is_score_column[i])
+        if (isScoreColumn(column))
             continue;
 
         const auto & query_builder = analyzer.getQueryBuilder(*search_query);
@@ -410,33 +444,15 @@ void MergeTreeReaderTextIndex::classifyVirtualColumns()
         }
     }
 
-    /// The match column of a scoring predicate is filled in the same pass over the scoring cursors as its
-    /// score column: a row matches exactly when it receives a score contribution (any token for the union
-    /// scorer, all tokens for the intersection scorer), so the postings are decoded once for both columns.
-    /// The planner reads the score column only along with the match column of the same predicate.
-    for (size_t score_idx = 0; score_idx < columns_to_read.size(); ++score_idx)
+    /// The scoring cursors fill the match column only where the match is resolved from the postings.
+    for (const auto & leaf : score_leaves)
     {
-        if (!is_score_column[score_idx])
-            continue;
-
-        const auto & score_query = *search_queries[score_idx];
-        std::optional<size_t> match_idx;
-
-        for (size_t i = 0; i < columns_to_read.size(); ++i)
-        {
-            if (!is_score_column[i] && search_queries[i]->getHash() == score_query.getHash())
-                match_idx = i;
-        }
-
-        if (!match_idx || is_always_true[*match_idx] || use_fallback[*match_idx])
+        if (is_always_true[leaf.match_column] || use_fallback[leaf.match_column])
         {
             throw Exception(ErrorCodes::LOGICAL_ERROR,
-                "Score column {} of the text index '{}' is read without the match column of its predicate {}",
-                columns_to_read[score_idx].name, index.index->index.name, score_query.getFunctionName());
+                "Match column {} of the scoring predicate {} of the text index '{}' cannot be filled from the scoring cursors",
+                columns_to_read[leaf.match_column].name, search_queries[leaf.match_column]->getFunctionName(), index.index->index.name);
         }
-
-        score_match_column[score_idx] = *match_idx;
-        filled_with_score[*match_idx] = true;
     }
 }
 
@@ -507,7 +523,6 @@ std::shared_ptr<PostingListScoringCursor> MergeTreeReaderTextIndex::makeScoringC
 void MergeTreeReaderTextIndex::initializeScoreLeaves()
 {
     score_leaves_initialized = true;
-    score_leaves.assign(columns_to_read.size(), {});
 
     chassert(granule && bm25_score_state);
     const auto & analyzer = granule->getAnalyzer();
@@ -553,24 +568,20 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
     for (const auto & scoring_token : bm25_score_state->tokens)
         scoring_tokens.emplace(scoring_token.token, &scoring_token);
 
-    for (size_t i = 0; i < columns_to_read.size(); ++i)
+    for (auto & leaf : score_leaves)
     {
-        if (!is_score_column[i])
-            continue;
-
-        const auto & search_query = *search_queries[i];
-        auto & leaf = score_leaves[i];
+        const auto & search_query = *search_queries[leaf.score_column];
 
         /// The analysis decodes the postings only of the tokens of the queries that can still match,
         /// so a leaf takes the tokens from the state of its query, not from all token infos of the granule.
         const auto & query_builder = analyzer.getQueryBuilder(search_query);
         const auto & token_infos = query_builder.tokens;
 
-        leaf.intersect = search_query.getSearchMode() == TextSearchMode::All;
-        leaf.can_match = !query_builder.is_failed;
-
-        if (!leaf.can_match)
+        /// The predicate matches no row of the part: its columns stay 0.
+        if (query_builder.is_failed)
             continue;
+
+        bool can_match = true;
 
         /// The tokens are sorted; a repeated token must contribute once.
         const String * previous_token = nullptr;
@@ -585,7 +596,7 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
             if (scoring_token_it == scoring_tokens.end())
             {
                 throw Exception(ErrorCodes::LOGICAL_ERROR,
-                    "Token '{}' of the scoring predicate {} has no BM25 weight", token, columns_to_read[i].name);
+                    "Token '{}' of the scoring predicate {} has no BM25 weight", token, columns_to_read[leaf.score_column].name);
             }
 
             auto info_it = token_infos.find(token);
@@ -599,7 +610,7 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
             {
                 if (leaf.intersect)
                 {
-                    leaf.can_match = false;
+                    can_match = false;
                     break;
                 }
 
@@ -614,7 +625,7 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
             });
         }
 
-        if (!leaf.can_match)
+        if (!can_match)
         {
             leaf.cursors.clear();
             continue;
@@ -625,21 +636,20 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
     }
 }
 
-void MergeTreeReaderTextIndex::fillColumnScores(MutableColumns & res_columns, size_t column_idx, size_t from_mark, size_t row_offset, size_t num_rows)
+void MergeTreeReaderTextIndex::fillColumnScores(MutableColumns & res_columns, ScoreLeaf & leaf, size_t from_mark, size_t row_offset, size_t num_rows)
 {
-    auto & score_data = assert_cast<ColumnFloat32 &>(*res_columns[column_idx]).getData();
+    auto & score_data = assert_cast<ColumnFloat32 &>(*res_columns[leaf.score_column]).getData();
     size_t old_size = score_data.size();
     score_data.resize_fill(old_size + num_rows);
 
-    auto & match_column_data = assert_cast<ColumnUInt8 &>(*res_columns[score_match_column[column_idx]]).getData();
+    auto & match_column_data = assert_cast<ColumnUInt8 &>(*res_columns[leaf.match_column]).getData();
     chassert(match_column_data.size() == old_size);
     match_column_data.resize_fill(old_size + num_rows, 0);
 
     if (!score_leaves_initialized)
         initializeScoreLeaves();
 
-    auto & leaf = score_leaves[column_idx];
-    if (!leaf.can_match || leaf.cursors.empty())
+    if (leaf.cursors.empty())
         return;
 
     requireRowOffsetRepresentable(row_offset);
@@ -778,18 +788,17 @@ size_t MergeTreeReaderTextIndex::readRows(
         if (!use_lazy_mode)
             mark_postings = buildPostingsForMark(from_mark, RowsRange(from_row, from_row + rows_to_read - 1));
 
+        for (auto & leaf : score_leaves)
+            fillColumnScores(res_columns, leaf, from_mark, from_row, rows_to_read);
+
         for (size_t i = 0; i < res_columns.size(); ++i)
         {
             auto & column_mutable = *res_columns[i];
             const auto & search_query = search_queries[i];
 
-            if (is_score_column[i])
+            if (filled_with_score[i])
             {
-                fillColumnScores(res_columns, i, from_mark, from_row, rows_to_read);
-            }
-            else if (filled_with_score[i])
-            {
-                /// Filled together with the score column of the same predicate.
+                /// Filled from the scoring cursors above.
                 continue;
             }
             else if (is_always_true[i])
@@ -956,7 +965,7 @@ std::vector<PostingList> MergeTreeReaderTextIndex::buildPostingsForMark(size_t m
 
     for (size_t i = 0; i < columns_to_read.size(); ++i)
     {
-        if (is_always_true[i] || use_fallback[i] || is_score_column[i] || filled_with_score[i])
+        if (is_always_true[i] || use_fallback[i] || filled_with_score[i])
             continue;
 
         const auto & search_query = search_queries[i];
@@ -1062,7 +1071,10 @@ void MergeTreeReaderTextIndex::resetCursors()
 {
     lazy_cursors.clear();
     resolved_searches.assign(resolved_searches.size(), {});
-    score_leaves.assign(score_leaves.size(), {});
+
+    for (auto & leaf : score_leaves)
+        leaf.cursors.clear();
+
     score_leaves_initialized = false;
 }
 
