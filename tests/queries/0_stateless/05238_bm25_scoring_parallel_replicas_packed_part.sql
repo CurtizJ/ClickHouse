@@ -2,11 +2,11 @@
 -- no-parallel-replicas: the test configures parallel replicas explicitly.
 
 -- With parallel replicas and a single thread, one reader handles several tasks of a part and gets
--- new mark ranges between them. The doc-lengths stream of `_bm25_score` must extend its readable
+-- new mark ranges between them. The doc-lengths stream of `bm25()` must extend its readable
 -- range too: in a packed part it was cut at the first task's last mark (`CANNOT_READ_ALL_DATA`).
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 
@@ -34,6 +34,6 @@ INSERT INTO tab_bm25_pr_packed SELECT 1, concat(toString(number), multiIf(number
 INSERT INTO tab_bm25_pr_packed SELECT 2, concat(toString(number), multiIf(number % 10 = 0, ' error error', number % 10 = 5, ' error', ' noise')) FROM numbers(100000);
 INSERT INTO tab_bm25_pr_packed SELECT 3, concat(toString(number), multiIf(number % 10 = 0, ' error error', number % 10 = 5, ' error', ' noise')) FROM numbers(100000);
 
-SELECT round(_bm25_score, 2) AS score, count() FROM tab_bm25_pr_packed WHERE hasToken(str, 'error') GROUP BY score ORDER BY score;
+SELECT round(bm25(), 2) AS score, count() FROM tab_bm25_pr_packed WHERE hasToken(str, 'error') GROUP BY score ORDER BY score;
 
 DROP TABLE tab_bm25_pr_packed;

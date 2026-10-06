@@ -30,6 +30,7 @@ using PartitionIdToMaxBlockPtr = std::shared_ptr<const PartitionIdToMaxBlock>;
 
 class LazilyReadFromMergeTree;
 struct QueryIdHolder;
+struct BM25Params;
 
 struct MergeTreeDataSelectSamplingData
 {
@@ -523,8 +524,8 @@ public:
     /// Removes physical text columns that were eliminated by direct read from text index.
     void createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, const IndexReadColumns & added_columns, const Names & removed_columns, bool is_final);
 
-    /// Attaches the `_bm25_score` virtual column to the read task of the scoring text index.
-    void attachTextIndexScoreColumn(const String & index_name);
+    /// Marks the read task of the text index as computing `bm25()` with the given parameters.
+    void attachTextIndexScoring(const String & index_name, const BM25Params & params);
 
     const std::optional<Indexes> & getIndexes() const { return indexes; }
     /// A temporary part snapshot for PREWHERE costs; does not publish range analysis.
@@ -552,7 +553,6 @@ public:
         const ActionsDAG * filter_actions_dag_,
         const MergeTreeData & data,
         const RangesInDataParts & parts,
-        const Names & columns_to_read,
         [[maybe_unused]] const std::optional<VectorSearchParameters> & vector_search_parameters,
         [[maybe_unused]] std::optional<TopKFilterInfo> top_k_filter_info,
         const ContextPtr & query_context,
@@ -562,6 +562,9 @@ public:
 
     void setTopKColumn(const TopKFilterInfo & top_k_filter_info_);
     bool isSkipIndexAvailableForTopK(const String & sort_column) const;
+    /// Whether the read computes the sort column itself, though it does not read it: `bm25()` above the read is
+    /// replaced with the score that the PREWHERE computes for the dynamic top-k filter (see `processAndOptimizeTextIndexFunctions`).
+    bool computesSortColumnForTopK(const ActionsDAG::Node & sort_column_node) const;
     const ProjectionIndexReadDescription & getProjectionIndexReadDescription() const { return projection_index_read_desc; }
     ProjectionIndexReadDescription & getProjectionIndexReadDescription() { return projection_index_read_desc; }
     /// In distributed query plan, this step will be executed in a distributed manner - shards will be read in parallel.

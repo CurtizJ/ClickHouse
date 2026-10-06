@@ -204,8 +204,14 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
 
     const auto & sort_column = sorting_step->getInputHeaders().front()->getByName(sort_column_name);
 
+    /// The read step may compute the sort column itself in place of the expression below the sorting.
+    const ActionsDAG * sort_column_dag = expression_step ? &expression_step->getExpression() : (filter_step ? &filter_step->getExpression() : nullptr);
+    const ActionsDAG::Node * sort_column_node = sort_column_dag ? sort_column_dag->tryFindInOutputs(sort_column_name) : nullptr;
+    const bool sort_column_computed_by_read
+        = read_from_mergetree_step && sort_column_node && read_from_mergetree_step->computesSortColumnForTopK(*sort_column_node);
+
     ///remove alias
-    if (sort_column_name.contains('.'))
+    if (sort_column_name.contains('.') && !sort_column_computed_by_read)
     {
         if (!expression_step && !filter_step)
             return 0;
@@ -257,7 +263,7 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
         = filter_step || read_from_mergetree_step->getPrewhereInfo() || read_from_mergetree_step->getRowLevelFilter();
 
     const auto & read_columns = read_from_mergetree_step->getAllColumnNames();
-    if (std::find(read_columns.begin(), read_columns.end(), sort_column_name) == read_columns.end())
+    if (!sort_column_computed_by_read && std::find(read_columns.begin(), read_columns.end(), sort_column_name) == read_columns.end())
     {
         LOG_DEBUG(getLogger("optimizeTopK"), "Could not find column {} in ReadFromMergeTreeStep", sort_column_name);
         return 0;

@@ -1,7 +1,7 @@
 -- Tags: no-parallel-replicas
 
 SET enable_analyzer = 1;
-SET allow_experimental_bm25_score_column = 1;
+SET allow_experimental_bm25_scoring = 1;
 SET query_plan_direct_read_from_text_index = 1;
 SET use_skip_indexes_on_data_read = 1;
 
@@ -36,10 +36,10 @@ INSERT INTO tab_phrase_scoring VALUES (6, 'raft consensus basics'), (7, 'log raf
 OPTIMIZE TABLE tab_phrase_scoring FINAL;
 SELECT groupArray(id) FROM tab_phrase_scoring WHERE hasPhrase(body, 'raft consensus');
 
-SELECT '-- _bm25_score works on the same index';
-SELECT id, _bm25_score > 0 FROM tab_phrase_scoring WHERE hasToken(body, 'consensus') ORDER BY id;
+SELECT '-- bm25() works on the same index';
+SELECT id, bm25() > 0 FROM tab_phrase_scoring WHERE hasToken(body, 'consensus') ORDER BY id;
 
 SELECT '-- hasPhrase filters, hasToken provides the scoring tokens';
-SELECT id, _bm25_score > 0 FROM tab_phrase_scoring WHERE hasToken(body, 'log') AND hasPhrase(body, 'raft consensus') ORDER BY id;
+SELECT id, bm25() > 0 FROM tab_phrase_scoring WHERE hasToken(body, 'log') AND hasPhrase(body, 'raft consensus') ORDER BY id;
 
 DROP TABLE tab_phrase_scoring;

@@ -1004,7 +1004,7 @@ MergeTreeIndexGranuleText::PostingsBlock MergeTreeIndexGranuleText::readPostings
     size_t block_idx,
     PostingsSerialization & postings_serialization,
     const String & index_id_for_caches,
-    bool with_scoring)
+    bool with_term_frequencies)
 {
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
     auto & postings_cache = *condition_text.postingsCache();
@@ -1012,7 +1012,7 @@ MergeTreeIndexGranuleText::PostingsBlock MergeTreeIndexGranuleText::readPostings
     UInt64 offset_in_file = token_info.offsets[block_idx];
     auto postings_key = TextIndexPostingsCache::hash(index_id_for_caches, offset_in_file, static_cast<UInt8>(TextIndexPostingsCacheKind::Roaring));
 
-    if (!with_scoring)
+    if (!with_term_frequencies)
     {
         const auto load_postings = [&]
         {
@@ -1023,10 +1023,11 @@ MergeTreeIndexGranuleText::PostingsBlock MergeTreeIndexGranuleText::readPostings
         };
 
         auto cell = postings_cache.getOrSet(postings_key, load_postings);
-        return {.postings = std::get<PostingListPtr>(cell->value), .scoring = {}};
+        return {.postings = std::get<PostingListPtr>(cell->value), .scoring = nullptr};
     }
 
-    /// Scoring also needs the postings as a flat sorted array of row ids with their term frequencies.
+    /// The block is decoded once into the flat array with the term frequencies, and the bitmap of the
+    /// match analysis is built from that array without re-reading the stream.
     auto scoring_key = TextIndexPostingsCache::hash(index_id_for_caches, offset_in_file, static_cast<UInt8>(TextIndexPostingsCacheKind::ScoringPostings));
 
     const auto load_scoring_postings = [&]
@@ -1045,7 +1046,6 @@ MergeTreeIndexGranuleText::PostingsBlock MergeTreeIndexGranuleText::readPostings
     auto scoring_cell = postings_cache.getOrSet(scoring_key, load_scoring_postings);
     const auto & scoring_postings = std::get<ScoringPostingsPtr>(scoring_cell->value);
 
-    /// The bitmap for the match stage is built from the flat array, without re-reading the stream.
     const auto load_postings_from_array = [&]
     {
         auto postings = std::make_shared<PostingList>();
@@ -1107,9 +1107,10 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         /// discarded by the analyzer after reading postings for previous tokens.
         if (analyzer->isTokenNeeded(token))
         {
-            auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches, scoring_enabled);
+            /// For a query computing `bm25()`, decode the term frequencies along with the row ids and keep
+            /// the flat postings for the scoring cursors of the reader.
+            auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches, /*with_term_frequencies=*/ scoring_enabled);
 
-            /// Keep the flat postings for the BM25 scoring cursors of the query.
             if (block.scoring)
                 scoring_postings_by_offset.emplace(token_info->offsets[0], std::move(block.scoring));
 
@@ -2598,15 +2599,15 @@ MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
 {
-    return createIndexCondition(predicate, context, /*scoring_enabled=*/false);
+    return createIndexConditionWithScoring(predicate, context, std::make_shared<TextIndexScoringQueries>());
 }
 
-MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context, bool scoring_enabled) const
+MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexConditionWithScoring(const ActionsDAG::Node * predicate, ContextPtr context, TextIndexScoringQueriesPtr scoring_queries) const
 {
     return std::make_shared<MergeTreeIndexConditionText>(
         predicate, context, index.sample_block, normalized_index_column_name, tokenizer.get(),
         preprocessor, postprocessor, params.enable_positions, getColumnsShadowingMapSubcolumns(), collectJSONIndexArgumentTypes(*index.expression),
-        scoring_enabled);
+        std::move(scoring_queries));
 }
 
 DataTypePtr MergeTreeIndexText::getNestedDataType(const DataTypePtr & data_type)

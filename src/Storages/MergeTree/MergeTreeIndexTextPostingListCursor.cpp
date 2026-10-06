@@ -1448,6 +1448,7 @@ bool lazyIntersectPostingLists(
 
 void scoreCursorsUnion(
     Float32 * data,
+    UInt8 * matches,
     std::vector<ScoreCursor> & cursors,
     size_t row_offset,
     size_t num_rows)
@@ -1462,7 +1463,9 @@ void scoreCursorsUnion(
 
         while (cursor.valid() && cursor.value() < window_end)
         {
-            data[cursor.value() - row_offset] += entry.weight->contribution(cursor.termFrequency(), cursor.documentLengthByte());
+            const size_t row = cursor.value() - row_offset;
+            data[row] += entry.weight->contribution(cursor.termFrequency(), cursor.documentLengthByte());
+            matches[row] = 1;
             ++rows_scored;
             cursor.next();
         }
@@ -1473,6 +1476,7 @@ void scoreCursorsUnion(
 
 void scoreCursorsIntersection(
     Float32 * data,
+    UInt8 * matches,
     std::vector<ScoreCursor> & cursors,
     size_t row_offset,
     size_t num_rows)
@@ -1518,6 +1522,7 @@ void scoreCursorsIntersection(
             score += entry.weight->contribution(entry.cursor->termFrequency(), entry.cursor->documentLengthByte());
 
         data[agreed - row_offset] = score;
+        matches[agreed - row_offset] = 1;
         ++rows_scored;
         target = agreed + 1;
     }

@@ -31,7 +31,7 @@ using BM25StatePtr = std::shared_ptr<const BM25State>;
 class BM25GlobalStatsBuilder
 {
 public:
-    explicit BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_);
+    BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_, BM25Params params_);
 
     void addPart(const DataPartPtr & part, const MergeTreeReaderSettings & reader_settings);
     BM25StatePtr build() const;
@@ -40,6 +40,7 @@ private:
     MergeTreeIndexWithCondition index_with_condition;
     const MergeTreeIndexText * text_index;
     const MergeTreeIndexConditionText * condition_text;
+    BM25Params params;
     std::vector<String> scoring_token_names;
 
     std::atomic<UInt64> num_docs{0};
@@ -54,7 +55,7 @@ using IndexReadTasks = std::map<String, IndexReadTask>;
 
 /// Builds the query-global BM25 state (IDF, average document length) for calculating the BM25 score.
 /// Runs one parallel pass over the parts' text-index granules.
-/// Returns null when no index read task carries the score column.
+/// Returns null when no index read task computes `bm25()`.
 BM25StatePtr buildBM25State(
     const RangesInDataParts & parts_ranges,
     const IndexReadTasks & index_read_tasks,
