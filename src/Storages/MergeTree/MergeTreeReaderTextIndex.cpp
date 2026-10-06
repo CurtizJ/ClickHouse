@@ -549,8 +549,6 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
             scoring_stats.num_docs);
     }
 
-    const auto & token_infos = analyzer.getAllTokenInfos();
-
     absl::flat_hash_map<std::string_view, const BM25ScoringToken *> scoring_tokens;
     for (const auto & scoring_token : bm25_score_state->tokens)
         scoring_tokens.emplace(scoring_token.token, &scoring_token);
@@ -562,8 +560,17 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
 
         const auto & search_query = *search_queries[i];
         auto & leaf = score_leaves[i];
+
+        /// The analysis decodes the postings only of the tokens of the queries that can still match,
+        /// so a leaf takes the tokens from the state of its query, not from all token infos of the granule.
+        const auto & query_builder = analyzer.getQueryBuilder(search_query);
+        const auto & token_infos = query_builder.tokens;
+
         leaf.intersect = search_query.getSearchMode() == TextSearchMode::All;
-        leaf.can_match = true;
+        leaf.can_match = !query_builder.is_failed;
+
+        if (!leaf.can_match)
+            continue;
 
         /// The tokens are sorted; a repeated token must contribute once.
         const String * previous_token = nullptr;
@@ -586,8 +593,8 @@ void MergeTreeReaderTextIndex::initializeScoreLeaves()
             if (info_it != token_infos.end() && info_it->second)
                 cursor = makeScoringCursor(token, *info_it->second);
 
-            /// The token is absent from this part: the predicate never matches when it requires the token,
-            /// otherwise the token contributes 0 to every row.
+            /// The token is absent from the readable rows of this part: the predicate never matches
+            /// when it requires the token, otherwise the token contributes 0 to every row.
             if (!cursor)
             {
                 if (leaf.intersect)
