@@ -15,6 +15,7 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
 #include <Interpreters/TokenizerFactory.h>
+#include <Storages/MergeTree/TextIndexTransforms.h>
 #include <Common/FunctionDocumentation.h>
 #include <Common/UnorderedSetWithMemoryTracking.h>
 
@@ -36,8 +37,10 @@ namespace
 constexpr size_t arg_input = 0;
 constexpr size_t arg_phrase = 1;
 constexpr size_t arg_tokenizer = 2;
+constexpr size_t arg_preprocessor = 3;
 
-VectorWithMemoryTracking<String> initializePhraseTokens(const ColumnsWithTypeAndName & arguments, const ITokenizer & tokenizer, std::string_view function_name)
+VectorWithMemoryTracking<String> initializePhraseTokens(
+    const ColumnsWithTypeAndName & arguments, const ITokenizer & tokenizer, const TextIndexTransforms * transforms, std::string_view function_name)
 {
     auto column_phrase = arguments[arg_phrase].column;
 
@@ -59,7 +62,7 @@ VectorWithMemoryTracking<String> initializePhraseTokens(const ColumnsWithTypeAnd
             if (!element.safeGet<String>().empty())
                 tokens.push_back(element.safeGet<String>());
         }
-        return tokens;
+        return transforms ? transforms->processTokens(std::move(tokens)) : tokens;
     }
 
     if (phrase_field.isNull() || phrase_field.getType() != Field::Types::String)
@@ -72,6 +75,9 @@ VectorWithMemoryTracking<String> initializePhraseTokens(const ColumnsWithTypeAnd
     auto phrase_str = phrase_field.safeGet<String>();
 
     /// Tokenize the phrase, preserving order (no deduplication).
+    if (transforms)
+        return transforms->stringToTokens(phrase_str, tokenizer);
+
     VectorWithMemoryTracking<String> tokens;
     tokenizer.stringToTokens(phrase_str.data(), phrase_str.size(), tokens);
     return tokens;
@@ -207,7 +213,8 @@ void executeMatchPhraseOnArray(
 }
 }
 
-FunctionHasPhraseOverloadResolver::FunctionHasPhraseOverloadResolver(ContextPtr)
+FunctionHasPhraseOverloadResolver::FunctionHasPhraseOverloadResolver(ContextPtr context_)
+    : context(std::move(context_))
 {
 }
 
@@ -224,7 +231,9 @@ DataTypePtr FunctionHasPhraseOverloadResolver::getReturnTypeImpl(const ColumnsWi
          "const String or const Array(String)"}};
 
     FunctionArgumentDescriptors optional_args{
-        {"tokenizer", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"}};
+        {"tokenizer", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"},
+        {"preprocessor", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"},
+        {"postprocessor", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"}};
 
     validateFunctionArguments(name, arguments, mandatory_args, optional_args);
 
@@ -276,34 +285,53 @@ FunctionHasPhraseOverloadResolver::buildImpl(const ColumnsWithTypeAndName & argu
     if (!supported_types.contains(tokenizer->getType()))
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Function '{}' does not support the '{}' tokenizer.", name, tokenizer_name);
 
-    auto phrase_tokens = initializePhraseTokens(arguments, *tokenizer, getName());
-    return std::make_shared<FunctionBaseHasPhrase>(std::move(tokenizer), std::move(phrase_tokens), std::move(argument_types), return_type);
+    auto transforms = TextIndexTransforms::createForFunction(arguments, arg_preprocessor, getName(), context);
+    auto phrase_tokens = initializePhraseTokens(arguments, *tokenizer, transforms.get(), getName());
+    return std::make_shared<FunctionBaseHasPhrase>(
+        std::move(tokenizer), std::move(phrase_tokens), std::move(transforms), std::move(argument_types), return_type);
 }
 
 ExecutableFunctionPtr FunctionBaseHasPhrase::prepare(const ColumnsWithTypeAndName &) const
 {
     auto failure_table = buildFailureFunction(phrase_tokens);
-    return std::make_unique<ExecutableFunctionHasPhrase>(tokenizer, phrase_tokens, std::move(failure_table));
+    return std::make_unique<ExecutableFunctionHasPhrase>(tokenizer, phrase_tokens, std::move(failure_table), transforms);
+}
+
+bool ExecutableFunctionHasPhrase::useDefaultImplementationForNulls() const
+{
+    return !transforms || !transforms->hasPreprocessor();
 }
 
 ColumnPtr
-ExecutableFunctionHasPhrase::executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const
+ExecutableFunctionHasPhrase::executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const
 {
     if (input_rows_count == 0)
-        return ColumnVector<UInt8>::create();
+        return result_type->createColumn();
+
+    if (!useDefaultImplementationForNulls() && arguments[arg_phrase].column->onlyNull())
+        return result_type->createColumnConstWithDefaultValue(input_rows_count)->convertToFullColumnIfConst();
 
     auto col_result = ColumnVector<UInt8>::create();
+    ColumnPtr col_input = arguments[arg_input].column;
+    ColumnPtr null_map;
+    const ITokenizer * execution_tokenizer = tokenizer.get();
+
+    if (transforms)
+    {
+        col_input = transforms->transformFunctionInput(col_input, *execution_tokenizer, null_map);
+        execution_tokenizer = &transforms->getSearchTokenizer(*execution_tokenizer);
+    }
+
     if (phrase_tokens.empty())
     {
         col_result->getData().assign(input_rows_count, UInt8(0));
-        return col_result;
+        return TextIndexTransforms::wrapFunctionResult(std::move(col_result), null_map, result_type);
     }
 
-    ColumnPtr col_input = arguments[arg_input].column;
     if (const auto * col_input_string = checkAndGetColumn<ColumnString>(col_input.get()))
-        executeMatchPhrase(*col_input_string, col_result->getData(), input_rows_count, tokenizer.get(), phrase_tokens, failure_table);
+        executeMatchPhrase(*col_input_string, col_result->getData(), input_rows_count, execution_tokenizer, phrase_tokens, failure_table);
     else if (const auto * col_input_fixedstring = checkAndGetColumn<ColumnFixedString>(col_input.get()))
-        executeMatchPhrase(*col_input_fixedstring, col_result->getData(), input_rows_count, tokenizer.get(), phrase_tokens, failure_table);
+        executeMatchPhrase(*col_input_fixedstring, col_result->getData(), input_rows_count, execution_tokenizer, phrase_tokens, failure_table);
     else if (const auto * col_input_array = checkAndGetColumn<ColumnArray>(col_input.get()))
     {
         const IColumn * elements = &col_input_array->getData();
@@ -318,7 +346,7 @@ ExecutableFunctionHasPhrase::executeImpl(const ColumnsWithTypeAndName & argument
                 elements_nullable,
                 col_result->getData(),
                 input_rows_count,
-                tokenizer.get(),
+                execution_tokenizer,
                 phrase_tokens,
                 failure_table);
         else if (const auto * col_elements_fixedstring = checkAndGetColumn<ColumnFixedString>(elements))
@@ -328,7 +356,7 @@ ExecutableFunctionHasPhrase::executeImpl(const ColumnsWithTypeAndName & argument
                 elements_nullable,
                 col_result->getData(),
                 input_rows_count,
-                tokenizer.get(),
+                execution_tokenizer,
                 phrase_tokens,
                 failure_table);
         else
@@ -336,7 +364,7 @@ ExecutableFunctionHasPhrase::executeImpl(const ColumnsWithTypeAndName & argument
             col_result->getData().assign(input_rows_count, UInt8(0));
     }
 
-    return col_result;
+    return TextIndexTransforms::wrapFunctionResult(std::move(col_result), null_map, result_type);
 }
 
 REGISTER_FUNCTION(HasPhrase)
@@ -361,13 +389,14 @@ including duplicates. Empty phrase elements are ignored, because no tokenizer pr
 When a text index defines a [preprocessor](/reference/engines/table-engines/mergetree-family/textindexes#creating-a-text-index) (for example `lowerUTF8`), `hasPhrase` applies it to both `input` and `phrase` before tokenization.
 The preprocessor is only applied on the text index path, so results may differ between queries that use the text index and queries that do not (e.g. `SETTINGS use_skip_indexes = 0`).
 This inconsistency is tolerated to improve the usability of full-text search.
+With a text index, the query plan passes the tokenizer, the preprocessor and the postprocessor of the index to the function as its last arguments.
 </Note>
 
 Unlike [`hasToken`](#hasToken), [`hasAnyTokens`](#hasAnyTokens) and [`hasAllTokens`](#hasAllTokens), `hasPhrase` requires the tokens to appear in the same order
 and without any intervening tokens. For example, `hasPhrase('the quick brown fox', 'quick fox')` returns 0
 because "brown" appears between "quick" and "fox".
     )";
-    FunctionDocumentation::Syntax syntax = "hasPhrase(input, phrase[, tokenizer])";
+    FunctionDocumentation::Syntax syntax = "hasPhrase(input, phrase[, tokenizer[, preprocessor[, postprocessor]]])";
     FunctionDocumentation::Arguments arguments = {
         {"input",
          "The input column.",
@@ -381,6 +410,8 @@ because "brown" appears between "quick" and "fox".
           "Array(Nullable(FixedString))"}},
         {"phrase", "Phrase to search for.", {"const String", "const Array(String)"}},
         {"tokenizer", "The tokenizer to use. Optional, defaults to `splitByNonAlpha`.", {"const String"}},
+        {"preprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to `input` (to every element of an array) and to `phrase` given as a `String` before tokenization, like the preprocessor of a text index. Optional, an empty string means none.", {"const String"}},
+        {"postprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to every token of `input` and `phrase`, like the postprocessor of a text index. Tokens it maps to an empty string are dropped, so they do not separate the tokens around them. Optional, an empty string means none.", {"const String"}},
     };
     FunctionDocumentation::ReturnedValue returned_value
         = {"Returns `1` if the phrase is found as a consecutive token sequence, `0` otherwise.", {"UInt8"}};

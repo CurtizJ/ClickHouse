@@ -1,8 +1,8 @@
 SELECT 'Negative tests';
--- Must accept two to three arguments
+-- Must accept two to five arguments
 SELECT hasPhrase(); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
 SELECT hasPhrase('a'); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
-SELECT hasPhrase('a', 'b', 'c', 'd'); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
+SELECT hasPhrase('a', 'b', 'c', 'd', 'e', 'f'); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
 -- 1st arg must be String, FixedString or an array of those
 SELECT hasPhrase(1, 'hello'); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
 SELECT hasPhrase([1, 2], 'hello'); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }

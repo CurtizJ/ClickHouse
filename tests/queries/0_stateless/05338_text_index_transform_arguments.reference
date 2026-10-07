@@ -1,0 +1,33 @@
+-- The preprocessor applies to the input and a String needle
+1
+0
+1
+0
+1
+1
+-- The postprocessor applies to every token, the dropped ones do not separate a phrase
+1
+1
+0
+0
+1
+-- NULL
+\N
+1
+1
+\N
+-- Invalid transforms
+-- Same rows with and without the direct read
+[1,5]
+[1,5]
+[4,6]
+[4,6]
+[1,2,5]
+[1,2,5]
+-- NOT keeps the NULL values out with a postprocessor
+[1,2,4,5]
+[1,2,4,5]
+-- The plan passes the transforms of the index
+1
+-- The index answers the arguments that denote its transforms
+[1,2,5]

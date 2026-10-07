@@ -332,7 +332,7 @@ CREATE TABLE tab
 )
 ENGINE = MergeTree ORDER BY tuple();  -- { serverError INCORRECT_QUERY }
 
-SELECT '- A postprocessor that produces a token containing separator characters throws BAD_ARGUMENTS at query time';
+SELECT '- A token the postprocessor produces with separator characters matches as a whole';
 CREATE TABLE tab
 (
     id UInt64,
@@ -343,7 +343,7 @@ ENGINE = MergeTree ORDER BY id;
 
 INSERT INTO tab VALUES (1, 'foo');
 
-SELECT count() FROM tab WHERE hasToken(val, 'foo');  -- { serverError BAD_ARGUMENTS }
+SELECT count() FROM tab WHERE hasToken(val, 'foo');
 
 DROP TABLE tab;
 

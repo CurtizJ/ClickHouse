@@ -475,7 +475,7 @@ CREATE TABLE tab
     val Map(String, String),
     INDEX idx(mapKeys(val)) TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(val))
 )
-ENGINE = MergeTree ORDER BY id;   -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+ENGINE = MergeTree ORDER BY id;   -- { serverError UNKNOWN_IDENTIFIER }
 
 DROP TABLE IF EXISTS tab;
 

@@ -78,11 +78,8 @@ private:
 
 using TextSearchQueryPtr = std::shared_ptr<TextSearchQuery>;
 
-class MergeTreeIndexTextPreprocessor;
-using MergeTreeIndexTextPreprocessorPtr = std::shared_ptr<MergeTreeIndexTextPreprocessor>;
-
-class MergeTreeIndexTextPostprocessor;
-using MergeTreeIndexTextPostprocessorPtr = std::shared_ptr<MergeTreeIndexTextPostprocessor>;
+class TextIndexTransforms;
+using TextIndexTransformsPtr = std::shared_ptr<const TextIndexTransforms>;
 
 /// Condition for text index.
 /// Unlike conditions for other indexes, it can be used after analysis
@@ -96,8 +93,7 @@ public:
         const Block & index_sample_block,
         const std::optional<String> & normalized_index_column_name_,
         TokenizerPtr tokenizer_,
-        MergeTreeIndexTextPreprocessorPtr preprocessor_,
-        MergeTreeIndexTextPostprocessorPtr postprocessor_,
+        TextIndexTransformsPtr transforms_,
         bool has_positions_,
         NameSet columns_shadowing_map_subcolumns_,
         JSONIndexArgumentTypes json_argument_types_);
@@ -121,6 +117,8 @@ public:
     TextSearchQueryPtr createTextSearchQuery(const ActionsDAG::Node & node) const;
     /// Whether the index can answer the predicate of the function node.
     bool canAnswerFunctionNode(const ActionsDAG::Node & node) const;
+    /// Whether the first argument of the function node is the index expression, not e.g. a map element or a JSON path.
+    bool isIndexExpressionArgument(const ActionsDAG::Node & node) const;
     /// Returns generated virtual column name for the replacement of related function node.
     std::optional<String> replaceToVirtualColumn(const TextSearchQuery & query, const String & index_name);
     TextSearchQueryPtr getSearchQueryForVirtualColumn(const String & column_name) const;
@@ -132,8 +130,7 @@ public:
     bool useGlobalHeaderCache() const { return use_global_header_cache; }
 
     TokenizerPtr getTokenizer() const { return tokenizer; }
-    MergeTreeIndexTextPreprocessorPtr getPreprocessor() const { return preprocessor; }
-    MergeTreeIndexTextPostprocessorPtr getPostprocessor() const { return postprocessor; }
+    const TextIndexTransformsPtr & getTransforms() const { return transforms; }
 
 private:
     /// Uses RPN like KeyCondition
@@ -170,6 +167,9 @@ private:
     /// Whether the function accepts a tokenizer definition as its third argument and the given node
     /// is a constant one that denotes the index tokenizer.
     bool tokenizerArgumentMatchesIndex(const String & function_name, const RPNBuilderTreeNode & node) const;
+    /// Whether the arguments after the needle (the tokenizer, and the preprocessor and the postprocessor if given)
+    /// denote those of the index.
+    bool transformArgumentsMatchIndex(const String & function_name, const RPNBuilderFunctionTreeNode & function_node) const;
 
     bool traverseFunctionNode(
         const RPNBuilderFunctionTreeNode & function_node,
@@ -206,6 +206,9 @@ private:
 
     VectorWithMemoryTracking<String> stringToTokens(const Field & field) const;
     VectorWithMemoryTracking<String> stringToTokens(std::string_view raw) const;
+    /// The distinct tokens to search for: compacted, or only deduplicated after a postprocessor, which maps tokens
+    /// independently, so that the containment of one token in another no longer holds.
+    VectorWithMemoryTracking<String> finalizeSearchTokens(VectorWithMemoryTracking<String> tokens) const;
     VectorWithMemoryTracking<String> substringToTokens(const Field & field, bool is_prefix, bool is_suffix) const;
     VectorWithMemoryTracking<String> stringLikeToTokens(const Field & field) const;
 
@@ -252,11 +255,9 @@ private:
     std::unordered_map<String, TextSearchQueryPtr> virtual_column_to_search_query;
     /// If global mode is All, then we can exit analysis earlier if any token is missing in granule.
     TextSearchMode global_search_mode = TextSearchMode::All;
-    /// Reference preprocessor expression
-    MergeTreeIndexTextPreprocessorPtr preprocessor;
+    /// The preprocessor and the postprocessor of the index.
+    TextIndexTransformsPtr transforms;
     bool has_preprocessor;
-    /// Reference postprocessor expression
-    MergeTreeIndexTextPostprocessorPtr postprocessor;
     bool has_postprocessor;
     /// Whether the index has position data for phrase queries.
     bool has_positions = false;

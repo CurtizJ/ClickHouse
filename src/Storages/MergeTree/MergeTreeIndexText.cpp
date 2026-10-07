@@ -37,12 +37,11 @@
 #include <Storages/MergeTree/MergeTreeIndexGranularity.h>
 #include <Storages/MergeTree/MarkRange.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
-#include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
 #include <Storages/MergeTree/TextIndexBlockedPositionsCodec.h>
-#include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
 #include <Storages/MergeTree/MergeTreeWriterStream.h>
 #include <Storages/MergeTree/TextIndexCache.h>
+#include <Storages/MergeTree/TextIndexTransforms.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 
@@ -2014,22 +2013,20 @@ MergeTreeIndexAggregatorText::MergeTreeIndexAggregatorText(
     MergeTreeIndexTextParams params_,
     TokenizerPtr tokenizer_,
     const IPostingListCodec * posting_list_codec_,
-    MergeTreeIndexTextPreprocessorPtr preprocessor_,
-    MergeTreeIndexTextPostprocessorPtr postprocessor_)
+    TextIndexTransformsPtr transforms_)
     : index_column_name(std::move(index_column_name_))
     , params(std::move(params_))
     , owned_tokenizer(tokenizer_ && tokenizer_->isStateful() ? std::shared_ptr<const ITokenizer>(tokenizer_->clone()) : nullptr)
     , tokenizer(owned_tokenizer ? owned_tokenizer.get() : tokenizer_)
     , granule_builder(params, tokenizer, posting_list_codec_)
-    , preprocessor(preprocessor_)
-    , postprocessor(postprocessor_)
+    , transforms(std::move(transforms_))
 {
     /// Fast path for IN/NOT IN filter-only postprocessors only: drops are decided per distinct token in
     /// addToken so dropped tokens never build postings. Positions must be disabled (phrase search needs
     /// dense position renumbering after drops). Any other postprocessor uses the general per-batch path.
-    if (postprocessor->hasActions() && !params.positions)
+    if (transforms->hasPostprocessor() && !params.positions)
     {
-        if (const auto * inline_filter = postprocessor->getInlineFilter())
+        if (const auto * inline_filter = transforms->getInlineFilter())
         {
             granule_builder.postprocessor_drop_filter = inline_filter;
             granule_builder.seedDropFilter();
@@ -2067,12 +2064,12 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
 
     const PostingListBuildContext context = granule_builder.buildContext();
     const auto & index_column = block.getByName(index_column_name);
-    auto [preprocessed_column, offset] = preprocessor->processColumn(index_column, *pos, rows_read);
+    auto [preprocessed_column, offset] = transforms->preprocessColumn(index_column.column, *pos, rows_read);
 
-    if (postprocessor->hasActions() && !use_postprocessor_drop_fast_path)
+    if (transforms->hasPostprocessor() && !use_postprocessor_drop_fast_path)
     {
-        ColumnPtr tokenized = tokenizeToArray(*tokenizer, *preprocessed_column, offset, rows_read);
-        ColumnPtr postprocessed = postprocessor->processTokensArrayBatch(assert_cast<const ColumnArray *>(tokenized.get()));
+        /// Tokens transformed to an empty string (e.g. stop words) are skipped in addDocumentsFromArray.
+        ColumnPtr postprocessed = transforms->tokenizeColumn(*tokenizer, *preprocessed_column, offset, rows_read);
         addDocumentsFromArray<false>(postprocessed, 0, rows_read, context);
     }
     else if (isArray(index_column.type))
@@ -2243,8 +2240,7 @@ MergeTreeIndexText::MergeTreeIndexText(
     , params(std::move(params_))
     , tokenizer(std::move(tokenizer_))
     , posting_list_codec(std::move(posting_list_codec_))
-    , preprocessor(std::make_shared<MergeTreeIndexTextPreprocessor>(params.preprocessor, index_))
-    , postprocessor(std::make_shared<MergeTreeIndexTextPostprocessor>(params.postprocessor, index_))
+    , transforms(std::make_shared<TextIndexTransforms>(params.preprocessor, params.postprocessor, index_))
     , normalized_index_column_name(getNormalizedIndexColumnName(index_))
 {
 }
@@ -2307,14 +2303,14 @@ MergeTreeIndexGranulePtr MergeTreeIndexText::createIndexGranule() const
 
 MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 {
-    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), preprocessor, postprocessor);
+    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), transforms);
 }
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
 {
     return std::make_shared<MergeTreeIndexConditionText>(
         predicate, context, index.sample_block, normalized_index_column_name, tokenizer.get(),
-        preprocessor, postprocessor, params.positions, getColumnsShadowingMapSubcolumns(), collectJSONIndexArgumentTypes(*index.expression));
+        transforms, params.positions, getColumnsShadowingMapSubcolumns(), collectJSONIndexArgumentTypes(*index.expression));
 }
 
 DataTypePtr MergeTreeIndexText::getNestedDataType(const DataTypePtr & data_type)
@@ -2574,15 +2570,11 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
                 index_data_type->getName());
     }
 
-    /// Create the preprocessor for validation.
-    /// For very strict validation of the expression we fully parse it here.
-    /// However it will be parsed again for index construction, generally immediately after this call.
-    /// This is a bit redundant but that doesn't impact performance anyhow because the expression is intended to be simple enough.
-    MergeTreeIndexTextPreprocessor preprocessor(preprocessor_ast, index);
-
-    /// Create the postprocessor for validation.
-    /// This validates the token transformation expression (always String -> String).
-    MergeTreeIndexTextPostprocessor postprocessor(postprocessor_ast, index);
+    /// Create the preprocessor and the postprocessor for validation.
+    /// For very strict validation of the expressions we fully parse them here.
+    /// However they will be parsed again for index construction, generally immediately after this call.
+    /// This is a bit redundant but that doesn't impact performance anyhow because the expressions are intended to be simple enough.
+    TextIndexTransforms transforms(preprocessor_ast, postprocessor_ast, index);
 }
 
 }

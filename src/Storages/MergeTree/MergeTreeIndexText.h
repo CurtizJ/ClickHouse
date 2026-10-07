@@ -478,7 +478,6 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
 struct ITokenizer;
 using TokenizerPtr = const ITokenizer *;
 
-class MergeTreeIndexTextPostprocessor;
 struct MergeTreeIndexTextInlineFilter;
 
 struct MergeTreeIndexTextGranuleBuilder
@@ -523,11 +522,6 @@ struct MergeTreeIndexTextGranuleBuilder
     const MergeTreeIndexTextInlineFilter * postprocessor_drop_filter = nullptr;
 };
 
-class MergeTreeIndexTextPreprocessor;
-using MergeTreeIndexTextPreprocessorPtr = std::shared_ptr<MergeTreeIndexTextPreprocessor>;
-
-class MergeTreeIndexTextPostprocessor;
-using MergeTreeIndexTextPostprocessorPtr = std::shared_ptr<MergeTreeIndexTextPostprocessor>;
 
 struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
 {
@@ -536,8 +530,7 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
         MergeTreeIndexTextParams params_,
         TokenizerPtr tokenizer_,
         const IPostingListCodec * posting_list_codec_,
-        MergeTreeIndexTextPreprocessorPtr preprocessor_,
-        MergeTreeIndexTextPostprocessorPtr postprocessor_);
+        TextIndexTransformsPtr transforms_);
 
     ~MergeTreeIndexAggregatorText() override = default;
 
@@ -562,8 +555,7 @@ private:
     std::shared_ptr<const ITokenizer> owned_tokenizer;
     TokenizerPtr tokenizer;
     MergeTreeIndexTextGranuleBuilder granule_builder;
-    MergeTreeIndexTextPreprocessorPtr preprocessor;
-    MergeTreeIndexTextPostprocessorPtr postprocessor;
+    TextIndexTransformsPtr transforms;
     /// True when the postprocessor is an IN/NOT IN filter handled by the per-distinct-token drop fast path.
     bool use_postprocessor_drop_fast_path = false;
 };
@@ -601,8 +593,7 @@ public:
     MergeTreeIndexTextParams params;
     std::unique_ptr<ITokenizer> tokenizer;
     std::unique_ptr<IPostingListCodec> posting_list_codec;
-    MergeTreeIndexTextPreprocessorPtr preprocessor;
-    MergeTreeIndexTextPostprocessorPtr postprocessor;
+    TextIndexTransformsPtr transforms;
     /// Name of the index expression rewritten as `optimize_empty_string_comparisons` rewrites queries.
     std::optional<String> normalized_index_column_name;
 };

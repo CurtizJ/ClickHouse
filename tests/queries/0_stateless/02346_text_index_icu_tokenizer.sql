@@ -9,8 +9,8 @@ SET use_query_condition_cache = 0;
 SELECT hasAnyTokens('a b', 'b', 'icu'); -- { serverError BAD_ARGUMENTS }
 SELECT hasAnyTokens('a b', 'b', 'icu('''')'); -- { serverError BAD_ARGUMENTS }
 SELECT hasAnyTokens('a b', 'b', materialize('icu(''ja'')')); -- { serverError ILLEGAL_COLUMN }
--- Like ngrams/splitByString, has*Tokens takes no separate tokenizer-parameter argument.
-SELECT hasAnyTokens('a b', 'b', 'icu(''ja'')', 'ja'); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
+-- Like ngrams/splitByString, has*Tokens takes no separate tokenizer-parameter argument: the fourth one is the preprocessor.
+SELECT hasAnyTokens('a b', 'b', 'icu(''ja'')', 'ja'); -- { serverError BAD_ARGUMENTS }
 
 DROP TABLE IF EXISTS tab;
 DROP TABLE IF EXISTS tab_noindex;

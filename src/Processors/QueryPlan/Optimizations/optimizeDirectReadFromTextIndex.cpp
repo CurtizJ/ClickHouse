@@ -1,14 +1,11 @@
 #include <Access/ContextAccess.h>
 #include <Columns/ColumnConst.h>
-#include <Columns/ColumnSet.h>
-#include <Common/FieldVisitorToString.h>
 #include <Common/ZooKeeper/ZooKeeperCommon.h>
 #include <Common/assert_cast.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Common/logger_useful.h>
 #include <Common/quoteString.h>
-#include <DataTypes/DataTypeArray.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/FunctionHelpers.h>
 #include <Functions/FunctionsMiscellaneous.h>
@@ -16,7 +13,6 @@
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
-#include <Interpreters/PreparedSets.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
@@ -41,15 +37,9 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataSelectExecutor.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
-#include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
-#include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
 #include <Storages/MergeTree/RangesInDataPart.h>
+#include <Storages/MergeTree/TextIndexTransforms.h>
 #include <base/defines.h>
-
-namespace DB::ErrorCodes
-{
-    extern const int BAD_ARGUMENTS;
-}
 
 namespace DB::QueryPlanOptimizations
 {
@@ -71,51 +61,6 @@ struct TextIndexReadInfo
 };
 
 using TextIndexReadInfos = absl::flat_hash_map<String, TextIndexReadInfo>;
-
-String getNameWithoutAliases(const ActionsDAG::Node * node)
-{
-    while (node->type == ActionsDAG::ActionType::ALIAS)
-    {
-        node = node->children[0];
-    }
-
-    if (node->type == ActionsDAG::ActionType::FUNCTION)
-    {
-        String result_name = node->function_base->getName() + "(";
-        for (size_t i = 0; i < node->children.size(); ++i)
-        {
-            if (i)
-                result_name += ", ";
-
-            result_name += getNameWithoutAliases(node->children[i]);
-        }
-
-        result_name += ")";
-        return result_name;
-    }
-
-    /// Render a constant by value: its result_name can differ between the query and preprocessor DAGs,
-    /// so comparing by value keeps the haystack and preprocessor names consistent.
-    if (node->type == ActionsDAG::ActionType::COLUMN && node->column)
-        return applyVisitor(FieldVisitorToString(), node->column->getField());
-
-    return node->result_name;
-}
-
-/// Check if a node with the given canonical name exists as a subexpression within the DAG rooted at `node`.
-bool hasSubexpression(const ActionsDAG::Node * node, const String & subexpression_name)
-{
-    if (getNameWithoutAliases(node) == subexpression_name)
-        return true;
-
-    for (const auto * child : node->children)
-    {
-        if (hasSubexpression(child, subexpression_name))
-            return true;
-    }
-
-    return false;
-}
 
 /// Collects the result names of every node in a filter DAG, to test whether a predicate is part of it.
 void collectNodeNames(const ActionsDAG::Node * node, NameSet & names)
@@ -297,121 +242,34 @@ void collectTextIndexInjectInfos(const ReadFromMergeTree * read_from_merge_tree_
     }
 }
 
-ASTPtr convertSetColumnToAST(const IColumn & column)
-{
-    const auto * column_set = checkAndGetColumnConstData<const ColumnSet>(&column);
-    if (!column_set)
-        column_set = checkAndGetColumn<const ColumnSet>(&column);
-    if (!column_set)
-        return nullptr;
-
-    auto future_set = column_set->getData();
-    const auto * set_from_tuple = dynamic_cast<const FutureSetFromTuple *>(future_set.get());
-    if (!set_from_tuple)
-        return nullptr;
-
-    const Columns key_columns = set_from_tuple->getKeyColumns();
-    if (key_columns.empty() || key_columns.front()->empty())
-        return nullptr;
-
-    const size_t num_elements = key_columns.front()->size();
-    auto elements = makeASTFunction("tuple");
-    elements->arguments->children.reserve(num_elements);
-
-    for (size_t i = 0; i < num_elements; ++i)
-    {
-        if (key_columns.size() == 1)
-        {
-            elements->arguments->children.push_back(make_intrusive<ASTLiteral>((*key_columns.front())[i]));
-            continue;
-        }
-
-        /// A set over a tuple left-hand side, e.g. `(a, b) IN ((1, 2), (3, 4))`.
-        Tuple key;
-        key.reserve(key_columns.size());
-        for (const auto & key_column : key_columns)
-            key.push_back((*key_column)[i]);
-        elements->arguments->children.push_back(make_intrusive<ASTLiteral>(Field(std::move(key))));
-    }
-
-    return elements;
-}
-
 /// Converts an ActionsDAG node to an AST node.
 /// It is not correct in the general case, but is
 /// sufficient for expressions that can be used with a text index.
 /// Returns `nullptr` if any part has no AST representation: a partial conversion would change the meaning.
-/// `captured` maps a lambda's captured-column names to the nodes that supply their values in the
-/// outer DAG, so references to them inside the lambda body are inlined (typically as literals)
-/// instead of being emitted as bare, unresolvable identifiers.
-ASTPtr convertNodeToAST(const ActionsDAG::Node & node, const std::unordered_map<std::string, const ActionsDAG::Node *> & captured = {});
-
-/// Reconstructs a captured lambda (e.g. the `x -> f(x)` inside arrayMap) as `lambda(tuple(args), body)`.
-/// `captured_values` are the columns supplied for the capture, aligned with capture.captured_names.
-ASTPtr convertCapturedLambdaToAST(const FunctionCapture & function_capture, const ActionsDAG::NodeRawConstPtrs & captured_values)
-{
-    const auto & capture = function_capture.getCapture();
-    const auto & capture_dag = function_capture.getAcionsDAG();
-    if (capture_dag.getOutputs().size() != 1 || captured_values.size() != capture.captured_names.size())
-        return nullptr;
-
-    /// Bind each captured column to the value passed into the capture so the body has no dangling refs.
-    std::unordered_map<std::string, const ActionsDAG::Node *> body_captured;
-    for (size_t i = 0; i < capture.captured_names.size(); ++i)
-        body_captured.emplace(capture.captured_names[i], captured_values[i]);
-
-    auto arguments = make_intrusive<ASTFunction>();
-    arguments->name = "tuple";
-    arguments->arguments = make_intrusive<ASTExpressionList>();
-    arguments->children.push_back(arguments->arguments);
-    for (const auto & lambda_argument : capture.lambda_arguments)
-        arguments->arguments->children.push_back(make_intrusive<ASTIdentifier>(lambda_argument.name));
-
-    auto lambda = make_intrusive<ASTFunction>();
-    lambda->name = "lambda";
-    lambda->arguments = make_intrusive<ASTExpressionList>();
-    lambda->children.push_back(lambda->arguments);
-    lambda->arguments->children.push_back(std::move(arguments));
-
-    auto body = convertNodeToAST(*capture_dag.getOutputs().front(), body_captured);
-    if (!body)
-        return nullptr;
-
-    lambda->arguments->children.push_back(std::move(body));
-    return lambda;
-}
-
-ASTPtr convertNodeToAST(const ActionsDAG::Node & node, const std::unordered_map<std::string, const ActionsDAG::Node *> & captured)
+ASTPtr convertNodeToAST(const ActionsDAG::Node & node)
 {
     switch (node.type)
     {
         case ActionsDAG::ActionType::INPUT:
-            if (auto it = captured.find(node.result_name); it != captured.end())
-                return convertNodeToAST(*it->second);
             return make_intrusive<ASTIdentifier>(node.result_name);
 
         case ActionsDAG::ActionType::COLUMN:
         {
-            if (!node.column)
-                return nullptr;
-
             /// A `Set` column has no `Field`, so emitting it as a literal would give `x IN NULL`.
-            if (WhichDataType(node.result_type).isSet())
-                return convertSetColumnToAST(*node.column);
+            if (!node.column || WhichDataType(node.result_type).isSet())
+                return nullptr;
 
             return make_intrusive<ASTLiteral>((*node.column)[0]);
         }
 
         case ActionsDAG::ActionType::ALIAS:
-            return node.children.empty() ? nullptr : convertNodeToAST(*node.children[0], captured);
+            return node.children.empty() ? nullptr : convertNodeToAST(*node.children[0]);
 
         case ActionsDAG::ActionType::FUNCTION:
         {
-            if (!node.function_base)
+            /// A lambda has no AST representation here.
+            if (!node.function_base || dynamic_cast<const FunctionCapture *>(node.function_base.get()))
                 return nullptr;
-
-            if (const auto * function_capture = dynamic_cast<const FunctionCapture *>(node.function_base.get()))
-                return convertCapturedLambdaToAST(*function_capture, node.children);
 
             auto function = make_intrusive<ASTFunction>();
             function->arguments = make_intrusive<ASTExpressionList>();
@@ -419,7 +277,7 @@ ASTPtr convertNodeToAST(const ActionsDAG::Node & node, const std::unordered_map<
             function->name = node.function_base->getName();
             for (const auto * child : node.children)
             {
-                auto arg_ast = convertNodeToAST(*child, captured);
+                auto arg_ast = convertNodeToAST(*child);
                 if (!arg_ast)
                     return nullptr;
 
@@ -449,13 +307,12 @@ ASTPtr convertNodeToAST(const ActionsDAG::Node & node, const std::unordered_map<
 /// then this class replaces some nodes in the ActionsDAG (and references to them) to generate an equivalent query:
 ///     SELECT count() FROM table where __text_index_text_col_idx_hasToken_0
 ///
-/// Also this class processes text index functions (hasToken, hasAllTokens, hasAnyTokens):
-/// applies tokenizer and preprocessors (lower, upper, etc.) for the haystack and needles arguments.
-/// It allows their stadalone executions without the direct read from text index.
-/// It is required to return the the same results as with the direct read.
+/// Also this class passes the tokenizer, the preprocessor and the postprocessor of the index to the text-search
+/// functions (hasToken, hasAllTokens, hasAnyTokens, hasPhrase), which apply them to the haystack and needles.
+/// So they return the same results without the direct read from text index as with it.
 ///
 /// For example, for the index `idx_s (s) type = text(tokenizer = 'splitByNonAlpha', preprocessor = lower(s))`
-/// the function `hasAllTokens(s, 'some needles')` will be replaced by `hasAllTokens(lower(s), ['some', 'needles'], 'splitByNonAlpha')`.
+/// the function `hasAllTokens(s, 'some needles')` will be replaced by `hasAllTokens(s, 'some needles', 'splitByNonAlpha', 'x -> lower(x)')`.
 class TextIndexDAGReplacer
 {
 public:
@@ -480,8 +337,8 @@ public:
     /// Replaces text-search functions by virtual columns.
     /// Example: hasToken(text_col, 'token') -> __text_index_text_col_idx_hasToken_0.
     ///
-    /// Applies preprocessor, tokenizer and postprocessor in chain for text-search functions.
-    /// Example: hasAllTokens(text_col, 'token1 token2') -> hasAllTokens(lower(text_col), ['token1', 'token2'], 'splitByNonAlpha').
+    /// Passes the tokenizer, the preprocessor and the postprocessor of the index to text-search functions.
+    /// Example: hasAllTokens(text_col, 'token1 token2') -> hasAllTokens(text_col, 'token1 token2', 'splitByNonAlpha', 'x -> lower(x)').
     /// Pass an empty `filter_column_name` for DAGs without a single filter output (e.g. a SELECT-list ExpressionStep)
     /// then only `result.is_dag_rewritten` is meaningful, not `result.filter_node`.
     ResultReplacement replace(const ContextPtr & context, const String & filter_column_name)
@@ -582,6 +439,8 @@ private:
         const TextIndexReadInfo * info = nullptr;
         /// Whether this predicate participated in skip-index analysis (always true unless `require_index_analyzed_predicate`).
         bool is_index_analyzed = true;
+        /// Whether the haystack is the index expression, so that the preprocessor of the index applies to it.
+        bool is_on_index_expression = false;
     };
 
     /// True if index analysis saw this exact predicate, i.e. it also appears in a filter that was not deferred.
@@ -603,26 +462,10 @@ private:
         return it->second.contains(predicate.result_name);
     }
 
-    /// has/hasAll/hasAny operate on array elements directly, bypassing the tokenizer, preprocessor, and postprocessor.
-    static bool needApplyTokenizer(const String & function_name)
+    /// The functions that take the transforms of the index. has/hasAll/hasAny operate on array elements directly.
+    static bool isTokenSearchFunction(const String & function_name)
     {
-        return function_name == "hasAllTokens" || function_name == "hasAnyTokens" || function_name == "hasPhrase";
-    }
-
-    /// Returns true for functions that require applying the preprocessor to the haystack.
-    /// has/hasAll/hasAny bypass both transforms.
-    static bool needApplyPreprocessor(const String & function_name)
-    {
-        return function_name == "hasToken"
-            || function_name == "hasAllTokens" || function_name == "hasAnyTokens" || function_name == "hasPhrase";
-    }
-
-    /// Returns true for functions that require applying the postprocessor to the haystack and needle.
-    static bool needApplyPostprocessor(const String & function_name)
-    {
-        return function_name == "hasToken"
-            || function_name == "hasAllTokens" || function_name == "hasAnyTokens"
-            || function_name == "hasPhrase";
+        return function_name == "hasToken" || function_name == "hasAllTokens" || function_name == "hasAnyTokens" || function_name == "hasPhrase";
     }
 
     std::vector<SelectedCondition> selectConditions(const ActionsDAG::Node & function_node, const ContextPtr & context)
@@ -658,6 +501,7 @@ private:
 
             const bool is_index_analyzed
                 = !require_index_analyzed_predicate || isIndexAnalyzedPredicate(index_name, info, canonical_node);
+            const bool is_on_index_expression = text_index_condition.isIndexExpressionArgument(canonical_node);
 
             /// Use direct read only when enabled and the entry is direct-read-eligible (has `index`) and has no
             /// patched parts. Otherwise just inject the tokenizer/preprocessor/postprocessor (no virtual column),
@@ -665,7 +509,7 @@ private:
             if (!direct_read_from_text_index || !info.index || info.has_patched_parts
                 || search_query->getDirectReadMode() == TextIndexDirectReadMode::None)
             {
-                selected_conditions.emplace_back(search_query, index_name, String{}, &info, is_index_analyzed);
+                selected_conditions.emplace_back(search_query, index_name, String{}, &info, is_index_analyzed, is_on_index_expression);
                 used_index_columns.insert(index_header.begin()->name);
                 continue;
             }
@@ -674,7 +518,7 @@ private:
             if (!virtual_column_name)
                 continue;
 
-            selected_conditions.emplace_back(search_query, index_name, *virtual_column_name, &info, is_index_analyzed);
+            selected_conditions.emplace_back(search_query, index_name, *virtual_column_name, &info, is_index_analyzed, is_on_index_expression);
             used_index_columns.insert(index_header.begin()->name);
         }
 
@@ -697,7 +541,7 @@ private:
             return replacement;
 
         auto function_name = function_node.function_base->getName();
-        bool need_transform_function = needApplyTokenizer(function_name) || needApplyPreprocessor(function_name);
+        bool need_transform_function = isTokenSearchFunction(function_name);
 
         /// Early exit if there is nothing to process.
         if (!need_transform_function && !direct_read_from_text_index)
@@ -714,7 +558,7 @@ private:
         });
 
         if (need_transform_function)
-            processTextIndexFunction(replacement, selected_conditions, context);
+            addTextIndexArguments(replacement, selected_conditions, context);
 
         if (direct_read_from_text_index)
             replaceFunctionsToVirtualColumns(replacement, selected_conditions, virtual_column_to_node, context);
@@ -722,209 +566,61 @@ private:
         return replacement;
     }
 
-    /// Applies preprocessor, tokenizer and postprocessor for text-search functions.
-    void processTextIndexFunction(
+    /// Passes the tokenizer, the preprocessor and the postprocessor of the index to the text-search function, which applies
+    /// them as the index build does (see `TextIndexTransforms`). The function matches the rows the index finds even
+    /// when the index is not read directly (direct read off, or parts where the index is not materialized).
+    void addTextIndexArguments(
         NodeReplacement & replacement,
         const std::vector<SelectedCondition> & selected_conditions,
         const ContextPtr & context)
     {
         const auto & function_node = *replacement.node;
+        /// The transform arguments come from the query or from an earlier visit of this DAG.
         if (selected_conditions.size() != 1 || function_node.children.size() < 2 || function_node.children.size() > 3)
             return;
 
-        auto new_children = function_node.children;
-        const auto & arg_haystack = new_children[0];
-        const auto & arg_needles = new_children[1];
-
-        if (arg_needles->type != ActionsDAG::ActionType::COLUMN || !arg_needles->column)
+        const auto * arg_needles = function_node.children[1];
+        if (arg_needles->type != ActionsDAG::ActionType::COLUMN || !arg_needles->column || arg_needles->column->onlyNull())
             return;
-
-        if (arg_needles->column->onlyNull())
-            return;
-
-        Field needles_field = (*arg_needles->column)[0];
-        DataTypePtr needles_type = arg_needles->result_type;
 
         const auto & condition = selected_conditions.front();
-        const auto & condition_text = typeid_cast<MergeTreeIndexConditionText &>(*condition.info->condition);
-        auto preprocessor = condition_text.getPreprocessor();
-        auto postprocessor = condition_text.getPostprocessor();
-        const bool has_postprocessor = postprocessor && postprocessor->hasActions();
-        const auto * tokenizer = condition_text.getTokenizer();
-        auto function_name = replacement.node->function_base->getName();
+        const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*condition.info->condition);
+        auto function_name = function_node.function_base->getName();
 
-        /// Preprocessor: only for an index-analyzed predicate in this filter DAG, so it never depends on a sibling filter. Tokenizer/postprocessor also apply on the row-scan path.
-        const bool apply_preprocessor = is_filter_dag && condition.info->index != nullptr && condition.is_index_analyzed && needApplyPreprocessor(function_name) && preprocessor && preprocessor->hasActions();
-        const bool apply_tokenizer = needApplyTokenizer(function_name) && tokenizer;
-        const bool apply_postprocessor = needApplyPostprocessor(function_name) && has_postprocessor;
+        /// Preprocessor: only for an index-analyzed predicate in this filter DAG, so it never depends on a sibling filter.
+        /// Tokenizer/postprocessor also apply on the row-scan path.
+        String preprocessor;
+        if (is_filter_dag && condition.info->index != nullptr && condition.is_index_analyzed && condition.is_on_index_expression)
+            preprocessor = condition_text.getTransforms()->getSerializedPreprocessor();
 
-        if (!apply_preprocessor && !apply_tokenizer && !apply_postprocessor)
-            return;
+        const String & postprocessor = condition_text.getTransforms()->getSerializedPostprocessor();
 
-        /// Spliced into the postprocessor DAG below: merging two DAGs would unify their `__lambda` nodes by name.
-        ASTPtr preprocessor_source_ast;
-
-        if (apply_preprocessor)
+        /// An index answers `hasToken` only with the `splitByNonAlpha` tokenizer, which `hasAllTokens` applies to the
+        /// single token of the needle in the same way.
+        if (function_name == "hasToken")
         {
-            const auto & preprocessor_dag = preprocessor->getOriginalActionsDAG();
-            chassert(preprocessor_dag.getOutputs().size() == 1);
-            const auto & preprocessor_output = preprocessor_dag.getOutputs().front();
-            /// The index was analyzed on the expression under lossless conversions, e.g. `s` in `hasToken(toNullable(s), 'Foo')`.
-            const auto * haystack = unwrapLosslessConversion(arg_haystack);
-            auto haystack_name = getNameWithoutAliases(haystack);
+            if (preprocessor.empty() && postprocessor.empty())
+                return;
 
-            /// Check that preprocessor contains current expression as its argument.
-            if (hasSubexpression(preprocessor_output, haystack_name))
-            {
-                new_children[0] = haystack;
-
-                if (apply_postprocessor)
-                {
-                    preprocessor_source_ast = preprocessor->getExpressionAST(new_children[0]->result_name);
-                }
-                else
-                {
-                    ActionsDAG::NodeRawConstPtrs merged_outputs;
-                    actions_dag.mergeNodes(preprocessor_dag.clone(), &merged_outputs);
-
-                    chassert(merged_outputs.size() == 1);
-                    new_children[0] = merged_outputs.front();
-                }
-
-                /// Needles in array are not processed and passed as is.
-                if (needles_field.getType() == Field::Types::String)
-                {
-                    needles_field = preprocessor->processConstant(needles_field.safeGet<String>());
-                    needles_type = std::make_shared<DataTypeString>();
-                }
-            }
+            function_name = "hasAllTokens";
         }
 
-        if (apply_tokenizer)
+        auto add_string_argument = [&](const String & value) -> const ActionsDAG::Node *
         {
-            const String tokenizer_description = tokenizer->getDescription();
+            auto type = std::make_shared<DataTypeString>();
+            return &actions_dag.addColumn(type->createColumnConst(0, Field(value)), type, quoteString(value));
+        };
 
-            /// Set the argument with the tokenizer definition. Assign when one is already present, so
-            /// the argument count stays the same however often this runs over the same node.
-            DataTypePtr arg_type = std::make_shared<DataTypeString>();
-            MutableColumnConstPtr arg_column = arg_type->createColumnConst(0, Field(tokenizer_description));
-            String name = quoteString(tokenizer_description);
-            const ActionsDAG::Node & new_child = actions_dag.addColumn(std::move(arg_column), std::move(arg_type), std::move(name));
-            if (new_children.size() == 3)
-                new_children[2] = &new_child;
-            else
-                new_children.push_back(&new_child);
+        /// The index was analyzed on the expression under lossless conversions, e.g. `s` in `hasToken(toNullable(s), 'Foo')`.
+        const auto * haystack = preprocessor.empty() ? function_node.children[0] : unwrapLosslessConversion(function_node.children[0]);
+        ActionsDAG::NodeRawConstPtrs new_children{haystack, arg_needles, add_string_argument(condition_text.getTokenizer()->getDescription())};
 
-            /// Convert needles to array if they are a string by applying a tokenizer.
-            /// For hasPhrase the phrase must stay as a string — tokenization is done inside hasPhrase itself.
-            const bool convert_needle_to_array = function_name == "hasAnyTokens" || function_name == "hasAllTokens";
-            if (convert_needle_to_array && needles_field.getType() == Field::Types::String)
-            {
-                VectorWithMemoryTracking<String> needles_array;
-                const auto & needles_string = needles_field.safeGet<String>();
-                tokenizer->stringToTokens(needles_string.data(), needles_string.size(), needles_array);
-                /// Skip compaction when a postprocessor is applied: it is unsound afterwards and can drop a token.
-                if (!apply_postprocessor)
-                    needles_array = tokenizer->compactTokens(needles_array);
-                needles_field = Array(needles_array.begin(), needles_array.end());
-                needles_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>());
-            }
-        }
+        if (!preprocessor.empty() || !postprocessor.empty())
+            new_children.push_back(add_string_argument(preprocessor));
 
-        /// Rewrite the haystack into the postprocessed tokens the index stores, so the row-level
-        /// function still matches when the index isn't read directly (direct read off, or unmaterialized
-        /// parts). getOriginalActionsDAG yields an Array(String) of postprocessed tokens.
-        if (apply_postprocessor)
-        {
-            /// Name the postprocessor's haystack input after the haystack node's actual result_name so
-            /// mergeNodes reuses that node (it matches by result_name). A reconstructed name can diverge for
-            /// an ALIAS/expression haystack (e.g. `ifNull(str, 'default')`), leaving a dangling input.
-            const auto & haystack_name = new_children[0]->result_name;
-            ActionsDAG::NodeRawConstPtrs merged_outputs;
-            actions_dag.mergeNodes(
-                postprocessor->getOriginalActionsDAG(haystack_name, new_children[0]->result_type, tokenizer->getDescription(), preprocessor_source_ast),
-                &merged_outputs);
-            chassert(merged_outputs.size() == 1);
-            new_children[0] = merged_outputs.front();
+        if (!postprocessor.empty())
+            new_children.push_back(add_string_argument(postprocessor));
 
-            /// new_children[0] is now an Array(String) of postprocessed tokens. Switch the tokenizer argument
-            /// to 'array' to match them verbatim, instead of re-splitting tokens the index stores whole.
-            if (function_name == "hasAnyTokens" || function_name == "hasAllTokens" || function_name == "hasPhrase")
-            {
-                chassert(new_children.size() == 3);
-                DataTypePtr arg_type = std::make_shared<DataTypeString>();
-                const String array_tokenizer_desc = ArrayTokenizer::getName();
-                MutableColumnConstPtr arg_column = arg_type->createColumnConst(0, Field(array_tokenizer_desc));
-                new_children[2] = &actions_dag.addColumn(std::move(arg_column), arg_type, quoteString(array_tokenizer_desc));
-            }
-
-            /// hasToken takes a String haystack, so rejoin the tokens for it to re-tokenize; dropped tokens are
-            /// empty elements that collapse into adjacent separators, keeping positions dense. Its index
-            /// tokenizer is always splitByNonAlpha, which splits on this space.
-            if (function_name == "hasToken")
-            {
-                DataTypePtr separator_type = std::make_shared<DataTypeString>();
-                MutableColumnConstPtr separator_column = separator_type->createColumnConst(0, Field(String(" ")));
-                const ActionsDAG::Node & separator = actions_dag.addColumn(std::move(separator_column), separator_type, "' '");
-                FunctionOverloadResolverPtr concat = FunctionFactory::instance().get("arrayStringConcat", context);
-                new_children[0] = &actions_dag.addFunction(concat, {new_children[0], &separator}, "");
-            }
-
-            if (function_name == "hasPhrase" && needles_field.getType() == Field::Types::String)
-            {
-                /// Compare token sequences: rejoining into strings assumed the index tokenizer splits on the
-                /// separator used, which is false for e.g. splitByString(['()']). An emptied phrase never matches.
-                const auto & phrase = needles_field.safeGet<String>();
-                VectorWithMemoryTracking<String> tokens;
-                tokenizer->stringToTokens(phrase.data(), phrase.size(), tokens);
-                tokens = postprocessor->processTokens(std::move(tokens));
-
-                needles_field = Array(tokens.begin(), tokens.end());
-                needles_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>());
-            }
-            else if (needles_field.getType() == Field::Types::String)
-            {
-                /// hasToken case: single token string. If the postprocessor drops the needle (stop-word
-                /// filter, etc.), the empty needle is fine — hasToken returns 0 on it, matching the
-                /// index-condition empty-sentinel that no granule contains.
-                /// If the postprocessed token contains separator characters it would be ill-formed as a
-                /// hasToken* needle (BAD_ARGUMENTS / NULL on non-indexed parts in Exact mode), so keep
-                /// the original needle in that case.
-                VectorWithMemoryTracking<String> tokens = postprocessor->processTokens(VectorWithMemoryTracking<String>{needles_field.safeGet<String>()});
-                if (tokens.empty())
-                    needles_field = String{};
-                else if (std::ranges::any_of(tokens.front(), isTokenSeparator))
-                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Text index postprocessor produced an invalid token '{}'", tokens.front());
-                else
-                    needles_field = tokens.front();
-            }
-            else if (needles_field.getType() == Field::Types::Array)
-            {
-                const auto & src_array = needles_field.safeGet<Array>();
-                VectorWithMemoryTracking<String> tokens;
-                /// `hasPhrase` ignores an empty element, the set predicates keep it as a token that never matches.
-                const bool drop_empty_needles = function_name == "hasPhrase";
-                for (const Field & element : src_array)
-                {
-                    if (element.getType() != Field::Types::String)
-                        continue;
-
-                    const auto & element_value = element.safeGet<String>();
-                    if (!drop_empty_needles || !element_value.empty())
-                        tokens.push_back(element_value);
-                }
-                /// Compaction is unsound after a postprocessor, and `hasPhrase` needs every duplicate, in order.
-                tokens = postprocessor->processTokens(std::move(tokens));
-                needles_field = Array(tokens.begin(), tokens.end());
-                needles_type = std::make_shared<DataTypeArray>(std::make_shared<DataTypeString>());
-            }
-        }
-
-        /// Recreate an argument with needles.
-        auto needles_column = needles_type->createColumnConst(0, needles_field);
-        new_children[1] = &actions_dag.addColumn(std::move(needles_column), needles_type, applyVisitor(FieldVisitorToString(), needles_field));
-
-        /// Recreate a function object because we have modified the arguments.
         FunctionOverloadResolverPtr new_function_base = FunctionFactory::instance().get(function_name, context);
         const ActionsDAG::Node * new_function_node = &actions_dag.addFunction(new_function_base, new_children, "");
 
@@ -979,6 +675,10 @@ private:
                     function_node.result_name);
                 return;
             }
+
+            /// The virtual column is `UInt8`, a `NULL` value reads from the index as 0.
+            if (isNullableOrLowCardinalityNullable(function_node.result_type))
+                exact_default_expression = makeASTFunction("ifNull", exact_default_expression, make_intrusive<ASTLiteral>(Field(UInt8(0))));
         }
 
         auto add_condition_to_input = [&](const SelectedCondition & condition)
@@ -1054,8 +754,8 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     auto result = replacer.replace(read_from_merge_tree_step.getContext(), filter_column_name);
 
     /// Even when no virtual columns are added (added_columns is empty),
-    /// the DAG may have been modified by text index preprocessing
-    /// (e.g. applying tokenizer/preprocessor to hasAnyTokens).
+    /// the DAG may have been modified by passing the transforms of the index
+    /// (e.g. the tokenizer and preprocessor to hasAnyTokens).
     /// In that case, result.filter_node is non-null and we must return it
     /// so the caller can update the filter column name to match the modified DAG.
     if (result.added_columns.empty())

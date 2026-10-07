@@ -29,6 +29,7 @@ struct HasAllTokensTraits
 using TokensWithPosition = absl::flat_hash_map<String, UInt64>;
 
 struct ITokenizer;
+class TextIndexTransforms;
 
 template <class HasTokensTraits>
 class ExecutableFunctionHasAnyAllTokens final : public IExecutableFunction
@@ -37,19 +38,22 @@ public:
     static constexpr auto name = HasTokensTraits::name;
 
     explicit ExecutableFunctionHasAnyAllTokens(
-        std::shared_ptr<const ITokenizer> tokenizer_, const TokensWithPosition & search_tokens_)
+        std::shared_ptr<const ITokenizer> tokenizer_, const TokensWithPosition & search_tokens_, std::shared_ptr<const TextIndexTransforms> transforms_)
         : tokenizer(std::move(tokenizer_))
         , search_tokens(std::move(search_tokens_))
+        , transforms(std::move(transforms_))
     {
     }
 
     String getName() const override { return name; }
     bool useDefaultImplementationForConstants() const override { return true; }
-    ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const override;
+    bool useDefaultImplementationForNulls() const override;
+    ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override;
 
 private:
     std::shared_ptr<const ITokenizer> tokenizer;
     const TokensWithPosition & search_tokens;
+    std::shared_ptr<const TextIndexTransforms> transforms;
 };
 
 template <class HasTokensTraits>
@@ -61,10 +65,12 @@ public:
     FunctionBaseHasAnyAllTokens(
         std::shared_ptr<const ITokenizer> tokenizer_,
         TokensWithPosition search_tokens_,
+        std::shared_ptr<const TextIndexTransforms> transforms_,
         DataTypes argument_types_,
         DataTypePtr result_type_)
         : tokenizer(std::move(tokenizer_))
         , search_tokens(std::move(search_tokens_))
+        , transforms(std::move(transforms_))
         , argument_types(std::move(argument_types_))
         , result_type(std::move(result_type_))
     {
@@ -80,6 +86,7 @@ public:
 private:
     std::shared_ptr<const ITokenizer> tokenizer;
     TokensWithPosition search_tokens;
+    std::shared_ptr<const TextIndexTransforms> transforms;
     DataTypes argument_types;
     DataTypePtr result_type;
 };
@@ -95,15 +102,18 @@ public:
         return std::make_unique<FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>>(context);
     }
 
-    explicit FunctionHasAnyAllTokensOverloadResolver(ContextPtr context);
+    explicit FunctionHasAnyAllTokensOverloadResolver(ContextPtr context_);
 
     String getName() const override { return name; }
     size_t getNumberOfArguments() const override { return 0; }
     bool isVariadic() const override { return true; }
-    ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1, 2}; }
+    ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1, 2, 3, 4}; }
 
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override;
 
     FunctionBasePtr buildImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & return_type) const override;
+
+private:
+    ContextPtr context;
 };
 }

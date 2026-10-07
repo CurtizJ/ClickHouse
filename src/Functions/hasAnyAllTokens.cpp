@@ -17,6 +17,7 @@
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
 #include <Interpreters/TokenizerFactory.h>
+#include <Storages/MergeTree/TextIndexTransforms.h>
 
 #include <absl/container/flat_hash_map.h>
 #include <boost/dynamic_bitset.hpp>
@@ -35,8 +36,10 @@ namespace
 constexpr size_t arg_input = 0;
 constexpr size_t arg_needles = 1;
 constexpr size_t arg_tokenizer = 2;
+constexpr size_t arg_preprocessor = 3;
 
-TokensWithPosition initializeSearchTokens(const ColumnsWithTypeAndName & arguments, const ITokenizer & tokenizer, std::string_view function_name)
+TokensWithPosition initializeSearchTokens(
+    const ColumnsWithTypeAndName & arguments, const ITokenizer & tokenizer, const TextIndexTransforms * transforms, std::string_view function_name)
 {
     if (arguments.size() < 2)
         return {};
@@ -61,8 +64,14 @@ TokensWithPosition initializeSearchTokens(const ColumnsWithTypeAndName & argumen
     if (needles_field.getType() == Field::Types::String)
     {
         auto tokens_str = needles_field.safeGet<String>();
-        tokenizer.stringToTokens(tokens_str.data(), tokens_str.size(), tokens_array);
-        tokens_array = tokenizer.compactTokens(tokens_array);
+        if (transforms)
+            tokens_array = transforms->stringToTokens(tokens_str, tokenizer);
+        else
+            tokenizer.stringToTokens(tokens_str.data(), tokens_str.size(), tokens_array);
+
+        /// Compaction is unsound after a postprocessor, which maps tokens independently, and can drop a token.
+        if (!transforms || !transforms->hasPostprocessor())
+            tokens_array = tokenizer.compactTokens(tokens_array);
     }
     else if (needles_field.getType() == Field::Types::Array)
     {
@@ -75,6 +84,9 @@ TokensWithPosition initializeSearchTokens(const ColumnsWithTypeAndName & argumen
 
             tokens_array.emplace_back(element.safeGet<String>());
         }
+
+        if (transforms)
+            tokens_array = transforms->processTokens(std::move(tokens_array));
     }
     else
     {
@@ -92,7 +104,8 @@ TokensWithPosition initializeSearchTokens(const ColumnsWithTypeAndName & argumen
 }
 
 template <class HasTokensTraits>
-FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::FunctionHasAnyAllTokensOverloadResolver(ContextPtr)
+FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::FunctionHasAnyAllTokensOverloadResolver(ContextPtr context_)
+    : context(std::move(context_))
 {
 }
 
@@ -107,7 +120,9 @@ DataTypePtr FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::getReturnT
 
     FunctionArgumentDescriptors optional_args
     {
-        {"tokenizer", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"}
+        {"tokenizer", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"},
+        {"preprocessor", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"},
+        {"postprocessor", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"}
     };
 
     validateFunctionArguments(name, arguments, mandatory_args, optional_args);
@@ -129,15 +144,17 @@ FunctionBasePtr FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::buildI
         : arguments[arg_tokenizer].column->getDataAt(0);
 
     auto tokenizer = TokenizerFactory::instance().get(tokenizer_name);
-    auto search_tokens = initializeSearchTokens(arguments, *tokenizer, getName());
+    auto transforms = TextIndexTransforms::createForFunction(arguments, arg_preprocessor, getName(), context);
+    auto search_tokens = initializeSearchTokens(arguments, *tokenizer, transforms.get(), getName());
     DataTypes argument_types{std::from_range_t{}, arguments | std::views::transform([](auto & elem) { return elem.type; })};
-    return std::make_shared<FunctionBaseHasAnyAllTokens<HasTokensTraits>>(std::move(tokenizer), std::move(search_tokens), std::move(argument_types), return_type);
+    return std::make_shared<FunctionBaseHasAnyAllTokens<HasTokensTraits>>(
+        std::move(tokenizer), std::move(search_tokens), std::move(transforms), std::move(argument_types), return_type);
 }
 
 template <class HasTokensTraits>
 ExecutableFunctionPtr FunctionBaseHasAnyAllTokens<HasTokensTraits>::prepare(const ColumnsWithTypeAndName &) const
 {
-    return std::make_unique<ExecutableFunctionHasAnyAllTokens<HasTokensTraits>>(tokenizer, search_tokens);
+    return std::make_unique<ExecutableFunctionHasAnyAllTokens<HasTokensTraits>>(tokenizer, search_tokens, transforms);
 }
 
 namespace
@@ -359,35 +376,42 @@ void executeStringOrArray(
 }
 
 template <class HasTokensTraits>
+bool ExecutableFunctionHasAnyAllTokens<HasTokensTraits>::useDefaultImplementationForNulls() const
+{
+    return !transforms || !transforms->hasPreprocessor();
+}
+
+template <class HasTokensTraits>
 ColumnPtr ExecutableFunctionHasAnyAllTokens<HasTokensTraits>::executeImpl(
-    const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const
+    const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const
 {
     if (input_rows_count == 0)
-        return ColumnVector<UInt8>::create();
+        return result_type->createColumn();
+
+    if (!useDefaultImplementationForNulls() && arguments[arg_needles].column->onlyNull())
+        return result_type->createColumnConstWithDefaultValue(input_rows_count)->convertToFullColumnIfConst();
 
     auto col_result = ColumnVector<UInt8>::create();
+    ColumnPtr col_input = arguments[arg_input].column;
+    ColumnPtr null_map;
+
+    /// Stateful tokenizers mutate internal state during execution and cannot be shared across
+    /// threads; use a per-execution clone.
+    std::unique_ptr<ITokenizer> stateful_tokenizer = tokenizer->isStateful() ? tokenizer->clone() : nullptr;
+    const ITokenizer * execution_tokenizer = stateful_tokenizer ? stateful_tokenizer.get() : tokenizer.get();
+
+    if (transforms)
+    {
+        col_input = transforms->transformFunctionInput(col_input, *execution_tokenizer, null_map);
+        execution_tokenizer = &transforms->getSearchTokenizer(*execution_tokenizer);
+    }
 
     if (search_tokens.empty())
-    {
         col_result->getData().assign(input_rows_count, UInt8(0));
-        return col_result;
-    }
-
-    ColumnPtr col_input = arguments[arg_input].column;
-
-    if (tokenizer->isStateful())
-    {
-        /// Stateful tokenizers mutate internal state during execution and cannot be shared across
-        /// threads; use a per-execution clone.
-        auto stateful_tokenizer = tokenizer->clone();
-        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, stateful_tokenizer.get(), search_tokens);
-    }
     else
-    {
-        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, tokenizer.get(), search_tokens);
-    }
+        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, execution_tokenizer, search_tokens);
 
-    return col_result;
+    return TextIndexTransforms::wrapFunctionResult(std::move(col_result), null_map, result_type);
 }
 
 template class ExecutableFunctionHasAnyAllTokens<HasAnyTokensTraits>;
@@ -422,15 +446,18 @@ For example, ['ClickHouse', 'ClickHouse'] is treated the same as ['ClickHouse'].
 When a text index defines a [preprocessor](/reference/engines/table-engines/mergetree-family/textindexes#creating-a-text-index) (for example `lowerUTF8`), `hasAnyTokens` applies it to `input` and, when `needles` is a [String](/reference/data-types/string), to `needles` before tokenization. When `needles` is an [Array(String)](/reference/data-types/array), its elements are passed through as-is and the preprocessor is not applied to them.
 The preprocessor is only applied on the text index path, so results may differ between queries that use the text index and queries that do not (e.g. `SETTINGS use_skip_indexes = 0`).
 This inconsistency is tolerated to improve the usability of full-text search.
+With a text index, the query plan passes the tokenizer, the preprocessor and the postprocessor of the index to the function as its last arguments.
 </Note>
     )";
     FunctionDocumentation::Syntax syntax_hasAnyTokens = R"(
-hasAnyTokens(input, needles[, tokenizer])
+hasAnyTokens(input, needles[, tokenizer[, preprocessor[, postprocessor]]])
 )";
     FunctionDocumentation::Arguments arguments_hasAnyTokens = {
         {"input", "The input column.", {"String", "FixedString", "Nullable(String)", "Nullable(FixedString)", "Array(String)", "Array(FixedString)", "Array(Nullable(String))", "Array(Nullable(FixedString))"}},
         {"needles", "Tokens to be searched.", {"String", "Array(String)"}},
         {"tokenizer", "The tokenizer to use. Valid arguments are `splitByNonAlpha`, `splitByString`, `splitByRegexp`, `asciiCJK`, `chinese`, `icu('<locale>')`, `japanese`, `ngrams`, `sparseGrams`, and `array`. Optional, if not set explicitly, defaults to `splitByNonAlpha`.", {"const String"}},
+        {"preprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to `input` (to every element of an array) and to `needles` given as a `String` before tokenization, like the preprocessor of a text index. Optional, an empty string means none.", {"const String"}},
+        {"postprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to every token of `input` and `needles`, like the postprocessor of a text index. Tokens it maps to an empty string are dropped. Optional, an empty string means none.", {"const String"}},
     };
     FunctionDocumentation::ReturnedValue returned_value_hasAnyTokens = {"Returns `1`, if there was at least one match. `0`, otherwise.", {"UInt8"}};
     FunctionDocumentation::Examples examples_hasAnyTokens = {
@@ -644,15 +671,18 @@ For example, needles = ['ClickHouse', 'ClickHouse'] is treated the same as ['Cli
 When a text index defines a [preprocessor](/reference/engines/table-engines/mergetree-family/textindexes#creating-a-text-index) (for example `lowerUTF8`), `hasAllTokens` applies it to `input` and, when `needles` is a [String](/reference/data-types/string), to `needles` before tokenization. When `needles` is an [Array(String)](/reference/data-types/array), its elements are passed through as-is and the preprocessor is not applied to them.
 The preprocessor is only applied on the text index path, so results may differ between queries that use the text index and queries that do not (e.g. `SETTINGS use_skip_indexes = 0`).
 This inconsistency is tolerated to improve the usability of full-text search.
+With a text index, the query plan passes the tokenizer, the preprocessor and the postprocessor of the index to the function as its last arguments.
 </Note>
     )";
     FunctionDocumentation::Syntax syntax_hasAllTokens = R"(
-hasAllTokens(input, needles[, tokenizer])
+hasAllTokens(input, needles[, tokenizer[, preprocessor[, postprocessor]]])
 )";
     FunctionDocumentation::Arguments arguments_hasAllTokens = {
         {"input", "The input column.", {"String", "FixedString", "Nullable(String)", "Nullable(FixedString)", "Array(String)", "Array(FixedString)", "Array(Nullable(String))", "Array(Nullable(FixedString))"}},
         {"needles", "Tokens to be searched.", {"String", "Array(String)"}},
         {"tokenizer", "The tokenizer to use. Valid arguments are `splitByNonAlpha`, `splitByString`, `splitByRegexp`, `asciiCJK`, `chinese`, `icu('<locale>')`, `japanese`, `ngrams`, `sparseGrams`, and `array`. Optional, if not set explicitly, defaults to `splitByNonAlpha`.", {"const String"}},
+        {"preprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to `input` (to every element of an array) and to `needles` given as a `String` before tokenization, like the preprocessor of a text index. Optional, an empty string means none.", {"const String"}},
+        {"postprocessor", "A lambda with one argument, e.g. `'x -> lower(x)'`, applied to every token of `input` and `needles`, like the postprocessor of a text index. Tokens it maps to an empty string are dropped. Optional, an empty string means none.", {"const String"}},
     };
     FunctionDocumentation::ReturnedValue returned_value_hasAllTokens = {"Returns 1, if all needles match. 0, otherwise.", {"UInt8"}};
     FunctionDocumentation::Examples examples_hasAllTokens = {

@@ -30,7 +30,7 @@ preprocessor is applied only on the index path
 0
 10
 -- EXPLAIN: SELECT-list injects the tokenizer but not the preprocessor
-Output: hasAnyTokens(s, [\'hello\'], \'splitByNonAlpha\')
+Output: hasAnyTokens(s, \'hello\', \'splitByNonAlpha\')
 postprocessor is applied on the row-scan path too
 -- SELECT-list position: postprocessor applied
 10	10
