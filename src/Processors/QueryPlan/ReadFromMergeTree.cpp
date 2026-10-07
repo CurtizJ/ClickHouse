@@ -5027,6 +5027,37 @@ size_t ReadFromMergeTree::getNumStreamsWhenNothingToRead(const AnalysisResult & 
     return result.split_parts.layers.size();
 }
 
+void ReadFromMergeTree::prepareBM25State()
+{
+    auto bm25_score_task_it = std::ranges::find_if(index_read_tasks, [](const auto & task)
+    {
+        return task.second.bm25_params.has_value();
+    });
+
+    if (bm25_score_task_it == index_read_tasks.end())
+        return;
+
+    chassert(prepared_parts);
+
+    for (const auto & part_with_ranges : *prepared_parts)
+    {
+        const auto & part = part_with_ranges.data_part;
+        if (!part)
+            continue;
+
+        if (part->hasLightweightDelete() || (mutations_snapshot && !mutations_snapshot->getPatchesForPart(part).empty()))
+        {
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Cannot compute bm25(): part '{}' has rows hidden by a lightweight DELETE "
+                "or modified by pending lightweight updates, so the BM25 statistics of the text index would be stale. "
+                "Run 'ALTER TABLE ... APPLY DELETED MASK' or 'OPTIMIZE TABLE ... FINAL' first",
+                part->name);
+        }
+    }
+
+    bm25_score_task_it->second.bm25_score_state = buildBM25State(*prepared_parts, index_read_tasks, reader_settings, context);
+}
+
 void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[maybe_unused]] const BuildQueryPipelineSettings & settings)
 {
     auto & result = getAnalysisResult();
@@ -5034,36 +5065,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
     /// Before any pool or processor copies the settings: both build the PREWHERE steps and must agree on them.
     reader_settings.read_ahead_prewhere_columns = canReadPrewhereColumnsAhead(result.parts_with_ranges);
 
-    /// Prepare the query-global BM25 state for `bm25()`.
-    /// The statistics are collected from the whole part snapshot
-    /// the step was created with (`prepared_parts`), before any pruning.
-    auto bm25_score_task_it = std::ranges::find_if(index_read_tasks, [](const auto & task)
-    {
-        return task.second.bm25_params.has_value();
-    });
-
-    if (bm25_score_task_it != index_read_tasks.end())
-    {
-        chassert(prepared_parts);
-
-        for (const auto & part_with_ranges : *prepared_parts)
-        {
-            const auto & part = part_with_ranges.data_part;
-            if (!part)
-                continue;
-
-            if (part->hasLightweightDelete() || (mutations_snapshot && !mutations_snapshot->getPatchesForPart(part).empty()))
-            {
-                throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                    "Cannot compute bm25(): part '{}' has rows hidden by a lightweight DELETE "
-                    "or modified by pending lightweight updates, so the BM25 statistics of the text index would be stale. "
-                    "Run 'ALTER TABLE ... APPLY DELETED MASK' or 'OPTIMIZE TABLE ... FINAL' first",
-                    part->name);
-            }
-        }
-
-        bm25_score_task_it->second.bm25_score_state = buildBM25State(*prepared_parts, index_read_tasks, reader_settings, context);
-    }
+    prepareBM25State();
 
     /// `spreadMarkRanges` consumes `result.split_parts`, so remember the number of ports the plan expects
     /// before it is moved from.

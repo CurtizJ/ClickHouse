@@ -792,6 +792,11 @@ private:
     /// ports of its two sides positionally (see `QueryPipelineBuilder::joinPipelinesYShapedByShards`).
     size_t getNumStreamsWhenNothingToRead(const AnalysisResult & result) const;
 
+    /// Prepares the query-global BM25 state for `bm25()`, if any index read task scores.
+    /// The statistics are collected from the whole part snapshot
+    /// the step was created with (`prepared_parts`), before any pruning.
+    void prepareBM25State();
+
     Pipe spreadMarkRangesAmongStreams(
         RangesInDataParts && parts_with_ranges,
         const MergeTreeIndexBuildContextPtr & index_build_context,
