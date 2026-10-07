@@ -86,6 +86,9 @@ public:
 
     /// The score is not a function of its (constant) arguments, so it must survive analysis unchanged.
     bool isSuitableForConstantFolding() const override { return false; }
+    /// The score of a row depends on the statistics of all parts the query reads, so the result of a condition on it
+    /// for a granule cannot be reused across queries (e.g. by the query condition cache).
+    bool isDeterministic() const override { return false; }
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo &) const override { return false; }
     bool useDefaultImplementationForConstants() const override { return false; }
     bool useDefaultImplementationForNulls() const override { return false; }
@@ -106,9 +109,9 @@ public:
     ColumnPtr executeImpl(const ColumnsWithTypeAndName &, const DataTypePtr &, size_t) const override
     {
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "Function bm25 must be rewritten by the query planner and cannot be executed. It is supported only in the "
-            "SELECT list and ORDER BY of a query that reads a MergeTree table with a text index created with `scoring = 'bm25'` "
-            "and filters by `hasToken`, `hasAnyTokens` or `hasAllTokens` on the indexed column with the direct read from the text index");
+            "Function bm25 must be rewritten by the query planner and cannot be executed. It is supported only in a query "
+            "that reads a MergeTree table with a text index created with `scoring = 'bm25'` and filters by `hasToken`, `hasAnyTokens` "
+            "or `hasAllTokens` on the indexed column with the direct read from the text index, and not above a JOIN or an aggregation");
     }
 };
 
@@ -119,7 +122,7 @@ REGISTER_FUNCTION(BM25)
     FunctionDocumentation::Description description = R"(
 Returns the [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) relevance score of a row for the text-search predicates of the query.
 
-The function can be used only in the `SELECT` list and `ORDER BY` of a query that reads a `MergeTree` table with a text index created with `scoring = 'bm25'`
+The function requires a query that reads a `MergeTree` table with a text index created with `scoring = 'bm25'`
 and filters by `hasToken`, `hasAnyTokens` or `hasAllTokens` on the indexed column. The direct read from the text index (`query_plan_direct_read_from_text_index`) must be enabled.
 The query planner replaces the function with an expression over the scores of the text-search predicates of the filter, following its boolean structure:
 every matching predicate adds its score, a conjunction adds the scores of its predicates only when all of them match, a predicate under `NOT` and any non-text predicate add nothing.

@@ -8,7 +8,6 @@
 -- no WHERE at all
 -- only predicates outside the three scoring functions (they filter but do not score)
 -- the scoring predicate is only under NOT (it filters but does not score)
--- the function cannot be part of the filter condition
 -- two different parameter pairs in one query
 -- invalid parameters
 -- above a JOIN the function has no single table fragment to score

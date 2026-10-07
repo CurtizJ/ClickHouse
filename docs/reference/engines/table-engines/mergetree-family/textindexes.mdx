@@ -589,7 +589,8 @@ Storing scoring data increases the on-disk size of the index and the write cost,
 The on-disk format is not yet stable, so this parameter is experimental and may change in a future release.
 Creating an index with `scoring = 'bm25'` therefore requires the MergeTree setting [`allow_experimental_text_index_scoring`](/reference/settings/merge-tree-settings/allow-experimental) to be enabled.
 
-To compute the score, call `bm25()` (optionally `bm25(k1)` or `bm25(k1, b)`, defaults `k1 = 1.2`, `b = 0.75`) in the `SELECT` list or `ORDER BY` and enable the setting `allow_experimental_bm25_scoring`.
+To compute the score, call `bm25()` (optionally `bm25(k1)` or `bm25(k1, b)`, defaults `k1 = 1.2`, `b = 0.75`) and enable the setting `allow_experimental_bm25_scoring`.
+The function can be used in any clause of the query that reads the table (`SELECT`, `WHERE`, `PREWHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `QUALIFY`, `ORDER BY`, `LIMIT BY`), also through a subquery, but not above a `JOIN` or an aggregation.
 The query must filter with `hasToken`, `hasAnyTokens` or `hasAllTokens` on the column of exactly one scoring-enabled text index, and the direct read from the text index ([`query_plan_direct_read_from_text_index`](/reference/settings/session-settings/query-plan#query_plan_direct_read_from_text_index)) must be enabled:
 
 ```sql
@@ -603,6 +604,7 @@ SETTINGS allow_experimental_bm25_scoring = 1;
 
 The score follows the boolean structure of the filter, as the `bool` query of Lucene and Elasticsearch does: every matching `hasToken`, `hasAnyTokens` or `hasAllTokens` predicate adds the BM25 score of its tokens (`hasAllTokens` adds it only when all its tokens are present), a conjunction adds the scores of its predicates only when the whole conjunction holds, and a predicate under `NOT`, a predicate on another column or a predicate wrapped into another function adds nothing.
 For example, for `WHERE hasAllTokens(str, ['consensus', 'raft']) OR hasToken(str, 'stream')` a row containing `stream` and `raft` but not `consensus` is scored for `stream` only.
+A condition on the score itself adds nothing to the score, and a conjunction containing it adds its scores when its other conditions hold, so the score does not depend on itself: `WHERE hasAnyTokens(str, ['consensus', 'raft']) AND bm25() > 1` returns the rows matching `hasAnyTokens(str, ['consensus', 'raft'])` with a score above `1`.
 The `EXPLAIN` of such a query shows the scoring text index, the number of scoring predicates and the parameters in the `BM25 scoring` line of the `ReadFromMergeTree` step.
 
 The collection statistics of the score (the number of rows, the average document length and the document frequencies of the tokens) are collected from the parts the query reads, which has the following consequences:

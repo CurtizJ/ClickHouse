@@ -85,10 +85,6 @@ SELECT id, bm25() FROM tab_bm25_err WHERE body = 'raft consensus log'; -- { serv
 SELECT '-- the scoring predicate is only under NOT (it filters but does not score)';
 SELECT id, bm25() FROM tab_bm25_err WHERE NOT hasToken(body, 'raft'); -- { serverError BAD_ARGUMENTS }
 
-SELECT '-- the function cannot be part of the filter condition';
-SELECT id FROM tab_bm25_err WHERE hasToken(body, 'raft') AND bm25() > 0; -- { serverError BAD_ARGUMENTS }
-SELECT id FROM tab_bm25_err PREWHERE bm25() > 0 WHERE hasToken(body, 'raft'); -- { serverError BAD_ARGUMENTS }
-
 SELECT '-- two different parameter pairs in one query';
 SELECT id, bm25(1.5), bm25(1.2, 0.5) FROM tab_bm25_err WHERE hasToken(body, 'raft'); -- { serverError BAD_ARGUMENTS }
 
