@@ -123,7 +123,6 @@ namespace
 
         /// `1` (bits header) + `4 * BLOCK_SIZE` (bit-pure max at `bits = 32`) + 16 (SIMD alignment slack).
         size_t maxBlockBytes() const override { return 1 + sizeof(uint32_t) * BLOCK_SIZE + 16; }
-
         IPostingListCodec::Type type() const override { return IPostingListCodec::Type::Bitpacking; }
     };
 
@@ -173,20 +172,24 @@ namespace
 
         size_t skipBlock(std::span<const std::byte> & in, size_t count) override
         {
-            /// A PFor block is delimited only by decoding it, so the values go to a scratch buffer.
             chassert(count > 0 && count <= BLOCK_SIZE);
-            return decodeBlock(in, count, std::span<uint32_t>(scratch.data(), count));
+            const auto * data = reinterpret_cast<const uint8_t *>(in.data());
+
+            /// The block size follows from its header, so the values are not decoded.
+            const size_t skipped = PFor::skipBlocks<uint32_t>(data, count, data + in.size());
+            if (skipped == 0)
+                throw Exception(ErrorCodes::CORRUPTED_DATA,
+                    "Corrupted data: malformed PFor block of {} values in {} available bytes", count, in.size());
+
+            in = in.subspan(skipped);
+            return skipped;
         }
 
         size_t maxBlockBytes() const override { return MAX_BLOCK_BYTES; }
-
         IPostingListCodec::Type type() const override { return IPostingListCodec::Type::PFor; }
 
     private:
         static constexpr size_t MAX_BLOCK_BYTES = PFor::maxCompressedBytes<uint32_t>(BLOCK_SIZE);
-
-        /// Receives the values of a skipped block.
-        std::array<uint32_t, BLOCK_SIZE> scratch{};
     };
 
 }
