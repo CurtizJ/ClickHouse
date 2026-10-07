@@ -562,9 +562,9 @@ public:
 
     void setTopKColumn(const TopKFilterInfo & top_k_filter_info_);
     bool isSkipIndexAvailableForTopK(const String & sort_column) const;
-    /// Whether the read computes the sort column itself, though it does not read it: `bm25()` above the read is
-    /// replaced with the score that the PREWHERE computes for the dynamic top-k filter (see `processAndOptimizeTextIndexFunctions`).
+    /// Whether the read computes the sort column itself, though it does not read it.
     bool computesSortColumnForTopK(const ActionsDAG::Node & sort_column_node) const;
+
     const ProjectionIndexReadDescription & getProjectionIndexReadDescription() const { return projection_index_read_desc; }
     ProjectionIndexReadDescription & getProjectionIndexReadDescription() { return projection_index_read_desc; }
     /// In distributed query plan, this step will be executed in a distributed manner - shards will be read in parallel.
@@ -793,8 +793,7 @@ private:
     size_t getNumStreamsWhenNothingToRead(const AnalysisResult & result) const;
 
     /// Prepares the query-global BM25 state for `bm25()`, if any index read task scores.
-    /// The statistics are collected from the whole part snapshot
-    /// the step was created with (`prepared_parts`), before any pruning.
+    /// The statistics are collected from the whole part snapshot the step was created with (`prepared_parts`), before any pruning.
     void prepareBM25State();
 
     Pipe spreadMarkRangesAmongStreams(

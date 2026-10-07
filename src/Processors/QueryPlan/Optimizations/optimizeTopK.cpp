@@ -207,8 +207,10 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
     /// The read step may compute the sort column itself in place of the expression below the sorting,
     /// or of the filter below that expression when the expression only passes the column through.
     const ActionsDAG::Node * sort_column_node = expression_step ? expression_step->getExpression().tryFindInOutputs(sort_column_name) : nullptr;
+
     if (filter_step && (!sort_column_node || sort_column_node->type == ActionsDAG::ActionType::INPUT))
         sort_column_node = filter_step->getExpression().tryFindInOutputs(sort_column_name);
+
     const bool sort_column_computed_by_read = read_from_mergetree_step && sort_column_node && read_from_mergetree_step->computesSortColumnForTopK(*sort_column_node);
 
     ///remove alias
