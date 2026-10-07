@@ -111,6 +111,11 @@ SELECT author, id FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'bana
 
 SELECT '-- subquery and WITH alias';
 SELECT id, round(score, 4) FROM (SELECT id, bm25() AS score FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana'])) WHERE score > 1 ORDER BY score DESC;
+-- The condition pushed down into the subquery stays a filter step of its own above the one computing the score.
+SELECT id, round(score, 4) FROM (SELECT id, bm25() AS score FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana'])) WHERE score > 1 ORDER BY score DESC SETTINGS query_plan_merge_filters = 0;
+-- The condition on the score is also a column of the result.
+SELECT id, score > 1 FROM (SELECT id, bm25() AS score FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana'])) WHERE score > 1 ORDER BY id;
+SELECT id, score > 1 FROM (SELECT id, bm25() AS score FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana'])) WHERE score > 1 ORDER BY id SETTINGS query_plan_merge_filters = 0;
 SELECT author, round(avg(score), 4) FROM (SELECT author, bm25() AS score FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana'])) GROUP BY author ORDER BY author;
 WITH bm25() AS score SELECT id, round(score, 4) FROM tab_bm25_clauses WHERE hasAnyTokens(body, ['apple', 'banana']) AND score > 1 ORDER BY score DESC;
 

@@ -138,7 +138,9 @@ void collectNodeNames(const ActionsDAG::Node * node, NameSet & names)
         collectNodeNames(child, names);
 }
 
-const ActionsDAG::Node * replaceNodes(ActionsDAG & dag, const ActionsDAG::Node * node, const NodesReplacementMap & replacements)
+/// A function above a replaced node is rebuilt under a name derived from its new arguments, or with `keep_names`
+/// under the name of the original node.
+const ActionsDAG::Node * replaceNodes(ActionsDAG & dag, const ActionsDAG::Node * node, const NodesReplacementMap & replacements, bool keep_names = false)
 {
     if (auto it = replacements.find(node); it != replacements.end())
     {
@@ -147,7 +149,7 @@ const ActionsDAG::Node * replaceNodes(ActionsDAG & dag, const ActionsDAG::Node *
     else if (node->type == ActionsDAG::ActionType::ALIAS)
     {
         const auto * old_child = node->children[0];
-        const auto * new_child = replaceNodes(dag, old_child, replacements);
+        const auto * new_child = replaceNodes(dag, old_child, replacements, keep_names);
 
         if (old_child != new_child)
             return &dag.addAlias(*new_child, node->result_name);
@@ -158,10 +160,10 @@ const ActionsDAG::Node * replaceNodes(ActionsDAG & dag, const ActionsDAG::Node *
         std::vector<const ActionsDAG::Node *> new_children;
 
         for (const auto & child : old_children)
-            new_children.push_back(replaceNodes(dag, child, replacements));
+            new_children.push_back(replaceNodes(dag, child, replacements, keep_names));
 
         if (new_children != old_children)
-            return &dag.addFunction(node->function_base, new_children, "");
+            return &dag.addFunction(node->function_base, new_children, keep_names ? node->result_name : "");
     }
 
     return node;
@@ -314,6 +316,9 @@ void addBM25Nodes(const ActionsDAG & dag, std::optional<BM25Params> & params, Na
 
 /// Replaces the `bm25()` calls of `dag` (a step above the one computing the score) by inputs of the same name,
 /// and passes through those of `result_names_above`. Returns false if there is no call.
+/// The outputs keep their names: the step's filter column and the steps above refer to them, and the name of a
+/// filter condition need not follow from its arguments, since `FilterStep` strips the aliases below it
+/// (e.g. `greater(__table1.score, 1_UInt8)` over `bm25()`).
 bool replaceBM25NodesWithInputs(ActionsDAG & dag, const NameOrderedSet & result_names_above)
 {
     auto nodes = collectBM25Nodes(dag);
@@ -334,7 +339,7 @@ bool replaceBM25NodesWithInputs(ActionsDAG & dag, const NameOrderedSet & result_
 
     auto & outputs = dag.getOutputs();
     for (auto & output : outputs)
-        output = replaceNodes(dag, output, replacements);
+        output = replaceNodes(dag, output, replacements, /*keep_names=*/ true);
 
     for (const auto & [name, input] : inputs_by_name)
     {
@@ -775,8 +780,9 @@ public:
                         bm25_replacements[node] = it->second;
                     }
 
+                    /// The steps above may read a condition on the score by its name (see `replaceBM25NodesWithInputs`).
                     for (auto & output : actions_dag.outputs)
-                        output = replaceNodes(actions_dag, output, bm25_replacements);
+                        output = replaceNodes(actions_dag, output, bm25_replacements, /*keep_names=*/ true);
 
                     for (const auto & name : bm25_result_names_above)
                     {
