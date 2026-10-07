@@ -2389,7 +2389,7 @@ void MergeTreeIndexTextGranuleBuilder::addDocumentsFromLowCardinality(
             {
                 for (size_t j = begin; j < end; ++j)
                     builders[j]->add(static_cast<UInt32>(current_row), static_cast<UInt32>(j - begin), context);
-                num_processed_tokens += end - begin;
+                tokens_in_current_row += end - begin;
             }
         }
         incrementCurrentRow();
