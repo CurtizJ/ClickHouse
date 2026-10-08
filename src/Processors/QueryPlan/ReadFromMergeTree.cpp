@@ -6235,7 +6235,6 @@ bool ReadFromMergeTree::announceEmptyReadRangesToCoordinatorIfInitiator()
 void ReadFromMergeTree::createReadTasksForTextIndex(
     const UsefulSkipIndexes & skip_indexes,
     const IndexReadColumns & added_columns,
-    const std::unordered_map<String, TextSearchQueryPtr> & search_queries,
     const Names & removed_columns)
 {
     index_read_tasks.clear();
@@ -6271,20 +6270,19 @@ void ReadFromMergeTree::createReadTasksForTextIndex(
             index_task.index = *index_it;
         }
 
-        for (const auto & added_virtual_column : added_virtual_columns)
+        for (const auto & column : added_virtual_columns)
         {
-            auto it = std::ranges::find(all_column_names, added_virtual_column.name);
+            auto it = std::ranges::find(all_column_names, column.name);
             if (it != all_column_names.end())
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} already added for reading", added_virtual_column.name);
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} already added for reading", column.name);
 
-            auto query_it = search_queries.find(added_virtual_column.name);
-            if (query_it == search_queries.end())
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} added for reading from text index {} has no search query", added_virtual_column.name, index_name);
+            VirtualColumnDescription virtual_column(column.name, column.type, /*codec=*/ nullptr, /*comment=*/ index_name, VirtualsKind::Ephemeral, VirtualsMaterializationPlace::Reader, /*deterministic_=*/ true);
+            virtual_column.default_desc.kind = ColumnDefaultKind::Default;
+            virtual_column.default_desc.expression = column.default_expression;
 
-            all_column_names.push_back(added_virtual_column.name);
-            new_metadata->virtuals.add(added_virtual_column);
-            index_task.columns.emplace_back(added_virtual_column.name, added_virtual_column.type);
-            index_task.search_queries.emplace(added_virtual_column.name, query_it->second);
+            all_column_names.push_back(column.name);
+            new_metadata->virtuals.add(std::move(virtual_column));
+            index_task.columns.push_back(column);
         }
     }
 

@@ -527,7 +527,6 @@ public:
     void createReadTasksForTextIndex(
         const UsefulSkipIndexes & skip_indexes,
         const IndexReadColumns & added_columns,
-        const std::unordered_map<String, TextSearchQueryPtr> & search_queries,
         const Names & removed_columns);
 
     const std::optional<Indexes> & getIndexes() const { return indexes; }

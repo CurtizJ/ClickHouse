@@ -471,8 +471,6 @@ public:
     struct ResultReplacement
     {
         IndexReadColumns added_columns;
-        /// The search query each of `added_columns` is filled from.
-        std::unordered_map<String, TextSearchQueryPtr> search_queries;
         Names removed_columns;
         const ActionsDAG::Node * filter_node = nullptr;
         /// True if any function node was rewritten.
@@ -550,25 +548,21 @@ public:
 
         /// A virtual column is read only if its input survived `removeUnusedActions`: the rewrite can
         /// keep a different index's virtual (or the original expression) instead, leaving this one unused.
-        for (auto & [index_name, virtual_column, search_query] : candidate_virtual_columns)
+        for (auto & [index_name, column] : candidate_virtual_columns)
         {
-            if (replaced_columns_set.contains(virtual_column.name))
-            {
-                result.search_queries[virtual_column.name] = search_query;
-                result.added_columns[index_name].add(std::move(virtual_column));
-            }
+            if (replaced_columns_set.contains(column.name))
+                result.added_columns[index_name].push_back(std::move(column));
         }
 
         return result;
     }
 
 private:
-    /// A virtual column of a text index added to the DAG and the search query it is filled from.
+    /// A virtual column of a text index added to the DAG.
     struct AddedVirtualColumn
     {
         String index_name;
-        VirtualColumnDescription column;
-        TextSearchQueryPtr search_query;
+        IndexReadTask::Column column;
     };
 
     struct NodeReplacement
@@ -1019,12 +1013,9 @@ private:
                 else if (condition.search_query->getDirectReadMode() == TextIndexDirectReadMode::Hint)
                     default_expression = make_intrusive<ASTLiteral>(Field(1));
 
-                VirtualColumnDescription virtual_column(condition.virtual_column_name, std::make_shared<DataTypeUInt8>(), /*codec=*/ nullptr, condition.index_name, VirtualsKind::Ephemeral, VirtualsMaterializationPlace::Reader, /*deterministic_=*/ true);
-                virtual_column.default_desc.kind = ColumnDefaultKind::Default;
-                virtual_column.default_desc.expression = std::move(default_expression);
-
-                it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-                replacement.added_virtual_columns.push_back({condition.index_name, std::move(virtual_column), condition.search_query});
+                auto type = std::make_shared<DataTypeUInt8>();
+                it->second = &actions_dag.addInput(condition.virtual_column_name, type);
+                replacement.added_virtual_columns.push_back({condition.index_name, {condition.virtual_column_name, std::move(type), condition.search_query, std::move(default_expression)}});
             }
 
             return it->second;
@@ -1118,7 +1109,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     }
 
     const auto & indexes = read_from_merge_tree_step.getIndexes();
-    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.search_queries, result.removed_columns);
+    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.removed_columns);
     return result.filter_node;
 }
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <map>
-#include <unordered_map>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
@@ -73,9 +72,17 @@ enum class MergeTreeReadType : uint8_t
 /// Some indexes (e.g. inverted text index) may read special virtual columns.
 struct IndexReadTask
 {
-    NamesAndTypesList columns;
-    /// The text search query each of `columns` is filled from.
-    std::unordered_map<String, TextSearchQueryPtr> search_queries;
+    /// A virtual column filled by the index reader and the text search query it is filled from.
+    struct Column
+    {
+        String name;
+        DataTypePtr type;
+        TextSearchQueryPtr search_query;
+        /// Evaluated by the main reader in parts where the index is not materialized.
+        ASTPtr default_expression;
+    };
+
+    std::vector<Column> columns;
     MergeTreeIndexWithCondition index;
 };
 
@@ -85,7 +92,9 @@ struct IndexReadTask
 /// `std::unordered_map` does not guarantee the same iteration order after copy,
 /// which leads to mismatched prewhere readers and actions.
 using IndexReadTasks = std::map<String, IndexReadTask>;
-using IndexReadColumns = std::map<String, VirtualColumnsDescription>;
+
+/// Index name -> virtual columns read from that index.
+using IndexReadColumns = std::map<String, std::vector<IndexReadTask::Column>>;
 
 struct MergeTreeReadTaskColumns
 {
