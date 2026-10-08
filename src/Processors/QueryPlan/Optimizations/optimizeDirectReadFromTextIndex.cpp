@@ -471,6 +471,8 @@ public:
     struct ResultReplacement
     {
         IndexReadColumns added_columns;
+        /// The search query each of `added_columns` is filled from.
+        std::unordered_map<String, TextSearchQueryPtr> search_queries;
         Names removed_columns;
         const ActionsDAG::Node * filter_node = nullptr;
         /// True if any function node was rewritten.
@@ -491,7 +493,7 @@ public:
         Names original_inputs = actions_dag.getRequiredColumnsNames();
         const bool has_filter_column = !filter_column_name.empty();
         const auto * filter_node = has_filter_column ? &actions_dag.findInOutputs(filter_column_name) : nullptr;
-        std::vector<std::pair<String, VirtualColumnDescription>> candidate_virtual_columns;
+        std::vector<AddedVirtualColumn> candidate_virtual_columns;
 
         /// Cache for added input nodes for each virtual column.
         std::unordered_map<String, const ActionsDAG::Node *> virtual_column_to_node;
@@ -516,8 +518,8 @@ public:
             if (replaced.node != node)
                 replacements[node] = replaced.node;
 
-            for (auto & [index_name, virtual_column] : replaced.added_virtual_columns)
-                candidate_virtual_columns.emplace_back(index_name, std::move(virtual_column));
+            for (auto & added_virtual_column : replaced.added_virtual_columns)
+                candidate_virtual_columns.push_back(std::move(added_virtual_column));
         }
 
         if (replacements.empty())
@@ -548,20 +550,31 @@ public:
 
         /// A virtual column is read only if its input survived `removeUnusedActions`: the rewrite can
         /// keep a different index's virtual (or the original expression) instead, leaving this one unused.
-        for (auto & [index_name, virtual_column] : candidate_virtual_columns)
+        for (auto & [index_name, virtual_column, search_query] : candidate_virtual_columns)
         {
             if (replaced_columns_set.contains(virtual_column.name))
+            {
+                result.search_queries[virtual_column.name] = search_query;
                 result.added_columns[index_name].add(std::move(virtual_column));
+            }
         }
 
         return result;
     }
 
 private:
+    /// A virtual column of a text index added to the DAG and the search query it is filled from.
+    struct AddedVirtualColumn
+    {
+        String index_name;
+        VirtualColumnDescription column;
+        TextSearchQueryPtr search_query;
+    };
+
     struct NodeReplacement
     {
         const ActionsDAG::Node * node = nullptr;
-        std::unordered_map<String, VirtualColumnDescription> added_virtual_columns;
+        std::vector<AddedVirtualColumn> added_virtual_columns;
     };
 
     ActionsDAG & actions_dag;
@@ -646,7 +659,7 @@ private:
 
         for (const auto & [index_name, info] : text_index_read_infos)
         {
-            auto & text_index_condition = typeid_cast<MergeTreeIndexConditionText &>(*info.condition);
+            const auto & text_index_condition = typeid_cast<const MergeTreeIndexConditionText &>(*info.condition);
             const auto & index_header = text_index_condition.getHeader();
 
             /// Take the first text index if there are multiple text indexes set for the same expression.
@@ -678,7 +691,7 @@ private:
                 continue;
             }
 
-            auto virtual_column_name = text_index_condition.replaceToVirtualColumn(*search_query, index_name);
+            auto virtual_column_name = text_index_condition.tryGetVirtualColumnName(*search_query, index_name);
             if (!virtual_column_name)
                 continue;
 
@@ -1011,7 +1024,7 @@ private:
                 virtual_column.default_desc.expression = std::move(default_expression);
 
                 it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-                replacement.added_virtual_columns.emplace(condition.index_name, std::move(virtual_column));
+                replacement.added_virtual_columns.push_back({condition.index_name, std::move(virtual_column), condition.search_query});
             }
 
             return it->second;
@@ -1105,8 +1118,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     }
 
     const auto & indexes = read_from_merge_tree_step.getIndexes();
-    bool is_final = read_from_merge_tree_step.isQueryWithFinal();
-    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.removed_columns, is_final);
+    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.search_queries, result.removed_columns);
     return result.filter_node;
 }
 

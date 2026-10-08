@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
@@ -46,6 +47,9 @@ using LazyMaterializingRowsPtr = std::shared_ptr<LazyMaterializingRows>;
 class RuntimeDataflowStatisticsCacheUpdater;
 using RuntimeDataflowStatisticsCacheUpdaterPtr = std::shared_ptr<RuntimeDataflowStatisticsCacheUpdater>;
 
+struct TextSearchQuery;
+using TextSearchQueryPtr = std::shared_ptr<TextSearchQuery>;
+
 enum class MergeTreeReadType : uint8_t
 {
     /// By default, read will use MergeTreeReadPool and return pipe with num_streams outputs.
@@ -70,8 +74,9 @@ enum class MergeTreeReadType : uint8_t
 struct IndexReadTask
 {
     NamesAndTypesList columns;
+    /// The text search query each of `columns` is filled from.
+    std::unordered_map<String, TextSearchQueryPtr> search_queries;
     MergeTreeIndexWithCondition index;
-    bool is_final = false;
 };
 
 /// Ordered map to ensure deterministic iteration order.

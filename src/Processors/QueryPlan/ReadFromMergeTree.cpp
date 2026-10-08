@@ -3084,12 +3084,10 @@ void ReadFromMergeTree::buildIndexes(
         if (index_helper->isVectorSimilarityIndex())
         {
 #if USE_USEARCH
-            const auto * vector_similarity_index = typeid_cast<const MergeTreeIndexVectorSimilarity *>(index_helper.get());
-            chassert(vector_similarity_index);
-
-            factory = [vector_similarity_index, query_context, vector_search_parameters](const ActionsDAG *, const ActionsDAG::Node * predicate)
+            factory = [index_helper, query_context, vector_search_parameters](const ActionsDAG *, const ActionsDAG::Node * predicate)
             {
-                return vector_similarity_index->createIndexCondition(predicate, query_context, vector_search_parameters);
+                const auto & vector_similarity_index = typeid_cast<const MergeTreeIndexVectorSimilarity &>(*index_helper);
+                return vector_similarity_index.createIndexCondition(predicate, query_context, vector_search_parameters);
             };
 #endif
         }
@@ -6234,7 +6232,11 @@ bool ReadFromMergeTree::announceEmptyReadRangesToCoordinatorIfInitiator()
     return true;
 }
 
-void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, const IndexReadColumns & added_columns, const Names & removed_columns, bool is_final)
+void ReadFromMergeTree::createReadTasksForTextIndex(
+    const UsefulSkipIndexes & skip_indexes,
+    const IndexReadColumns & added_columns,
+    const std::unordered_map<String, TextSearchQueryPtr> & search_queries,
+    const Names & removed_columns)
 {
     index_read_tasks.clear();
 
@@ -6267,7 +6269,6 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Index {} not found in analyzed indexes", index_name);
 
             index_task.index = *index_it;
-            index_task.is_final = is_final;
         }
 
         for (const auto & added_virtual_column : added_virtual_columns)
@@ -6276,9 +6277,14 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
             if (it != all_column_names.end())
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} already added for reading", added_virtual_column.name);
 
+            auto query_it = search_queries.find(added_virtual_column.name);
+            if (query_it == search_queries.end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} added for reading from text index {} has no search query", added_virtual_column.name, index_name);
+
             all_column_names.push_back(added_virtual_column.name);
             new_metadata->virtuals.add(added_virtual_column);
             index_task.columns.emplace_back(added_virtual_column.name, added_virtual_column.type);
+            index_task.search_queries.emplace(added_virtual_column.name, query_it->second);
         }
     }
 
@@ -6289,7 +6295,11 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
             /// Create tasks for text indexes which don't read virtual columns.
             /// It's required to always read text indexes on separate step on data read.
             if (!index_read_tasks.contains(index.index->index.name))
-                index_read_tasks.emplace(index.index->index.name, IndexReadTask{.columns = {}, .index = index, .is_final = is_final});
+            {
+                IndexReadTask index_task;
+                index_task.index = index;
+                index_read_tasks.emplace(index.index->index.name, std::move(index_task));
+            }
         }
     }
 
