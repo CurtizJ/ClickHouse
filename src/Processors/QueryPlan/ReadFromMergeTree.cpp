@@ -2734,6 +2734,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(bool 
         all_column_names,
         log,
         indexes,
+        index_read_tasks,
         find_exact_ranges,
         is_parallel_reading_from_replicas,
         allow_query_condition_cache,
@@ -2763,6 +2764,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::estimateRangesToReadWith
         all_column_names,
         log,
         indexes,
+        index_read_tasks,
         /*find_exact_ranges=*/false,
         is_parallel_reading_from_replicas,
         /*allow_query_condition_cache_=*/false,
@@ -2788,6 +2790,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToReadForEst
         all_column_names,
         log,
         indexes,
+        index_read_tasks,
         /*find_exact_ranges=*/false,
         is_parallel_reading_from_replicas,
         allow_query_condition_cache,
@@ -3091,18 +3094,6 @@ void ReadFromMergeTree::buildIndexes(
                 return vector_similarity_index.createIndexCondition(predicate, query_context, vector_search_parameters);
             };
 #endif
-        }
-        else if (index_helper->isTextIndex())
-        {
-            /// All conditions generated from the template share the registry of the `bm25()` score columns: the
-            /// direct-read pass registers them on the unsubstituted condition, the per-part analysis reads them.
-            auto scoring_queries = std::make_shared<TextIndexScoringQueries>();
-            factory = [index_helper, query_context, scoring_queries](const ActionsDAG *, const ActionsDAG::Node * predicate) -> MergeTreeIndexConditionPtr
-            {
-                if (!predicate)
-                    return nullptr;
-                return typeid_cast<const MergeTreeIndexText &>(*index_helper).createIndexConditionWithScoring(predicate, query_context, scoring_queries);
-            };
         }
         else
         {
@@ -3480,6 +3471,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
     const Names & all_column_names,
     LoggerPtr log,
     std::optional<Indexes> & indexes,
+    const IndexReadTasks & index_read_tasks,
     bool find_exact_ranges,
     bool is_parallel_reading_from_replicas_,
     bool allow_query_condition_cache_,
@@ -3639,6 +3631,7 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
         .query_info = query_info_,
         .context = context_,
         .indexes = *indexes,
+        .index_read_tasks = index_read_tasks,
         .top_k_filter_info = top_k_filter_info,
         .reader_settings = reader_settings,
         .log = log,
@@ -5476,6 +5469,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
         {
             skip_index_reader = std::make_shared<MergeTreeSkipIndexReader>(
                 applicable_skip_indexes,
+                index_read_tasks,
                 indexes->key_condition_rpn_template,
                 indexes->use_skip_indexes_for_disjunctions,
                 context->getIndexMarkCache(),
@@ -5497,6 +5491,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
     {
         skip_index_reader = std::make_shared<MergeTreeSkipIndexReader>(
             UsefulSkipIndexes{},
+            IndexReadTasks{},
             indexes->key_condition_rpn_template,
             /*use_for_disjunctions=*/false,
             context->getIndexMarkCache(),
@@ -6280,7 +6275,11 @@ bool ReadFromMergeTree::announceEmptyReadRangesToCoordinatorIfInitiator()
     return true;
 }
 
-void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, const IndexReadColumns & added_columns, const Names & removed_columns, bool is_final)
+void ReadFromMergeTree::createReadTasksForTextIndex(
+    const UsefulSkipIndexes & skip_indexes,
+    const IndexReadColumns & added_columns,
+    const std::unordered_map<String, TextSearchQueryPtr> & search_queries,
+    const Names & removed_columns)
 {
     index_read_tasks.clear();
 
@@ -6313,7 +6312,6 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Index {} not found in analyzed indexes", index_name);
 
             index_task.index = *index_it;
-            index_task.is_final = is_final;
         }
 
         for (const auto & added_virtual_column : added_virtual_columns)
@@ -6322,9 +6320,14 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
             if (it != all_column_names.end())
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} already added for reading", added_virtual_column.name);
 
+            auto query_it = search_queries.find(added_virtual_column.name);
+            if (query_it == search_queries.end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Column {} added for reading from text index {} has no search query", added_virtual_column.name, index_name);
+
             all_column_names.push_back(added_virtual_column.name);
             new_metadata->virtuals.add(added_virtual_column);
             index_task.columns.emplace_back(added_virtual_column.name, added_virtual_column.type);
+            index_task.search_queries.emplace(added_virtual_column.name, query_it->second);
         }
     }
 
@@ -6338,7 +6341,6 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
             {
                 IndexReadTask index_task;
                 index_task.index = index;
-                index_task.is_final = is_final;
                 index_read_tasks.emplace(index.index->index.name, std::move(index_task));
             }
         }
@@ -6372,13 +6374,22 @@ void ReadFromMergeTree::attachTextIndexScoring(const String & index_name, const 
     if (index_task.bm25_params)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "BM25 scoring is already attached to the read task of the text index '{}'", index_name);
 
-    const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*index_task.index.condition_template->generateUnsubstituted());
-    if (!condition_text.isScoringEnabled())
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index '{}' has no score columns registered on its condition, cannot attach the BM25 scoring", index_name);
+    /// A `Float32` column of the task is the BM25 score of its search query.
+    for (const auto & column : index_task.columns)
+    {
+        if (!WhichDataType(column.type).isFloat32())
+            continue;
+
+        for (const auto & token : index_task.search_queries.at(column.name)->getTokens())
+            index_task.scoring_tokens.insert(token);
+    }
+
+    if (index_task.scoring_tokens.empty())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index '{}' has no score columns to read, cannot attach the BM25 scoring", index_name);
 
     index_task.bm25_params = params;
 
-    /// Granules analyzed before the scoring was registered (the row-count estimation of the parallel replicas
+    /// Granules analyzed before the scoring was attached (the row-count estimation of the parallel replicas
     /// analyzes the parts in the planner) lack the term frequencies. Drop them: the read analyzes the index again.
     if (analyzed_result_ptr)
     {

@@ -36,6 +36,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/MergeTreeIndexGranularity.h>
+#include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/MarkRange.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
@@ -711,7 +712,6 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
 
     is_empty = false;
     analyzer = std::make_unique<TextIndexAnalyzer>(condition_text);
-    scoring_enabled = condition_text.isScoringEnabled();
 
     /// Push the row ranges still readable after the analysis of the primary key and prior skip indexes into the analyzer.
     if (state.readable_ranges)
@@ -1219,9 +1219,10 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         /// discarded by the analyzer after reading postings for previous tokens.
         if (analyzer->isTokenNeeded(token))
         {
-            /// For a query computing `bm25()`, decode the term frequencies along with the row ids and keep
-            /// the flat postings for the scoring cursors of the reader.
-            auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches, /*with_term_frequencies=*/ scoring_enabled);
+            /// For a token the query computes `bm25()` for, decode the term frequencies along with the row ids
+            /// and keep the flat postings for the scoring cursors of the reader.
+            bool with_term_frequencies = state.index_read_task && state.index_read_task->scoring_tokens.contains(String(token));
+            auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches, with_term_frequencies);
 
             if (block.scoring)
                 scoring_postings_by_offset.emplace(token_info->offsets[0], std::move(block.scoring));
@@ -2752,15 +2753,9 @@ MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
 {
-    return createIndexConditionWithScoring(predicate, context, std::make_shared<TextIndexScoringQueries>());
-}
-
-MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexConditionWithScoring(const ActionsDAG::Node * predicate, ContextPtr context, TextIndexScoringQueriesPtr scoring_queries) const
-{
     return std::make_shared<MergeTreeIndexConditionText>(
         predicate, context, index.sample_block, normalized_index_column_name, tokenizer.get(),
-        preprocessor, postprocessor, params.enable_positions, getColumnsShadowingMapSubcolumns(), collectJSONIndexArgumentTypes(*index.expression),
-        std::move(scoring_queries));
+        preprocessor, postprocessor, params.enable_positions, getColumnsShadowingMapSubcolumns(), collectJSONIndexArgumentTypes(*index.expression));
 }
 
 DataTypePtr MergeTreeIndexText::getNestedDataType(const DataTypePtr & data_type)

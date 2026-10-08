@@ -572,8 +572,6 @@ private:
     TextIndexScoringStats scoring_stats;
     /// The scoring data the index stores, read from the text index header.
     TextIndexScoringKind scoring_kind = TextIndexScoringKind::None;
-    /// Whether the query computes `bm25()` with this index (see `MergeTreeIndexConditionText::isScoringEnabled`).
-    bool scoring_enabled = false;
     /// Flat postings with term frequencies of the single-block tokens decoded during the analysis
     /// for the scoring cursors of the query, keyed by the block's offset in the postings file.
     absl::flat_hash_map<UInt64, ScoringPostingsPtr> scoring_postings_by_offset;
@@ -766,8 +764,6 @@ public:
     using IMergeTreeIndex::createIndexCondition;
 
     MergeTreeIndexConditionPtr createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const override;
-    /// Creates the condition sharing `scoring_queries` with the other conditions of the same template (see `TextIndexScoringQueries`).
-    MergeTreeIndexConditionPtr createIndexConditionWithScoring(const ActionsDAG::Node * predicate, ContextPtr context, TextIndexScoringQueriesPtr scoring_queries) const;
 
     const IPostingListCodec * getPostingListCodec() const { return posting_list_codec.get(); }
     static DataTypePtr getNestedDataType(const DataTypePtr & data_type);

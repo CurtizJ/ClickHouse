@@ -14,6 +14,7 @@
 #include <Common/ThreadGroupSwitcher.h>
 #include <Common/ThreadPool.h>
 
+#include <algorithm>
 #include <unordered_set>
 
 namespace ProfileEvents
@@ -45,18 +46,19 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-BM25GlobalStatsBuilder::BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_, BM25Params params_)
-    : index_with_condition(std::move(index_with_condition_))
-    , params(params_)
+BM25GlobalStatsBuilder::BM25GlobalStatsBuilder(const IndexReadTask & index_read_task)
+    : index_with_condition(index_read_task.index)
+    , params(index_read_task.bm25_params.value())
+    , scoring_token_names(index_read_task.scoring_tokens.begin(), index_read_task.scoring_tokens.end())
 {
     text_index = &typeid_cast<const MergeTreeIndexText &>(*index_with_condition.index.get());
     condition_text = &typeid_cast<const MergeTreeIndexConditionText &>(*index_with_condition.condition_template->generateUnsubstituted());
-    scoring_token_names = condition_text->getScoringTokens();
+    std::ranges::sort(scoring_token_names);
 
     if (scoring_token_names.empty())
     {
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Cannot compute text score: the condition of text index '{}' has no scoring tokens",
+            "Cannot compute text score: the read task of text index '{}' has no scoring tokens",
             text_index->index.name);
     }
 
@@ -143,7 +145,7 @@ BM25StatePtr buildBM25State(
         return nullptr;
 
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::TextScoreStatsBuildMicroseconds);
-    auto builder = std::make_shared<BM25GlobalStatsBuilder>(score_task->index, *score_task->bm25_params);
+    auto builder = std::make_shared<BM25GlobalStatsBuilder>(*score_task);
 
     /// A part can appear in several entries, its statistics must be accumulated once.
     std::unordered_set<DataPartPtr> parts;

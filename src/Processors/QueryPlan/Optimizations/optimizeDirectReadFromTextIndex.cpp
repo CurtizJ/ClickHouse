@@ -661,6 +661,8 @@ public:
     struct ResultReplacement
     {
         IndexReadColumns added_columns;
+        /// The search query each of `added_columns` is filled from.
+        std::unordered_map<String, TextSearchQueryPtr> search_queries;
         Names removed_columns;
         const ActionsDAG::Node * filter_node = nullptr;
         /// True if any function node was rewritten.
@@ -682,7 +684,7 @@ public:
         Names original_inputs = actions_dag.getRequiredColumnsNames();
         const bool has_filter_column = !filter_column_name.empty();
         const auto * filter_node = has_filter_column ? &actions_dag.findInOutputs(filter_column_name) : nullptr;
-        std::vector<std::pair<String, VirtualColumnDescription>> candidate_virtual_columns;
+        std::vector<AddedVirtualColumn> candidate_virtual_columns;
 
         /// Cache for added input nodes for each virtual column.
         std::unordered_map<String, const ActionsDAG::Node *> virtual_column_to_node;
@@ -727,8 +729,8 @@ public:
             if (replaced.node != node)
                 replacements[node] = replaced.node;
 
-            for (auto & [index_name, virtual_column] : replaced.added_virtual_columns)
-                candidate_virtual_columns.emplace_back(index_name, std::move(virtual_column));
+            for (auto & added_virtual_column : replaced.added_virtual_columns)
+                candidate_virtual_columns.push_back(std::move(added_virtual_column));
         }
 
         if (replacements.empty())
@@ -818,10 +820,13 @@ public:
         /// A virtual column is read only if its input survived `removeUnusedActions`: the rewrite can
         /// keep a different index's virtual (or the original expression) instead, leaving this one unused.
         /// The score columns of the assembled `bm25()` are read even when the PREWHERE computes it instead of this DAG.
-        for (auto & [index_name, virtual_column] : candidate_virtual_columns)
+        for (auto & [index_name, virtual_column, search_query] : candidate_virtual_columns)
         {
             if (replaced_columns_set.contains(virtual_column.name) || result.bm25.score_columns.contains(virtual_column.name))
+            {
+                result.search_queries[virtual_column.name] = search_query;
                 result.added_columns[index_name].add(std::move(virtual_column));
+            }
         }
 
         return result;
@@ -836,10 +841,18 @@ private:
         String index_name;
     };
 
+    /// A virtual column of a text index added to the DAG and the search query it is filled from.
+    struct AddedVirtualColumn
+    {
+        String index_name;
+        VirtualColumnDescription column;
+        TextSearchQueryPtr search_query;
+    };
+
     struct NodeReplacement
     {
         const ActionsDAG::Node * node = nullptr;
-        std::vector<std::pair<String, VirtualColumnDescription>> added_virtual_columns;
+        std::vector<AddedVirtualColumn> added_virtual_columns;
         std::optional<ScoringLeaf> scoring_leaf;
     };
 
@@ -962,7 +975,7 @@ private:
                 continue;
             }
 
-            auto virtual_column_name = text_index_condition.replaceToVirtualColumn(*search_query, index_name);
+            auto virtual_column_name = text_index_condition.tryGetVirtualColumnName(*search_query, index_name);
             if (!virtual_column_name)
                 continue;
 
@@ -1452,7 +1465,7 @@ private:
                 virtual_column.default_desc.expression = std::move(default_expression);
 
                 it->second = &actions_dag.addInput(condition.virtual_column_name, std::make_shared<DataTypeUInt8>());
-                replacement.added_virtual_columns.emplace_back(condition.index_name, std::move(virtual_column));
+                replacement.added_virtual_columns.push_back({condition.index_name, std::move(virtual_column), condition.search_query});
             }
 
             return it->second;
@@ -1466,8 +1479,8 @@ private:
             auto scoring_condition = std::ranges::find_if(selected_conditions, isScoringCondition);
             if (scoring_condition != selected_conditions.end())
             {
-                auto & condition_text = typeid_cast<MergeTreeIndexConditionText &>(*scoring_condition->info->condition);
-                String score_column_name = condition_text.registerScoreVirtualColumn(*scoring_condition->search_query, scoring_condition->index_name);
+                const auto & condition_text = typeid_cast<const MergeTreeIndexConditionText &>(*scoring_condition->info->condition);
+                String score_column_name = condition_text.getScoreVirtualColumnName(*scoring_condition->search_query, scoring_condition->index_name);
 
                 auto [it, inserted] = virtual_column_to_node.try_emplace(score_column_name);
                 if (inserted)
@@ -1477,7 +1490,7 @@ private:
                     score_column.default_desc.kind = ColumnDefaultKind::Default;
 
                     it->second = &actions_dag.addInput(score_column_name, std::make_shared<DataTypeFloat32>());
-                    replacement.added_virtual_columns.emplace_back(scoring_condition->index_name, std::move(score_column));
+                    replacement.added_virtual_columns.push_back({scoring_condition->index_name, std::move(score_column), scoring_condition->search_query});
                 }
 
                 replacement.scoring_leaf = ScoringLeaf{.score_input = it->second, .search_query = scoring_condition->search_query, .index_name = scoring_condition->index_name};
@@ -1585,8 +1598,7 @@ static TextIndexDAGResult processAndOptimizeTextIndexDAG(
     }
 
     const auto & indexes = read_from_merge_tree_step.getIndexes();
-    bool is_final = read_from_merge_tree_step.isQueryWithFinal();
-    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.removed_columns, is_final);
+    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result.added_columns, result.search_queries, result.removed_columns);
 
     return {.filter_node = result.filter_node, .bm25 = std::move(result.bm25)};
 }

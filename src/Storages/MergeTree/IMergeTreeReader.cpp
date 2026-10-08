@@ -742,7 +742,7 @@ MergeTreeReaderPtr createMergeTreeReaderIndex(
     if (index.index->index.type == "text")
     {
         auto it = index_granules.find(index.index->index.name);
-        return createMergeTreeReaderTextIndex(main_reader, index, columns_to_read, it != index_granules.end() ? it->second : nullptr, index_read_task.bm25_score_state);
+        return createMergeTreeReaderTextIndex(main_reader, index_read_task, columns_to_read, it != index_granules.end() ? it->second : nullptr);
     }
 
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot create reader for index with type {}", index.index->index.type);

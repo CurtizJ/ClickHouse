@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/PostingListCursor.h>
 #include <Storages/MergeTree/PostingListScoringCursor.h>
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
@@ -40,10 +41,9 @@ class MergeTreeReaderTextIndex : public IMergeTreeReader
 public:
     MergeTreeReaderTextIndex(
         const IMergeTreeReader * main_reader_,
-        MergeTreeIndexWithCondition index_,
+        IndexReadTask index_read_task_,
         NamesAndTypesList columns_,
-        MergeTreeIndexGranulePtr index_granule_,
-        BM25StatePtr bm25_score_state_);
+        MergeTreeIndexGranulePtr index_granule_);
 
     size_t readRows(
         size_t from_mark,
@@ -150,7 +150,7 @@ private:
 
     using TextIndexGranulePtr = std::shared_ptr<const MergeTreeIndexGranuleText>;
 
-    MergeTreeIndexWithCondition index;
+    IndexReadTask index_read_task;
     bool can_read_incomplete_granules = false;
     std::shared_ptr<MergeTreeIndexConditionText> condition_text;
     std::vector<TextSearchQueryPtr> search_queries;
@@ -207,9 +207,6 @@ private:
     /// Counters of the lazy intersections, added to the profile events when the reader is destroyed.
     LazyPostingsStats lazy_postings_stats;
 
-    /// Query-global BM25 state (statistics and per-token weights); null when the query reads no scores.
-    BM25StatePtr bm25_score_state;
-
     /// One leaf per score column, paired with the match column of the same predicate in the constructor.
     std::vector<ScoreLeaf> score_leaves;
     bool score_leaves_initialized = false;
@@ -221,9 +218,8 @@ private:
 
 MergeTreeReaderPtr createMergeTreeReaderTextIndex(
     const IMergeTreeReader * main_reader,
-    const MergeTreeIndexWithCondition & index,
+    const IndexReadTask & index_read_task,
     const NamesAndTypesList & columns_to_read,
-    MergeTreeIndexGranulePtr index_granule,
-    BM25StatePtr bm25_score_state);
+    MergeTreeIndexGranulePtr index_granule);
 
 }

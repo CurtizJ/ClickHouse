@@ -17,6 +17,7 @@ using DataPartPtr = std::shared_ptr<const IMergeTreeDataPart>;
 
 class MergeTreeIndexText;
 class MergeTreeIndexConditionText;
+struct IndexReadTask;
 
 /// Query-global BM25 state shared by all read tasks and threads of one query.
 struct BM25State
@@ -31,7 +32,8 @@ using BM25StatePtr = std::shared_ptr<const BM25State>;
 class BM25GlobalStatsBuilder
 {
 public:
-    BM25GlobalStatsBuilder(MergeTreeIndexWithCondition index_with_condition_, BM25Params params_);
+    /// Collects the statistics of the scoring tokens of the read task.
+    explicit BM25GlobalStatsBuilder(const IndexReadTask & index_read_task);
 
     void addPart(const DataPartPtr & part, const MergeTreeReaderSettings & reader_settings);
     BM25StatePtr build() const;
@@ -50,7 +52,6 @@ private:
 
 struct RangesInDataParts;
 struct MergeTreeReaderSettings;
-struct IndexReadTask;
 using IndexReadTasks = std::map<String, IndexReadTask>;
 
 /// Builds the query-global BM25 state (IDF, average document length) for calculating the BM25 score.

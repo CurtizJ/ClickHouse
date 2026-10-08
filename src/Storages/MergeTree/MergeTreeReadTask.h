@@ -2,6 +2,7 @@
 
 #include <map>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
@@ -51,6 +52,9 @@ using RuntimeDataflowStatisticsCacheUpdaterPtr = std::shared_ptr<RuntimeDataflow
 struct BM25State;
 using BM25StatePtr = std::shared_ptr<const BM25State>;
 
+struct TextSearchQuery;
+using TextSearchQueryPtr = std::shared_ptr<TextSearchQuery>;
+
 enum class MergeTreeReadType : uint8_t
 {
     /// By default, read will use MergeTreeReadPool and return pipe with num_streams outputs.
@@ -75,10 +79,13 @@ enum class MergeTreeReadType : uint8_t
 struct IndexReadTask
 {
     NamesAndTypesList columns;
+    /// The text search query each of `columns` is filled from.
+    std::unordered_map<String, TextSearchQueryPtr> search_queries;
     MergeTreeIndexWithCondition index;
-    bool is_final = false;
     /// Set when the query computes `bm25()` over this text index.
     std::optional<BM25Params> bm25_params;
+    /// Tokens of the queries of the score columns: their term frequencies are decoded with the postings.
+    NameSet scoring_tokens;
     /// Query-global BM25 state, built once the parts to read are known (`ReadFromMergeTree::initializePipeline`).
     BM25StatePtr bm25_score_state;
 };
@@ -89,6 +96,9 @@ struct IndexReadTask
 /// `std::unordered_map` does not guarantee the same iteration order after copy,
 /// which leads to mismatched prewhere readers and actions.
 using IndexReadTasks = std::map<String, IndexReadTask>;
+
+/// Returns the read task of the index, or nullptr if there is none.
+const IndexReadTask * tryGetIndexReadTask(const IndexReadTasks & index_read_tasks, const String & index_name);
 using IndexReadColumns = std::map<String, VirtualColumnsDescription>;
 
 struct MergeTreeReadTaskColumns

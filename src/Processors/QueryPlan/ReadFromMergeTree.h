@@ -365,6 +365,7 @@ public:
         const Names & all_column_names,
         LoggerPtr log,
         std::optional<Indexes> & indexes,
+        const IndexReadTasks & index_read_tasks,
         bool find_exact_ranges,
         bool is_parallel_reading_from_replicas_,
         bool allow_query_condition_cache_,
@@ -522,7 +523,11 @@ public:
 
     /// Adds virtual columns for reading from text index.
     /// Removes physical text columns that were eliminated by direct read from text index.
-    void createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, const IndexReadColumns & added_columns, const Names & removed_columns, bool is_final);
+    void createReadTasksForTextIndex(
+        const UsefulSkipIndexes & skip_indexes,
+        const IndexReadColumns & added_columns,
+        const std::unordered_map<String, TextSearchQueryPtr> & search_queries,
+        const Names & removed_columns);
 
     /// Marks the read task of the text index as computing `bm25()` with the given parameters.
     void attachTextIndexScoring(const String & index_name, const BM25Params & params);
