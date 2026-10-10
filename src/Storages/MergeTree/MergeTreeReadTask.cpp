@@ -58,6 +58,14 @@ ColumnCodecs resolveCodecsForWholeColumn(const ColumnDescription & description, 
 
 }
 
+NamesAndTypesList IndexReadTask::getNamesAndTypesList() const
+{
+    NamesAndTypesList res;
+    for (const auto & column : columns)
+        res.emplace_back(column.name, column.type);
+    return res;
+}
+
 String MergeTreeReadTaskColumns::dump() const
 {
     WriteBufferFromOwnString s;
