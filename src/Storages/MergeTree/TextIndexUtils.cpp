@@ -1242,13 +1242,12 @@ MutableDataPartStoragePtr createTemporaryTextIndexStorage(const DiskPtr & disk, 
     return storage;
 }
 
-MergeTreeIndexGranulePtr readTextIndexGranule(
-    const IMergeTreeDataPartInfoForReader & part_info,
-    const IMergeTreeIndex & index,
-    const MergeTreeIndexConditionText & condition,
-    const MergeTreeReaderSettings & reader_settings,
-    bool read_postings)
+MergeTreeIndexGranulePtr readTextIndexGranuleForDirectRead(
+    const IMergeTreeDataPartInfoForReader & part_info, const IndexReadTask & index_read_task, const MergeTreeReaderSettings & reader_settings)
 {
+    const auto & index = *index_read_task.index.index;
+    const auto & condition = typeid_cast<const MergeTreeIndexConditionText &>(*index_read_task.index.condition_template->generateUnsubstituted());
+
     auto index_format = index.getDeserializedFormat(part_info, index.getFileName());
     if (!index_format)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index {} is not materialized in part {}", index.index.name, part_info.getPartName());
@@ -1260,7 +1259,7 @@ MergeTreeIndexGranulePtr readTextIndexGranule(
         .part_info = part_info,
         .index = index,
         .readable_ranges = nullptr,
-        .text_index_read_postings = read_postings,
+        .text_index_read_postings = true,
         .reader_settings = reader_settings,
     };
 
@@ -1275,13 +1274,6 @@ MergeTreeIndexGranulePtr readTextIndexGranule(
     auto granule = index.createIndexGranule();
     granule->deserializeBinaryWithMultipleStreams(streams, state);
     return granule;
-}
-
-MergeTreeIndexGranulePtr readTextIndexGranuleForDirectRead(
-    const IMergeTreeDataPartInfoForReader & part_info, const IndexReadTask & index_read_task, const MergeTreeReaderSettings & reader_settings)
-{
-    const auto & condition = typeid_cast<const MergeTreeIndexConditionText &>(*index_read_task.index.condition_template->generateUnsubstituted());
-    return readTextIndexGranule(part_info, *index_read_task.index.index, condition, reader_settings, /*read_postings=*/ true);
 }
 
 size_t estimatePostingListBufferSize(const TokenPostingsInfo & token_info)

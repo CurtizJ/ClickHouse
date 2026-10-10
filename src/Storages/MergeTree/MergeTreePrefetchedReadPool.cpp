@@ -500,12 +500,14 @@ void MergeTreePrefetchedReadPool::fillPerPartStatistics()
         /// settings[Setting::prefetch_buffer_size] will be lowered there, therefore we account it here as well.
         /// But here we make a more approximate lowering (because we do not have loaded marks yet),
         /// while in adjustBufferSize it will be presize.
-        for (const auto & column : read_info.layout.task_columns.columns)
-            update_stat_for_column(column.name);
+        auto column_names = read_info.layout.task_columns.getAllColumnNames();
 
-        for (const auto & pre_columns : read_info.layout.task_columns.pre_columns)
-            for (const auto & column : pre_columns)
-                update_stat_for_column(column.name);
+        /// The resolved layout of a pending part may also read the inputs of the virtual columns that fall back to their predicates.
+        if (read_info.pending_layout)
+            addFallbackInputColumns(read_info, column_names);
+
+        for (const auto & column_name : column_names)
+            update_stat_for_column(column_name);
     }
 }
 
