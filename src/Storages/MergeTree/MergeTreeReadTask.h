@@ -73,17 +73,19 @@ enum class MergeTreeReadType : uint8_t
 struct IndexReadTask
 {
     /// A virtual column filled by the index reader and the text search query it is filled from.
+    /// Default expression is evaluated by the main reader in parts where the index is not materialized.
     struct Column
     {
         String name;
         DataTypePtr type;
         TextSearchQueryPtr search_query;
-        /// Evaluated by the main reader in parts where the index is not materialized.
         ASTPtr default_expression;
     };
 
     std::vector<Column> columns;
     MergeTreeIndexWithCondition index;
+
+    NamesAndTypesList getNamesAndTypesList() const;
 };
 
 /// Ordered map to ensure deterministic iteration order.
@@ -92,9 +94,6 @@ struct IndexReadTask
 /// `std::unordered_map` does not guarantee the same iteration order after copy,
 /// which leads to mismatched prewhere readers and actions.
 using IndexReadTasks = std::map<String, IndexReadTask>;
-
-/// Index name -> virtual columns read from that index.
-using IndexReadColumns = std::map<String, std::vector<IndexReadTask::Column>>;
 
 struct MergeTreeReadTaskColumns
 {

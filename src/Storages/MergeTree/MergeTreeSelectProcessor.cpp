@@ -252,13 +252,9 @@ PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
     /// cannot read physical columns from table.
     for (const auto & [_, index_task] : index_read_tasks)
     {
-        NamesAndTypesList index_columns;
-        for (const auto & column : index_task.columns)
-            index_columns.emplace_back(column.name, column.type);
-
         auto index_read_step = std::make_shared<PrewhereExprStep>();
         index_read_step->type = PrewhereExprStep::None;
-        index_read_step->actions = std::make_shared<ExpressionActions>(ActionsDAG(index_columns), actions_settings);
+        index_read_step->actions = std::make_shared<ExpressionActions>(ActionsDAG(index_task.getNamesAndTypesList()), actions_settings);
         prewhere_actions.steps.emplace_back(std::move(index_read_step));
     }
 

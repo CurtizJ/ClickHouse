@@ -156,17 +156,17 @@ const ActionsDAG::Node * replaceNodes(ActionsDAG & dag, const ActionsDAG::Node *
     return node;
 }
 
-String optimizationInfoToString(const IndexReadColumns & added_columns, const Names & removed_columns)
+String optimizationInfoToString(const IndexReadTasks & index_read_tasks, const Names & removed_columns)
 {
-    chassert(!added_columns.empty());
+    chassert(!index_read_tasks.empty());
 
     String result = "Added: [";
 
     /// This will list the index and the new associated columns
     size_t idx = 0;
-    for (const auto & [_, added_virtual_columns] : added_columns)
+    for (const auto & [_, index_read_task] : index_read_tasks)
     {
-        for (const auto & added_virtual_column : added_virtual_columns)
+        for (const auto & added_virtual_column : index_read_task.columns)
         {
             if (++idx > 1)
                 result += ", ";
@@ -467,9 +467,7 @@ public:
         , require_index_analyzed_predicate(require_index_analyzed_predicate_)
     {
         /// Register the text-index virtual column inputs that are already present in this DAG from a previous
-        /// optimization pass. This prevents them from being re-added to `added_columns` when the same DAG is processed again.
-        ///
-        /// See: https://github.com/ClickHouse/ClickHouse/issues/101913#issuecomment-4198784580
+        /// optimization pass. This prevents them from being re-added to `index_read_tasks` when the same DAG is processed again.
         for (const auto * input : actions_dag.getInputs())
         {
             if (input->result_name.starts_with(TEXT_INDEX_VIRTUAL_COLUMN_PREFIX))
@@ -479,9 +477,8 @@ public:
 
     struct ResultReplacement
     {
-        IndexReadColumns added_columns;
+        IndexReadTasks index_read_tasks;
         Names removed_columns;
-        /// `nullptr` if `filter_column_name` is empty.
         const ActionsDAG::Node * filter_node = nullptr;
     };
 
@@ -536,11 +533,11 @@ public:
 
         /// A virtual column is read only if its input survived `removeUnusedActions`: the rewrite can
         /// keep a different index's virtual (or the original expression) instead, leaving this one unused.
-        for (auto & [index_name, columns] : added_virtual_columns)
+        for (auto & [index_name, index_read_task] : index_read_tasks)
         {
-            std::erase_if(columns, [&](const auto & column) { return !replaced_columns_set.contains(column.name); });
-            if (!columns.empty())
-                result.added_columns.emplace(index_name, std::move(columns));
+            std::erase_if(index_read_task.columns, [&](const auto & column) { return !replaced_columns_set.contains(column.name); });
+            if (!index_read_task.columns.empty())
+                result.index_read_tasks.emplace(index_name, std::move(index_read_task));
         }
 
         return result;
@@ -569,8 +566,8 @@ private:
     std::unordered_map<String, NameSet> index_analyzed_predicate_names;
     /// Input nodes of the virtual columns in the DAG, by column name.
     std::unordered_map<String, const ActionsDAG::Node *> virtual_column_inputs;
-    /// Virtual columns added to the DAG, by index name. `replace` keeps only those still used after the rewrite.
-    IndexReadColumns added_virtual_columns;
+    /// Read tasks of the virtual columns added to the DAG, by index name. `replace` keeps only the columns still used after the rewrite.
+    IndexReadTasks index_read_tasks;
 
     /// True if index analysis saw this exact predicate, i.e. it also appears in a filter that was not deferred.
     bool isIndexAnalyzedPredicate(const String & index_name, const TextIndexReadInfo & info, const ActionsDAG::Node & predicate)
@@ -663,7 +660,10 @@ private:
             /// Use direct read only when enabled and the entry is direct-read-eligible (has `index`) and has no
             /// patched parts. Otherwise just inject the tokenizer/preprocessor/postprocessor (no virtual column),
             /// same as None mode.
-            if (direct_read_from_text_index && info.index && !info.has_patched_parts && !drops_nullable
+            if (direct_read_from_text_index
+                && info.index
+                && !info.has_patched_parts
+                && !drops_nullable
                 && search_query->getDirectReadMode() != TextIndexDirectReadMode::None)
             {
                 auto virtual_column_name = text_index_condition.tryGetVirtualColumnName(*search_query, index_name);
@@ -977,14 +977,19 @@ private:
                 /// Create a default expression for the virtual column.
                 /// It will be executed by merge tree reader when index is not materialized in the data part.
                 /// Shared, not cloned: a stored default expression is immutable, `addDefaultRequiredExpressionsRecursively` clones it before use.
+                /// Do not execute the default expression for hint mode, because it will be executed anyway in the original predicate.
                 if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact)
                     column.default_expression = exact_default_expression;
-                /// Do not execute the default expression for hint mode, because it will be executed anyway in the original predicate.
                 else if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Hint)
                     column.default_expression = make_intrusive<ASTLiteral>(Field(1));
 
                 it->second = &actions_dag.addInput(column.name, column.type);
-                added_virtual_columns[condition.index_name].push_back(std::move(column));
+                auto [task_it, task_inserted] = index_read_tasks.try_emplace(condition.index_name);
+
+                if (task_inserted)
+                    task_it->second.index = *condition.info->index;
+
+                task_it->second.columns.push_back(std::move(column));
             }
 
             return it->second;
@@ -1040,12 +1045,12 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     if (!result)
         return nullptr;
 
-    /// Even when no virtual columns are added (added_columns is empty),
+    /// Even when no virtual columns are added (index_read_tasks is empty),
     /// the DAG may have been modified by text index preprocessing
     /// (e.g. applying tokenizer/preprocessor to hasAnyTokens).
     /// In that case, we must return the filter node
     /// so the caller can update the filter column name to match the modified DAG.
-    if (result->added_columns.empty())
+    if (result->index_read_tasks.empty())
         return result->filter_node;
 
     /// Keep columns the PREWHERE or row-level filter still read, so this filter DAG's removal does not drop them from the shared read set.
@@ -1074,7 +1079,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     }
 
     auto logger = getLogger("processAndOptimizeTextIndexFunctions");
-    LOG_DEBUG(logger, "{}", optimizationInfoToString(result->added_columns, result->removed_columns));
+    LOG_DEBUG(logger, "{}", optimizationInfoToString(result->index_read_tasks, result->removed_columns));
 
     /// Log partially materialized text indexes
     for (const auto & [index_name, info] : text_index_read_infos)
@@ -1084,7 +1089,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
     }
 
     const auto & indexes = read_from_merge_tree_step.getIndexes();
-    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, result->added_columns, result->removed_columns);
+    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, std::move(result->index_read_tasks), result->removed_columns);
     return result->filter_node;
 }
 
