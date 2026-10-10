@@ -112,7 +112,7 @@ MergeTreePrefetchedReadPool::PrefetchedReaders::PrefetchedReaders(
 
         const auto map = read_prefetch.getActualReadRequestMap(*task.read_info, nullptr);
         readers = MergeTreeReadTask::createReaders(
-            task.read_info, read_prefetch.getExtras(), task.ranges, task.patches_ranges,
+            task.read_info, task.read_info->layout, read_prefetch.getExtras(), task.ranges, task.patches_ranges,
             map, read_prefetch.getActualPatchReadRequestMaps(*task.read_info, map));
 
         /// This is already a prefetch thread, so initiate the prefetches inline.
@@ -222,7 +222,7 @@ void MergeTreePrefetchedReadPool::createPrefetchedReadersForTask(ThreadTask & ta
     }
 
     auto extras = getExtras();
-    auto readers = MergeTreeReadTask::createReaders(task.read_info, extras, task.ranges, task.patches_ranges);
+    auto readers = MergeTreeReadTask::createReaders(task.read_info, task.read_info->layout, extras, task.ranges, task.patches_ranges);
     task.readers_future = std::make_unique<PrefetchedReaders>(prefetch_threadpool, std::move(readers), task.priority, *this);
 }
 
@@ -466,10 +466,10 @@ void MergeTreePrefetchedReadPool::fillPerPartStatistics()
         /// settings[Setting::prefetch_buffer_size] will be lowered there, therefore we account it here as well.
         /// But here we make a more approximate lowering (because we do not have loaded marks yet),
         /// while in adjustBufferSize it will be presize.
-        for (const auto & column : read_info.task_columns.columns)
+        for (const auto & column : read_info.layout.task_columns.columns)
             update_stat_for_column(column.name);
 
-        for (const auto & pre_columns : read_info.task_columns.pre_columns)
+        for (const auto & pre_columns : read_info.layout.task_columns.pre_columns)
             for (const auto & column : pre_columns)
                 update_stat_for_column(column.name);
     }

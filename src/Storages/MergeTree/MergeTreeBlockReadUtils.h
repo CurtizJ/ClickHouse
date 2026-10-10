@@ -9,13 +9,15 @@
 namespace DB
 {
 
-struct MergeTreeReaderSettings;
 class IMergeTreeDataPartInfoForReader;
 
+/// `index_read_columns` are the virtual columns filled by the index readers of the part:
+/// they are read as is, while the default expressions of other missing columns are followed.
 NameSet injectRequiredColumns(
     const IMergeTreeDataPartInfoForReader & data_part_info_for_reader,
     const StorageSnapshotPtr & storage_snapshot,
     bool with_subcolumns,
+    const NameSet & index_read_columns,
     Names & columns);
 
 PrewhereExprStepPtr createLightweightDeleteStep(bool remove_filter_column);
@@ -28,16 +30,14 @@ void addPatchPartsColumns(
     const Names & all_columns_to_read,
     bool has_lightweight_delete);
 
+/// Columns read by each of `mutation_steps` and `prewhere_steps` (the PREWHERE steps of the part) and after them.
 MergeTreeReadTaskColumns getReadTaskColumns(
     const IMergeTreeDataPartInfoForReader & data_part_info_for_reader,
     const StorageSnapshotPtr & storage_snapshot,
     const Names & required_columns,
-    const FilterDAGInfoPtr & row_level_filter,
-    const PrewhereInfoPtr & prewhere_info,
     const PrewhereExprSteps & mutation_steps,
-    const IndexReadTasks & index_read_tasks,
-    const ExpressionActionsSettings & actions_settings,
-    const MergeTreeReaderSettings & reader_settings,
+    const PrewhereExprSteps & prewhere_steps,
+    const NameSet & index_read_columns,
     bool with_subcolumns);
 
 MergeTreeReadTaskColumns getReadTaskColumnsForMerge(

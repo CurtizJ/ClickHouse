@@ -1,0 +1,14 @@
+1
+1
+and, direct read, on_data_read = 0	200
+and, direct read, on_data_read = 1	200
+and, no direct read	200
+or, direct read, on_data_read = 0	1400
+or, direct read, on_data_read = 1	1400
+or, no direct read	1400
+prewhere, direct read, on_data_read = 0	28
+prewhere, direct read, on_data_read = 1	28
+prewhere, no direct read	28
+select columns, direct read, on_data_read = 0	28	56	42126
+select columns, direct read, on_data_read = 1	28	56	42126
+select columns, no direct read	28	56	42126

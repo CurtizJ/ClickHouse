@@ -10,6 +10,7 @@
 #include <Storages/MergeTree/DeserializationPrefixesCache.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeBlockReadUtils.h>
+#include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 #include <Access/ContextAccess.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
@@ -496,26 +497,53 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
         std::move(mutation_steps.begin(), mutation_steps.end(), std::back_inserter(read_task_info.mutation_steps));
     }
 
-    read_task_info.task_columns = getReadTaskColumns(
+    auto & layout = read_task_info.layout;
+
+    /// An index that is not materialized in the part has nothing to read. Its virtual columns are filled
+    /// from their default expressions instead, by the readers of the steps that use them.
+    NameSet index_read_columns;
+    Names columns_not_read_from_index;
+    for (const auto & [index_name, index_task] : index_read_tasks)
+    {
+        const auto & index = index_task.index.index;
+        const bool is_materialized = static_cast<bool>(index->getDeserializedFormat(*data_part, index->getFileName()));
+
+        for (const auto & column : index_task.columns)
+        {
+            if (is_materialized)
+                index_read_columns.insert(column.name);
+            else
+                columns_not_read_from_index.push_back(column.name);
+        }
+
+        if (is_materialized)
+            layout.index_read_tasks.emplace(index_name, index_task);
+    }
+
+    auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks);
+
+    layout.task_columns = getReadTaskColumns(
         part_info,
         storage_snapshot,
         column_names,
-        row_level_filter,
-        prewhere_info,
         read_task_info.mutation_steps,
-        index_read_tasks,
-        actions_settings,
-        reader_settings,
+        prewhere_steps->steps,
+        index_read_columns,
         /*with_subcolumns=*/ true);
+
+    if (!columns_not_read_from_index.empty())
+        layout.prewhere_steps = std::move(prewhere_steps);
+
+    layout.index_granules = std::move(read_task_info.read_hints.index_granules);
 
     if (read_task_info.alter_conversions->hasPatches())
     {
-        auto all_read_columns = read_task_info.task_columns.getAllColumnNames();
+        auto all_read_columns = layout.task_columns.getAllColumnNames();
         auto all_read_columns_list = storage_snapshot->getColumnsByNames(options, all_read_columns);
         read_task_info.patch_parts = read_task_info.alter_conversions->getPatchesForColumns(all_read_columns_list, reader_settings.apply_deleted_mask);
 
         addPatchPartsColumns(
-            read_task_info.task_columns,
+            layout.task_columns,
             storage_snapshot,
             options,
             read_task_info.patch_parts,
@@ -523,17 +551,16 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
             has_lightweight_delete);
     }
 
-    read_task_info.index_read_tasks = index_read_tasks;
     read_task_info.const_virtual_fields = shared_virtual_fields;
     read_task_info.const_virtual_fields.emplace("_part_index", read_task_info.part_index_in_query);
     read_task_info.const_virtual_fields.emplace("_part_starting_offset", read_task_info.part_starting_offset_in_query);
 
     if (pool_settings.preferred_block_size_bytes > 0)
     {
-        const auto & result_column_names = read_task_info.task_columns.columns.getNames();
+        const auto & result_column_names = layout.task_columns.columns.getNames();
         NameSet all_column_names(result_column_names.begin(), result_column_names.end());
 
-        for (const auto & pre_columns_per_step : read_task_info.task_columns.pre_columns)
+        for (const auto & pre_columns_per_step : layout.task_columns.pre_columns)
         {
             const auto & pre_column_names = pre_columns_per_step.getNames();
             all_column_names.insert(pre_column_names.begin(), pre_column_names.end());
@@ -546,7 +573,7 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
                 sample_block_from_part.insert(ColumnWithTypeAndName(column_in_part->type->createColumn(), column_in_part->type, column_in_part->name));
         }
 
-        read_task_info.shared_size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(
+        layout.shared_size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(
             data_part_info,
             Names(all_column_names.begin(), all_column_names.end()),
             sample_block_from_part,
@@ -556,8 +583,32 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
     read_task_info.deserialization_prefixes_cache = std::make_shared<DeserializationPrefixesCache>();
 
     std::tie(read_task_info.min_marks_per_task, read_task_info.approx_size_of_mark)
-        = calculateMinMarksPerTask(part_with_ranges, column_names, read_task_info.task_columns.pre_columns, pool_settings, settings);
+        = calculateMinMarksPerTask(part_with_ranges, column_names, layout.task_columns.pre_columns, pool_settings, settings);
     return read_task_info;
+}
+
+std::shared_ptr<const PrewhereExprInfo> MergeTreeReadPoolBase::getPrewhereSteps(
+    Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks) const
+{
+    std::ranges::sort(columns_not_read_from_index);
+
+    std::lock_guard lock(prewhere_steps_mutex);
+    auto & steps = prewhere_steps_by_columns_not_read_from_index[std::move(columns_not_read_from_index)];
+
+    if (!steps)
+    {
+        steps = std::make_shared<const PrewhereExprInfo>(MergeTreeSelectProcessor::getPrewhereActions(
+            row_level_filter,
+            prewhere_info,
+            part_index_read_tasks,
+            actions_settings,
+            reader_settings.enable_multiple_prewhere_read_steps,
+            reader_settings.force_short_circuit_execution,
+            reader_settings.read_ahead_prewhere_columns,
+            &storage_snapshot->metadata->getColumns()));
+    }
+
+    return steps;
 }
 
 void MergeTreeReadPoolBase::stageColumnsCacheWriteEstimate(
@@ -592,7 +643,7 @@ void MergeTreeReadPoolBase::stageColumnsCacheWriteEstimate(
         /// prewhere/mutation columns pass the gate while writing much more data than
         /// estimated. Patch-part columns are read from separate parts and are accounted
         /// for below.
-        const auto all_read_columns = read_task_info.task_columns.getAllColumnNames();
+        const auto all_read_columns = read_task_info.layout.task_columns.getAllColumnNames();
 
         /// Don't apply the estimate gate when there are no columns (e.g. some
         /// projection paths build the column list later).
@@ -617,8 +668,8 @@ void MergeTreeReadPoolBase::stageColumnsCacheWriteEstimate(
     for (size_t i = 0; i < read_task_info.patch_parts.size(); ++i)
     {
         Names patch_column_names;
-        if (i < read_task_info.task_columns.patch_columns.size())
-            patch_column_names = read_task_info.task_columns.patch_columns[i].getNames();
+        if (i < read_task_info.layout.task_columns.patch_columns.size())
+            patch_column_names = read_task_info.layout.task_columns.patch_columns[i].getNames();
         if (patch_column_names.empty())
             continue;
 
@@ -778,8 +829,9 @@ MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
     /// run before the first task exists and after `setReadRangesRefiner`.
     commitColumnsCacheWriteEstimate();
 
-    auto task_size_predictor = read_info->shared_size_predictor
-        ? std::make_unique<MergeTreeBlockSizePredictor>(*read_info->shared_size_predictor)
+    const auto & shared_size_predictor = read_info->layout.shared_size_predictor;
+    auto task_size_predictor = shared_size_predictor
+        ? std::make_unique<MergeTreeBlockSizePredictor>(*shared_size_predictor)
         : nullptr; /// make a copy
 
     return std::make_unique<MergeTreeReadTask>(
@@ -830,12 +882,12 @@ MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
 
     if (!previous_task)
     {
-        task_readers = MergeTreeReadTask::createReaders(read_info, extras, ranges, patches_ranges, map, patch_maps);
+        task_readers = MergeTreeReadTask::createReaders(read_info, read_info->layout, extras, ranges, patches_ranges, map, patch_maps);
     }
     else if (get_part_name(previous_task->getInfo()) != get_part_name(*read_info))
     {
         extras.value_size_map = previous_task->getMainReader().getAvgValueSizeHints();
-        task_readers = MergeTreeReadTask::createReaders(read_info, extras, ranges, patches_ranges, map, patch_maps);
+        task_readers = MergeTreeReadTask::createReaders(read_info, read_info->layout, extras, ranges, patches_ranges, map, patch_maps);
     }
     else
     {

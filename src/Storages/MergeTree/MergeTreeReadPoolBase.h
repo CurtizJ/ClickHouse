@@ -97,6 +97,10 @@ protected:
 
     MergeTreeReadTaskInfo buildReadTaskInfo(const RangesInDataPart & part_with_ranges, const Settings & settings) const;
 
+    /// PREWHERE steps of the parts whose index read tasks are `part_index_read_tasks`, built once for each
+    /// set of virtual columns that such parts do not read from the indexes.
+    std::shared_ptr<const PrewhereExprInfo> getPrewhereSteps(Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks) const;
+
     /// Stage the columns cache write estimate of one part - the uncompressed size of the columns
     /// its readers can write to the cache (result, prewhere, mutation and patch-part columns),
     /// scaled to the selected mark ranges. Called per part after the read task info is built.
@@ -192,6 +196,9 @@ private:
     };
 
     void recordDroppedRanges(const MergeTreeReadTaskInfo & info, MarkRanges cut, MarkRanges refined) const;
+
+    mutable std::mutex prewhere_steps_mutex;
+    mutable std::map<Names, std::shared_ptr<const PrewhereExprInfo>> prewhere_steps_by_columns_not_read_from_index TSA_GUARDED_BY(prewhere_steps_mutex);
 
     mutable std::mutex part_read_request_maps_mutex;
     mutable std::unordered_map<const MergeTreeReadTaskInfo *, PartReadRequestMaps> part_read_request_maps TSA_GUARDED_BY(part_read_request_maps_mutex);

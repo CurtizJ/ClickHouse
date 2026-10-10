@@ -130,7 +130,7 @@ MergeTreeSequentialSource::MergeTreeSequentialSource(
     /// path, so the concrete part is always present. Assert it so a future misuse that routes a
     /// borrowed part here fails loudly instead of dereferencing nullptr below.
     chassert(data_part);
-    const auto & columns_to_read = read_task_info->task_columns.columns;
+    const auto & columns_to_read = read_task_info->layout.task_columns.columns;
 
     /// Print column name but don't pollute logs in case of many columns.
     if (columns_to_read.size() == 1)
@@ -203,7 +203,7 @@ MergeTreeSequentialSource::MergeTreeSequentialSource(
         .storage_snapshot = storage_snapshot,
     };
 
-    readers = MergeTreeReadTask::createReaders(read_task_info, extras, mark_ranges, patch_ranges, read_request_map, patch_read_request_maps);
+    readers = MergeTreeReadTask::createReaders(read_task_info, read_task_info->layout, extras, mark_ranges, patch_ranges, read_request_map, patch_read_request_maps);
 
     if (!readers.prewhere.empty())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Sequential source doesn't support PREWHERE");
@@ -382,18 +382,18 @@ Pipe createMergeTreeSequentialSource(
     auto result_header = std::make_shared<const Block>(storage_snapshot->getSampleBlockForColumns(columns_to_read));
     const auto & info_for_reader = *info->data_part_info;
 
-    info->task_columns = getReadTaskColumnsForMerge(info_for_reader, storage_snapshot, columns_to_read, info->mutation_steps);
-    info->task_columns.moveAllColumnsFromPrewhere();
+    info->layout.task_columns = getReadTaskColumnsForMerge(info_for_reader, storage_snapshot, columns_to_read, info->mutation_steps);
+    info->layout.task_columns.moveAllColumnsFromPrewhere();
 
     if (info->alter_conversions->hasPatches())
     {
         auto options = GetColumnsOptions(GetColumnsOptions::AllPhysical).withVirtuals(VirtualsKind::All, VirtualsMaterializationPlace::Reader).withSubcolumns();
-        auto all_read_columns = info->task_columns.getAllColumnNames();
+        auto all_read_columns = info->layout.task_columns.getAllColumnNames();
         auto all_read_columns_list = storage_snapshot->getColumnsByNames(options, all_read_columns);
         info->patch_parts = info->alter_conversions->getPatchesForColumns(all_read_columns_list, need_to_filter_deleted_rows);
 
         addPatchPartsColumns(
-            info->task_columns,
+            info->layout.task_columns,
             storage_snapshot,
             options,
             info->patch_parts,

@@ -89,8 +89,8 @@ struct IndexReadTask
 };
 
 /// Ordered map to ensure deterministic iteration order.
-/// `IndexReadTasks` may be copied (e.g. into `MergeTreeReadPoolBase`) and then
-/// iterated independently in `getPrewhereActions` / `getReadTaskColumns`.
+/// `IndexReadTasks` may be copied (e.g. into `MergeTreeReadPoolBase`) and then iterated independently
+/// by the `getPrewhereActions` calls of `MergeTreeSelectProcessor` and `MergeTreeReadPoolBase::getPrewhereSteps`.
 /// `std::unordered_map` does not guarantee the same iteration order after copy,
 /// which leads to mismatched prewhere readers and actions.
 using IndexReadTasks = std::map<String, IndexReadTask>;
@@ -107,6 +107,21 @@ struct MergeTreeReadTaskColumns
     String dump() const;
     Names getAllColumnNames() const;
     void moveAllColumnsFromPrewhere();
+};
+
+/// What the readers and the readers chain of one part are built from.
+struct MergeTreeReadTaskLayout
+{
+    /// Index read tasks of this part: only the indexes that are materialized in the part.
+    IndexReadTasks index_read_tasks;
+    /// PREWHERE steps of this part; null means the query-level steps of `MergeTreeSelectProcessor`.
+    std::shared_ptr<const PrewhereExprInfo> prewhere_steps;
+    /// Column names to read during PREWHERE and WHERE.
+    MergeTreeReadTaskColumns task_columns;
+    /// Shared initialized size predictor. It is copied for each new task.
+    MergeTreeBlockSizePredictorPtr shared_size_predictor;
+    /// Analyzed index granules passed to the index readers (may be empty).
+    IndexGranulesMap index_granules;
 };
 
 struct MergeTreeReadTaskInfo
@@ -132,20 +147,17 @@ struct MergeTreeReadTaskInfo
     bool has_on_fly_mutation_steps = false;
     /// Patches that should be applied for part.
     PatchPartsForReader patch_parts;
-    /// Column names to read during PREWHERE and WHERE
-    MergeTreeReadTaskColumns task_columns;
-    /// Shared initialized size predictor. It is copied for each new task.
-    MergeTreeBlockSizePredictorPtr shared_size_predictor;
+    /// What the readers and the readers chain of the part are built from.
+    MergeTreeReadTaskLayout layout;
     /// Shared constant fields for virtual columns.
     VirtualFields const_virtual_fields;
-    /// Index read tasks.
-    IndexReadTasks index_read_tasks;
     /// The amount of data to read per task based on size of the queried columns.
     size_t min_marks_per_task = 0;
     size_t approx_size_of_mark = 0;
     /// Cache of the columns prefixes for this part.
     DeserializationPrefixesCachePtr deserialization_prefixes_cache;
     /// Extra info for optimizations - exact row processing, calculated virtual columns.
+    /// Its index granules are moved to `layout.index_granules`.
     RangesInDataPartReadHints read_hints;
     /// All mark ranges the query reads from this part.
     MarkRangesPtr read_request_map;
@@ -256,6 +268,7 @@ public:
     /// `read_request_map` narrows the part's map; `patch_read_request_maps` then holds the matching patch maps.
     static Readers createReaders(
         const MergeTreeReadTaskInfoPtr & read_info,
+        const MergeTreeReadTaskLayout & layout,
         const Extras & extras,
         const MarkRanges & ranges,
         const std::vector<MarkRanges> & patches_ranges,

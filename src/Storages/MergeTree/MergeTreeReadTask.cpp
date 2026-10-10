@@ -163,7 +163,7 @@ MergeTreeReadTask::MergeTreeReadTask(
         const auto default_codec = part_codec ? part_codec : CompressionCodecFactory::instance().getDefaultCodec();
         const auto & metadata_columns = readers.main->getStorageSnapshot()->metadata->getColumns();
         ColumnCodecByName resolved_codecs;
-        for (const auto & name : info->task_columns.getAllColumnNames())
+        for (const auto & name : info->layout.task_columns.getAllColumnNames())
         {
             const auto * description = metadata_columns.tryGet(name);
             if (description && description->codec)
@@ -194,6 +194,7 @@ MergeTreeReadTask::MergeTreeReadTask(
 }
 
 /// Returns pointer to the index if all columns in the read step belongs to the read step for that index.
+/// `index_read_tasks` are the tasks of the part, so the index is materialized in it.
 static const IndexReadTask * getIndexReadTaskForReadStep(const IndexReadTasks & index_read_tasks, const NamesAndTypesList & columns_to_read, const IMergeTreeDataPart & data_part)
 {
     if (index_read_tasks.empty())
@@ -228,27 +229,17 @@ static const IndexReadTask * getIndexReadTaskForReadStep(const IndexReadTasks & 
         }
     }
 
-    /// Allow mixing index columns with regular columns when the regular columns are dependencies for evaluating
-    /// default expressions of text index virtual columns (e.g., for partially materialized text indexes).
-    if (!index_for_step.empty() && has_non_index_columns)
+    if (index_for_step.empty() || has_non_index_columns)
         return nullptr;
 
-    if (index_for_step.empty())
-        return nullptr;
-
-    /// The index may be not materialized in this part. There is no index file to read, so let
-    /// the main reader handle the step and evaluate the virtual column's default expression instead.
     const auto & index_task = index_read_tasks.at(index_for_step);
-    const auto & index = index_task.index.index;
-
-    if (!index->getDeserializedFormat(data_part, index->getFileName()))
-        return nullptr;
-
+    chassert(index_task.index.index->getDeserializedFormat(data_part, index_task.index.index->getFileName()));
     return &index_task;
 }
 
 MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
     const MergeTreeReadTaskInfoPtr & read_info,
+    const MergeTreeReadTaskLayout & layout,
     const Extras & extras,
     const MarkRanges & ranges,
     const std::vector<MarkRanges> & patches_ranges,
@@ -275,19 +266,19 @@ MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
             extras.profile_callback);
     };
 
-    new_readers.main = create_reader(read_info->task_columns.columns, false);
+    new_readers.main = create_reader(layout.task_columns.columns, false);
 
     bool is_vector_search = read_info->read_hints.vector_search_results.has_value();
     if (is_vector_search)
-        new_readers.main->setReadHints(read_info->read_hints, read_info->task_columns.columns);
+        new_readers.main->setReadHints(read_info->read_hints, layout.task_columns.columns);
 
-    for (const auto & pre_columns_per_step : read_info->task_columns.pre_columns)
+    for (const auto & pre_columns_per_step : layout.task_columns.pre_columns)
     {
         /// Index-read-tasks (skip-index-on-data-read) are coordinator-only, so the concrete part
         /// is present whenever the list is non-empty; skip the concrete access otherwise.
-        const IndexReadTask * index_read_task = read_info->index_read_tasks.empty()
+        const IndexReadTask * index_read_task = layout.index_read_tasks.empty()
             ? nullptr
-            : getIndexReadTaskForReadStep(read_info->index_read_tasks, pre_columns_per_step, *read_info->data_part_info->getDataPart());
+            : getIndexReadTaskForReadStep(layout.index_read_tasks, pre_columns_per_step, *read_info->data_part_info->getDataPart());
 
         if (index_read_task)
         {
@@ -295,7 +286,7 @@ MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
                 new_readers.main.get(),
                 *index_read_task,
                 pre_columns_per_step,
-                read_info->read_hints.index_granules));
+                layout.index_granules));
         }
         else
         {
@@ -310,7 +301,7 @@ MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
     {
         return createMergeTreeReader(
             read_info->patch_parts[part_idx].part,
-            read_info->task_columns.patch_columns[part_idx],
+            layout.task_columns.patch_columns[part_idx],
             extras.storage_snapshot,
             read_info->data_part_info->getStorageSettings(),
             patches_ranges[part_idx],
@@ -432,12 +423,14 @@ void MergeTreeReadTask::initializeReadersChain(
     for (const auto & step : info->mutation_steps)
         all_prewhere_actions.steps.push_back(step);
 
-    for (const auto & step : prewhere_actions.steps)
+    /// The counters are indexed by the query-level steps, so a part with its own steps does not update them.
+    const auto & part_prewhere_steps = info->layout.prewhere_steps;
+    for (const auto & step : part_prewhere_steps ? part_prewhere_steps->steps : prewhere_actions.steps)
         all_prewhere_actions.steps.push_back(step);
 
     readers_chain = createReadersChain(
         readers, all_prewhere_actions, read_steps_performance_counters,
-        collect_predicate_statistics);
+        collect_predicate_statistics && !part_prewhere_steps);
 }
 
 void MergeTreeReadTask::initializeIndexReader(const MergeTreeIndexBuildContextPtr & index_build_context, const LazyMaterializingRowsPtr & lazy_materializing_rows)
