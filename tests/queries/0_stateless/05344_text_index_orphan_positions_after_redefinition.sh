@@ -33,9 +33,23 @@ SETTINGS index_granularity = 64, min_bytes_for_wide_part = 0, min_rows_for_wide_
 INSERT INTO tab SELECT number, concat('word', toString(number % 100), ' common'), number FROM numbers(1000);
 "
 
+# On a case-insensitive filesystem (e.g. macOS) every stream file is stored under the hash of its
+# name (`replaceFileNameToHashIfNeeded`), so resolve the on-disk name of the positions substream.
 part_path=$(active_part_path)
-cp "${part_path}"skp_idx_idx.pos.* "$saved_path"/
-ls "$saved_path"
+positions_stream="skp_idx_idx.pos"
+if [ ! -f "${part_path}${positions_stream}.idx" ]
+then
+    positions_stream=$($CLICKHOUSE_LOCAL -q "SELECT lower(hex(reverse(sipHash128('skp_idx_idx.pos'))))")
+fi
+if [ ! -f "${part_path}${positions_stream}.idx" ]
+then
+    echo "no positions substream in $part_path:" >&2
+    ls "$part_path" >&2
+    exit 1
+fi
+
+cp "${part_path}${positions_stream}".* "$saved_path"/
+ls "$saved_path" | sed "s/^${positions_stream}/skp_idx_idx.pos/"
 
 # Redefine the index without phrase search, then put the positions files back on disk without checksums.
 $CLICKHOUSE_LOCAL --path "$data_path" -m -q "
@@ -44,7 +58,7 @@ ALTER TABLE tab ADD INDEX idx body TYPE text(tokenizer = 'splitByNonAlpha');
 "
 
 part_path=$(active_part_path)
-cp "$saved_path"/skp_idx_idx.pos.* "${part_path}"
+cp "$saved_path"/"${positions_stream}".* "${part_path}"
 
 # Updating a column that is not indexed hardlinks the index files into the new part.
 $CLICKHOUSE_LOCAL --path "$data_path" -m -q "
@@ -53,7 +67,7 @@ ALTER TABLE tab UPDATE w = w + 1 WHERE 1 SETTINGS mutations_sync = 2;
 
 part_path=$(active_part_path)
 echo "-- orphans in the new part"
-find "${part_path}" -maxdepth 1 -name 'skp_idx_idx.pos.*' | wc -l
+find "${part_path}" -maxdepth 1 -name "${positions_stream}.*" | wc -l
 
 $CLICKHOUSE_LOCAL --path "$data_path" -m -q "
 CHECK TABLE tab SETTINGS check_query_single_value_result = 1;
