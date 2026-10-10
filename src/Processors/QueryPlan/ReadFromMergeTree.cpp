@@ -61,7 +61,6 @@
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/MergeTreeIndexMinMax.h>
 #include <Storages/MergeTree/MergeTreeIndexReadResultPool.h>
-#include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeIndexVectorSimilarity.h>
 #include <Storages/MergeTree/MergeTreePrefetchedReadPool.h>
 #include <Storages/MergeTree/MergeTreeReadPool.h>
@@ -6232,7 +6231,7 @@ bool ReadFromMergeTree::announceEmptyReadRangesToCoordinatorIfInitiator()
     return true;
 }
 
-void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, IndexReadTasks text_index_read_tasks, const Names & removed_columns)
+void ReadFromMergeTree::createReadTasksForTextIndex(IndexReadTasks text_index_read_tasks, const Names & removed_columns)
 {
     index_read_tasks = std::move(text_index_read_tasks);
 
@@ -6262,21 +6261,6 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
 
             all_column_names.push_back(column.name);
             new_metadata->virtuals.add(std::move(virtual_column));
-        }
-    }
-
-    for (const auto & index : skip_indexes.useful_indices)
-    {
-        if (dynamic_cast<const MergeTreeIndexText *>(index.index.get()))
-        {
-            /// Create tasks for text indexes which don't read virtual columns.
-            /// It's required to always read text indexes on separate step on data read.
-            if (!index_read_tasks.contains(index.index->index.name))
-            {
-                IndexReadTask index_task;
-                index_task.index = index;
-                index_read_tasks.emplace(index.index->index.name, std::move(index_task));
-            }
         }
     }
 

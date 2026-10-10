@@ -1088,8 +1088,7 @@ static const ActionsDAG::Node * processAndOptimizeTextIndexDAG(
             LOG_DEBUG(logger, "Text index '{}' is not fully materialized. In some parts, direct read from text index cannot be used.", index_name);
     }
 
-    const auto & indexes = read_from_merge_tree_step.getIndexes();
-    read_from_merge_tree_step.createReadTasksForTextIndex(indexes->skip_indexes, std::move(result->index_read_tasks), result->removed_columns);
+    read_from_merge_tree_step.createReadTasksForTextIndex(std::move(result->index_read_tasks), result->removed_columns);
     return result->filter_node;
 }
 

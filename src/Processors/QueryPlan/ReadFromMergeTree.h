@@ -524,7 +524,7 @@ public:
 
     /// Sets the read tasks for text indexes and adds their virtual columns for reading.
     /// Removes physical text columns that were eliminated by direct read from text index.
-    void createReadTasksForTextIndex(const UsefulSkipIndexes & skip_indexes, IndexReadTasks text_index_read_tasks, const Names & removed_columns);
+    void createReadTasksForTextIndex(IndexReadTasks text_index_read_tasks, const Names & removed_columns);
 
     const std::optional<Indexes> & getIndexes() const { return indexes; }
     /// A temporary part snapshot for PREWHERE costs; does not publish range analysis.
