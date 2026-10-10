@@ -247,6 +247,7 @@ const ActionsDAG::Node & addFunction(
 /// The steps are built in the following way:
 /// 1. List all condition nodes that are combined with AND into PREWHERE condition
 /// 2. Collect the set of columns that are used in each condition
+///    Move the conditions that read deferred columns later, but never past a condition that may throw
 /// 3. Sort condition nodes by the number of columns used in them and the overall size of those columns
 /// 4. Group conditions with the same set of columns into a single read/compute step
 /// 5. Build DAGs for each step:
@@ -264,7 +265,8 @@ bool tryBuildPrewhereSteps(
     bool force_short_circuit_execution,
     const ColumnsDescription * columns,
     bool read_ahead_columns,
-    const NameToNameMap * storage_column_names)
+    const NameToNameMap * storage_column_names,
+    const NameSet * deferred_columns)
 {
     if (!prewhere_info)
         return true;
@@ -293,6 +295,37 @@ bool tryBuildPrewhereSteps(
         fillRequiredColumns(node, nodes_info, columns, storage_column_names);
     }
 
+    /// Move the conditions that read deferred columns behind the others. A condition that may throw keeps every
+    /// condition that preceded it as its guard: the held conditions are placed right before it. So the set of
+    /// conditions before a throwing one only grows, and the conjunction has the same value.
+    if (deferred_columns && !deferred_columns->empty())
+    {
+        ActionsDAG::NodeRawConstPtrs reordered;
+        ActionsDAG::NodeRawConstPtrs held;
+        reordered.reserve(condition_nodes.size());
+
+        for (const auto * node : condition_nodes)
+        {
+            const auto & node_info = nodes_info[node];
+            if (std::ranges::any_of(node_info.required_columns, [&](const auto & name) { return deferred_columns->contains(name); }))
+            {
+                held.push_back(node);
+                continue;
+            }
+
+            if (node_info.may_throw)
+            {
+                reordered.insert(reordered.end(), held.begin(), held.end());
+                held.clear();
+            }
+
+            reordered.push_back(node);
+        }
+
+        reordered.insert(reordered.end(), held.begin(), held.end());
+        condition_nodes = std::move(reordered);
+    }
+
     /// 3. Sort condition nodes by the number of columns used in them and the overall size of those columns
     /// TODO: not sorting for now because the conditions are already sorted by Where Optimizer
 
@@ -304,7 +337,8 @@ bool tryBuildPrewhereSteps(
     /// rather than a single opaque one. The flattening keeps the original left to right order, for the
     /// same evaluation order reason spelled out below.
     ///
-    /// Only adjacent conditions are merged to preserve the user's explicit PREWHERE evaluation order.
+    /// Only adjacent conditions are merged to preserve the evaluation order of the condition list (the user's
+    /// explicit PREWHERE, except that conditions on deferred columns may move later, never past a throwing one).
     /// Non-adjacent conditions on the same storage column are kept in separate steps even though this
     /// may cause redundant reads, because the user may have intentionally interleaved a guard predicate
     /// (e.g. `PREWHERE tags['safe'] != '' AND value > 0 AND toUInt64(tags['unsafe']) > 0` — the

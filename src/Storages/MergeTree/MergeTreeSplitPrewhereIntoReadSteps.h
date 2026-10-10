@@ -21,6 +21,8 @@ bool tryBuildPrewhereSteps(
     const ColumnsDescription * columns = nullptr,
     bool read_ahead_columns = false,
     /// Overrides the storage names of columns: conditions on columns with one storage name may share a step.
-    const NameToNameMap * storage_column_names = nullptr);
+    const NameToNameMap * storage_column_names = nullptr,
+    /// Conditions that read these columns are moved behind the other conditions, but never past a condition that may throw.
+    const NameSet * deferred_columns = nullptr);
 
 }

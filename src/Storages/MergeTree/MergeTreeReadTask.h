@@ -72,8 +72,8 @@ enum class MergeTreeReadType : uint8_t
 /// Some indexes (e.g. inverted text index) may read special virtual columns.
 struct IndexReadTask
 {
-    /// A virtual column filled by the index reader and the text search query it is filled from.
-    /// Default expression is evaluated by the main reader in parts where the index is not materialized.
+    /// A virtual column filled by the index reader and the text search query it is filled from. In parts where the
+    /// column is not read from the index, its default expression is evaluated by the reader of the step that uses it.
     struct Column
     {
         String name;
@@ -112,7 +112,8 @@ struct MergeTreeReadTaskColumns
 /// What the readers and the readers chain of one part are built from.
 struct MergeTreeReadTaskLayout
 {
-    /// Index read tasks of this part: only the indexes that are materialized in the part.
+    /// Index read tasks of this part: only the columns filled by the index readers of the part. The columns evaluated
+    /// from their default expressions are removed, and the tasks left without columns are dropped.
     IndexReadTasks index_read_tasks;
     /// PREWHERE steps of this part; null means the query-level steps of `MergeTreeSelectProcessor`.
     std::shared_ptr<const PrewhereExprInfo> prewhere_steps;

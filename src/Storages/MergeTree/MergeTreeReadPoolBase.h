@@ -98,8 +98,10 @@ protected:
     MergeTreeReadTaskInfo buildReadTaskInfo(const RangesInDataPart & part_with_ranges, const Settings & settings) const;
 
     /// PREWHERE steps of the parts whose index read tasks are `part_index_read_tasks`, built once for each
-    /// set of virtual columns that such parts do not read from the indexes.
-    std::shared_ptr<const PrewhereExprInfo> getPrewhereSteps(Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks) const;
+    /// set of virtual columns that such parts do not read from the indexes. The conditions that read
+    /// `deferred_columns`, which are determined by that set, are moved behind the others.
+    std::shared_ptr<const PrewhereExprInfo> getPrewhereSteps(
+        Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks, const NameSet & deferred_columns) const;
 
     /// Stage the columns cache write estimate of one part - the uncompressed size of the columns
     /// its readers can write to the cache (result, prewhere, mutation and patch-part columns),

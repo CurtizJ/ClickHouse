@@ -10,7 +10,9 @@
 #include <Storages/MergeTree/DeserializationPrefixesCache.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeBlockReadUtils.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
+#include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Access/ContextAccess.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
@@ -21,6 +23,8 @@ namespace ProfileEvents
 {
     extern const Event ReadPoolRangeRefinerDroppedMarks;
     extern const Event ReadPoolRangeRefinerDroppedCuts;
+    extern const Event TextIndexDirectReadFallbackColumns;
+    extern const Event TextIndexPhraseFallbacks;
 }
 
 namespace DB
@@ -35,6 +39,7 @@ namespace Setting
     extern const SettingsBool allow_calculating_subcolumns_sizes_for_merge_tree_reading;
     extern const SettingsUInt64 columns_cache_max_estimated_bytes_to_write_to_cache;
     extern const SettingsUInt64 columns_cache_max_bytes_to_write_to_cache;
+    extern const SettingsFloat text_index_hint_max_selectivity;
 }
 
 namespace ErrorCodes
@@ -498,29 +503,56 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
     }
 
     auto & layout = read_task_info.layout;
+    layout.index_granules = std::move(read_task_info.read_hints.index_granules);
 
-    /// An index that is not materialized in the part has nothing to read. Its virtual columns are filled
-    /// from their default expressions instead, by the readers of the steps that use them.
+    /// Virtual columns not read from the indexes are evaluated from their default expressions by the readers of the
+    /// steps that use them: all columns of an index that is not materialized in the part, and the columns that the
+    /// analyzed granule of a materialized index classifies as `Predicate`.
     NameSet index_read_columns;
     Names columns_not_read_from_index;
+    /// The columns evaluated from the original predicate, which reads the indexed column.
+    NameSet deferred_columns;
+    const auto hint_max_selectivity = static_cast<double>(settings[Setting::text_index_hint_max_selectivity]);
+
     for (const auto & [index_name, index_task] : index_read_tasks)
     {
         const auto & index = index_task.index.index;
         const bool is_materialized = static_cast<bool>(index->getDeserializedFormat(*data_part, index->getFileName()));
 
+        const MergeTreeIndexGranuleText * granule = nullptr;
+        if (auto it = layout.index_granules.find(index->index.name); is_materialized && it != layout.index_granules.end())
+            granule = typeid_cast<const MergeTreeIndexGranuleText *>(it->second.get());
+
+        IndexReadTask part_index_task{.columns = {}, .index = index_task.index};
         for (const auto & column : index_task.columns)
         {
-            if (is_materialized)
+            const bool from_predicate = !is_materialized
+                || (granule && granule->getAnalyzer().getColumnSource(*column.search_query, data_part->rows_count, hint_max_selectivity) == TextIndexColumnSource::Predicate);
+
+            if (!from_predicate)
+            {
                 index_read_columns.insert(column.name);
-            else
-                columns_not_read_from_index.push_back(column.name);
+                part_index_task.columns.push_back(column);
+                continue;
+            }
+
+            columns_not_read_from_index.push_back(column.name);
+
+            /// The default expression of a `Hint` column is a constant.
+            if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact)
+                deferred_columns.insert(column.name);
+
+            if (is_materialized && column.search_query->getSearchMode() == TextSearchMode::Phrase)
+                ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
         }
 
-        if (is_materialized)
-            layout.index_read_tasks.emplace(index_name, index_task);
+        if (!part_index_task.columns.empty())
+            layout.index_read_tasks.emplace(index_name, std::move(part_index_task));
     }
 
-    auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks);
+    ProfileEvents::increment(ProfileEvents::TextIndexDirectReadFallbackColumns, deferred_columns.size());
+
+    auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks, deferred_columns);
 
     layout.task_columns = getReadTaskColumns(
         part_info,
@@ -533,8 +565,6 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
 
     if (!columns_not_read_from_index.empty())
         layout.prewhere_steps = std::move(prewhere_steps);
-
-    layout.index_granules = std::move(read_task_info.read_hints.index_granules);
 
     if (read_task_info.alter_conversions->hasPatches())
     {
@@ -588,7 +618,7 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
 }
 
 std::shared_ptr<const PrewhereExprInfo> MergeTreeReadPoolBase::getPrewhereSteps(
-    Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks) const
+    Names columns_not_read_from_index, const IndexReadTasks & part_index_read_tasks, const NameSet & deferred_columns) const
 {
     std::ranges::sort(columns_not_read_from_index);
 
@@ -605,7 +635,8 @@ std::shared_ptr<const PrewhereExprInfo> MergeTreeReadPoolBase::getPrewhereSteps(
             reader_settings.enable_multiple_prewhere_read_steps,
             reader_settings.force_short_circuit_execution,
             reader_settings.read_ahead_prewhere_columns,
-            &storage_snapshot->metadata->getColumns()));
+            &storage_snapshot->metadata->getColumns(),
+            &deferred_columns));
     }
 
     return steps;

@@ -319,7 +319,8 @@ PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
     bool enable_multiple_prewhere_read_steps,
     bool force_short_circuit_execution,
     bool read_ahead_prewhere_columns,
-    const ColumnsDescription * columns)
+    const ColumnsDescription * columns,
+    const NameSet * deferred_columns)
 {
     PrewhereExprInfo prewhere_actions;
 
@@ -350,7 +351,7 @@ PrewhereExprInfo MergeTreeSelectProcessor::getPrewhereActions(
     }
 
     if (prewhere_info &&
-        (!enable_multiple_prewhere_read_steps || !tryBuildPrewhereSteps(prewhere_info, actions_settings, prewhere_actions, force_short_circuit_execution, columns, read_ahead_prewhere_columns, &index_column_storage_names)))
+        (!enable_multiple_prewhere_read_steps || !tryBuildPrewhereSteps(prewhere_info, actions_settings, prewhere_actions, force_short_circuit_execution, columns, read_ahead_prewhere_columns, &index_column_storage_names, deferred_columns)))
     {
         PrewhereExprStep prewhere_step
         {
