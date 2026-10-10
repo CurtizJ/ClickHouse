@@ -8,8 +8,10 @@
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeIOSettings.h>
+#include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
+#include <Storages/MergeTree/MergeTreeReadTask.h>
 #include <Storages/MergeTree/MergeTreeIndicesSerialization.h>
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
@@ -1238,6 +1240,48 @@ MutableDataPartStoragePtr createTemporaryTextIndexStorage(const DiskPtr & disk, 
     storage->beginTransaction();
     storage->createDirectories();
     return storage;
+}
+
+MergeTreeIndexGranulePtr readTextIndexGranule(
+    const IMergeTreeDataPartInfoForReader & part_info,
+    const IMergeTreeIndex & index,
+    const MergeTreeIndexConditionText & condition,
+    const MergeTreeReaderSettings & reader_settings,
+    bool read_postings)
+{
+    auto index_format = index.getDeserializedFormat(part_info, index.getFileName());
+    if (!index_format)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index {} is not materialized in part {}", index.index.name, part_info.getPartName());
+
+    MergeTreeIndexDeserializationState state
+    {
+        .version = index_format.version,
+        .condition = &condition,
+        .part_info = part_info,
+        .index = index,
+        .readable_ranges = nullptr,
+        .text_index_read_postings = read_postings,
+        .reader_settings = reader_settings,
+    };
+
+    auto sparse_index_stream = makeTextIndexInputStream(
+        part_info, index.getFileName(), index.getSubstreams()[0], reader_settings, /*expected_buffer_size=*/ std::nullopt);
+    sparse_index_stream->seekToStart();
+
+    /// The analysis opens the dictionary and postings streams itself.
+    MergeTreeIndexInputStreams streams;
+    streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
+
+    auto granule = index.createIndexGranule();
+    granule->deserializeBinaryWithMultipleStreams(streams, state);
+    return granule;
+}
+
+MergeTreeIndexGranulePtr readTextIndexGranuleForDirectRead(
+    const IMergeTreeDataPartInfoForReader & part_info, const IndexReadTask & index_read_task, const MergeTreeReaderSettings & reader_settings)
+{
+    const auto & condition = typeid_cast<const MergeTreeIndexConditionText &>(*index_read_task.index.condition_template->generateUnsubstituted());
+    return readTextIndexGranule(part_info, *index_read_task.index.index, condition, reader_settings, /*read_postings=*/ true);
 }
 
 size_t estimatePostingListBufferSize(const TokenPostingsInfo & token_info)

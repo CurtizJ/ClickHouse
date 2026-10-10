@@ -19,6 +19,9 @@
 namespace DB
 {
 
+struct IndexReadTask;
+class MergeTreeIndexConditionText;
+
 /// Transform that builds text indexes and periodically flushes their segments
 /// into temporary storage, when amount of accumulated data reaches some threshold.
 /// Used for materialization of text indexes.
@@ -219,6 +222,19 @@ std::unique_ptr<MergeTreeReaderStream> makeTextIndexInputStream(
     const MergeTreeIndexSubstream & substream,
     const MergeTreeReaderSettings & reader_settings,
     std::optional<size_t> expected_buffer_size);
+
+/// Deserializes and analyzes the granule of a text index in a part, which covers the whole part.
+/// `read_postings` also reads the single-segment posting lists of the searched tokens.
+MergeTreeIndexGranulePtr readTextIndexGranule(
+    const IMergeTreeDataPartInfoForReader & part_info,
+    const IMergeTreeIndex & index,
+    const MergeTreeIndexConditionText & condition,
+    const MergeTreeReaderSettings & reader_settings,
+    bool read_postings);
+
+/// The same for the index of a direct read from a text index, analyzed for the search queries of its virtual columns.
+MergeTreeIndexGranulePtr readTextIndexGranuleForDirectRead(
+    const IMergeTreeDataPartInfoForReader & part_info, const IndexReadTask & index_read_task, const MergeTreeReaderSettings & reader_settings);
 
 /// Estimates the read buffer size for the posting list of a token based on max estimated segment size.
 size_t estimatePostingListBufferSize(const TokenPostingsInfo & token_info);

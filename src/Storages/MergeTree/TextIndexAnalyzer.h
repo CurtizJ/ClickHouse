@@ -11,6 +11,17 @@ namespace DB
 
 class ColumnString;
 
+/// Where the direct-read virtual column of a text search query gets its values from in a part.
+enum class TextIndexColumnSource : uint8_t
+{
+    /// Filled from the posting lists of the index.
+    Postings,
+    AlwaysTrue,
+    AlwaysFalse,
+    /// Evaluated from the original search predicate, which is the default expression of the column.
+    Predicate,
+};
+
 /// Drives text-index analysis during a granule's dictionary scan: folds per-query
 /// token postings and row ranges, then bypasses queries that have failed or are no
 /// longer worth evaluating (low-selectivity hints, pattern bypass).
@@ -111,6 +122,13 @@ public:
     /// Discards `Hint`-mode queries whose estimated cardinality (read postings + `cardinality`
     /// estimates for unread multi-block tokens) exceeds `selectivity_threshold * total_rows`.
     void analyzeCardinalitiesAndBypassHints(double selectivity_threshold, size_t total_rows);
+
+    /// Where the virtual column of `query` comes from in this part.
+    TextIndexColumnSource getColumnSource(const TextSearchQuery & query, size_t num_rows_in_part, double hint_max_selectivity) const;
+
+    /// Whether `getColumnSource` can return `Predicate` for `query`: an `Exact` query with patterns or a phrase.
+    /// A `Hint` keeps the original predicate in the query, so a hint that cannot be served is always true instead.
+    static bool canFallBackToPredicate(const TextSearchQuery & query);
 
 private:
     using QueryHashes = absl::flat_hash_set<UInt128>;

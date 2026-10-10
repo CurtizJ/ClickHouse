@@ -547,6 +547,53 @@ void TextIndexAnalyzer::analyzeCardinalitiesAndBypassHints(double selectivity_th
     }
 }
 
+TextIndexColumnSource TextIndexAnalyzer::getColumnSource(const TextSearchQuery & query, size_t num_rows_in_part, double hint_max_selectivity) const
+{
+    if (query.getTokens().empty() && query.getPatterns().empty())
+    {
+        /// Token and phrase searches with no search tokens never match (row-level returns 0, e.g. when a
+        /// postprocessor maps every needle token to empty). Other functions match everything for empty needles.
+        if (query.getFunctionName() == "hasAnyTokens" || query.getFunctionName() == "hasAllTokens"
+            || query.getSearchMode() == TextSearchMode::Phrase)
+            return TextIndexColumnSource::AlwaysFalse;
+
+        return TextIndexColumnSource::AlwaysTrue;
+    }
+
+    const auto & query_builder = getQueryBuilder(query);
+
+    if (query_builder.is_failed)
+        return TextIndexColumnSource::AlwaysFalse;
+
+    if (query_builder.is_bypassed)
+        return query.getDirectReadMode() == TextIndexDirectReadMode::Hint ? TextIndexColumnSource::AlwaysTrue : TextIndexColumnSource::Predicate;
+
+    if (query.getSearchMode() == TextSearchMode::Phrase && query.getDirectReadMode() == TextIndexDirectReadMode::Exact && num_rows_in_part > 0)
+    {
+        /// Reading the positions of a frequent phrase is slower than evaluating `hasPhrase` on the column.
+        /// The phrase cardinality is estimated as the intersection of its tokens, assumed to be independent.
+        const bool all_tokens_present = std::ranges::all_of(query.getTokens(), [&](const auto & token) { return all_token_infos.contains(token); });
+        if (all_tokens_present)
+        {
+            double log_cardinality = 0.0;
+            for (const auto & token : query.getTokens())
+                log_cardinality += std::log(static_cast<double>(all_token_infos.find(token)->second->cardinality));
+
+            log_cardinality -= static_cast<double>(query.getTokens().size() - 1) * std::log(static_cast<double>(num_rows_in_part));
+            if (std::exp(log_cardinality) > static_cast<double>(num_rows_in_part) * hint_max_selectivity)
+                return TextIndexColumnSource::Predicate;
+        }
+    }
+
+    return TextIndexColumnSource::Postings;
+}
+
+bool TextIndexAnalyzer::canFallBackToPredicate(const TextSearchQuery & query)
+{
+    return query.getDirectReadMode() == TextIndexDirectReadMode::Exact
+        && (!query.getPatterns().empty() || query.getSearchMode() == TextSearchMode::Phrase);
+}
+
 void TextIndexAnalyzer::detachQueryFromTokens(const UInt128 & query_hash, const QueryBuilder & query_builder)
 {
     /// Detach the full declared token set so yet-unseen tokens stop passing isTokenNeeded.

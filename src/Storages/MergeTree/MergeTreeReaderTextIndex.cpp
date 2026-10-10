@@ -144,13 +144,9 @@ void MergeTreeReaderTextIndex::initializeFallbackReader(const IMergeTreeReader *
     /// - Pattern queries (LIKE): fallback when dictionary scan is abandoned.
     /// - Phrase queries (hasPhrase with Exact mode): fallback when estimated cardinality is too high
     ///   and reading position data would be slower than evaluating directly.
-    /// Only exact direct read needs it: a hint keeps the original predicate, so it can just be always true.
     auto needs_fallback_for_query = [](const auto & search_query)
     {
-        if (!search_query || search_query->getDirectReadMode() != TextIndexDirectReadMode::Exact)
-            return false;
-
-        return !search_query->getPatterns().empty() || search_query->getSearchMode() == TextSearchMode::Phrase;
+        return search_query && TextIndexAnalyzer::canFallBackToPredicate(*search_query);
     };
 
     if (std::ranges::none_of(search_queries, needs_fallback_for_query))
@@ -268,103 +264,47 @@ MergeTreeDataPartPtr MergeTreeReaderTextIndex::getDataPart() const
 
 void MergeTreeReaderTextIndex::readGranule()
 {
-    auto substreams = index_read_task.index.index->getSubstreams();
-    auto data_part = getDataPart();
+    LOG_TRACE(getLogger("MergeTreeReaderTextIndex"), "Reading text index granule for data part '{}'", getDataPart()->getDataPartStorage().getFullPath());
 
-    LOG_TRACE(getLogger("MergeTreeReaderTextIndex"), "Reading text index granule for data part '{}'", data_part->getDataPartStorage().getFullPath());
-
-    auto sparse_index_stream = makeTextIndexInputStream(*data_part_info_for_read, index_read_task.index.index->getFileName(), substreams[0], settings, /*expected_buffer_size=*/ std::nullopt);
-    sparse_index_stream->seekToStart();
     resetCursors();
-
-    /// The analysis opens the dictionary and postings streams itself.
-    MergeTreeIndexInputStreams streams;
-    streams[MergeTreeIndexSubstream::Type::Regular] = sparse_index_stream.get();
-
-    auto granule_ptr = index_read_task.index.index->createIndexGranule();
-    granule_ptr->deserializeBinaryWithMultipleStreams(streams, *deserialization_state);
-    setIndexGranule(std::move(granule_ptr));
+    setIndexGranule(readTextIndexGranuleForDirectRead(*data_part_info_for_read, index_read_task, settings));
 }
 
 void MergeTreeReaderTextIndex::classifyVirtualColumns()
 {
-    is_always_true.resize(columns_to_read.size(), false);
-    use_fallback.resize(columns_to_read.size(), false);
+    is_always_true.assign(columns_to_read.size(), false);
+    use_fallback.assign(columns_to_read.size(), false);
 
     const auto & analyzer = granule->getAnalyzer();
+    /// Cardinalities (granule) and the number of rows (part) share scale: a text index has whole-part granularity.
+    const size_t num_rows_in_part = data_part_info_for_read->getRowCount();
+    const auto & context_settings = condition_text->getContext()->getSettingsRef();
+    const auto hint_max_selectivity = static_cast<double>(context_settings[Setting::text_index_hint_max_selectivity]);
 
     for (size_t i = 0; i < columns_to_read.size(); ++i)
     {
-        const auto & column = columns_to_read[i];
-        const auto & search_query = search_queries[i];
-        const auto & query_builder = analyzer.getQueryBuilder(*search_query);
+        const auto & search_query = *search_queries[i];
 
-        if (search_query->getTokens().empty() && search_query->getPatterns().empty())
+        switch (analyzer.getColumnSource(search_query, num_rows_in_part, hint_max_selectivity))
         {
-            /// Token and phrase searches with no search tokens never match (row-level returns 0, e.g. when a
-            /// postprocessor maps every needle token to empty). Encode this as an explicit no-match so direct
-            /// read agrees with the row-scan path; otherwise an always-true virtual column would wrongly keep
-            /// all rows once granule pruning cannot mask it (e.g. under OR).
-            if (search_query->getFunctionName() == "hasAnyTokens" || search_query->getFunctionName() == "hasAllTokens"
-                || search_query->getSearchMode() == TextSearchMode::Phrase)
-                continue;
-
-            /// Always return true for empty needles.
-            is_always_true[i] = true;
-        }
-        else if (query_builder.is_failed)
-        {
-            /// Query is definitely false (e.g. a required token in All mode is missing).
-            continue;
-        }
-        else if (query_builder.is_bypassed)
-        {
-            if (search_query->getDirectReadMode() == TextIndexDirectReadMode::Hint)
-            {
+            case TextIndexColumnSource::Postings:
+            case TextIndexColumnSource::AlwaysFalse:
+                /// A query that never matches has empty postings.
+                break;
+            case TextIndexColumnSource::AlwaysTrue:
                 is_always_true[i] = true;
-            }
-            else
-            {
-                if (!fallback_reader || !fallback_expressions.contains(column.name))
+                break;
+            case TextIndexColumnSource::Predicate:
+                if (!fallback_reader || !fallback_expressions.contains(columns_to_read[i].name))
                 {
                     throw Exception(ErrorCodes::LOGICAL_ERROR,
-                        "The fallback reader or expression for pattern virtual column '{}' is not initialized", column.name);
+                        "The fallback reader or expression for virtual column '{}' is not initialized", columns_to_read[i].name);
                 }
 
                 use_fallback[i] = true;
-            }
-        }
-        else if (
-            search_query->getSearchMode() == TextSearchMode::Phrase
-            && search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact
-            && fallback_reader && fallback_expressions.contains(column.name))
-        {
-            /// For phrase queries with positions, check selectivity before reading positional data.
-            /// Reading large position lists for common phrases is slower than evaluating `hasPhrase`
-            /// on physical data via the fallback path. Estimate the phrase cardinality as the
-            /// intersection of its tokens (a safe upper bound) from the analyzer's per-token cardinalities.
-            const auto & all_token_infos = analyzer.getAllTokenInfos();
-            const auto & settings = condition_text->getContext()->getSettingsRef();
-            const double selectivity_threshold = static_cast<double>(settings[Setting::text_index_hint_max_selectivity]);
-            /// Cardinalities (granule) and num_rows_in_part (part) share scale - a text index has whole-part granularity.
-            const size_t num_rows_in_part = data_part_info_for_read->getRowCount();
-
-            const bool all_tokens_present = ((num_rows_in_part > 0) && std::ranges::all_of(search_query->getTokens(),
-                    [&](const auto & token) { return all_token_infos.find(token) != all_token_infos.end(); }));
-
-            if (all_tokens_present)
-            {
-                double log_cardinality = 0.0;
-                for (const auto & token : search_query->getTokens())
-                    log_cardinality += std::log(static_cast<double>(all_token_infos.find(token)->second->cardinality));
-
-                log_cardinality -= static_cast<double>(search_query->getTokens().size() - 1) * std::log(static_cast<double>(num_rows_in_part));
-                if (std::exp(log_cardinality) > static_cast<double>(num_rows_in_part) * selectivity_threshold)
-                {
-                    use_fallback[i] = true;
+                if (search_query.getSearchMode() == TextSearchMode::Phrase)
                     ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
-                }
-            }
+                break;
         }
     }
 }
