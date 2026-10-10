@@ -5748,7 +5748,8 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, [[ma
             std::move(read_ranges),
             std::move(projection_index_read_desc.read_ranges),
             std::move(index_read_result_pool),
-            std::move(part_remaining_marks));
+            std::move(part_remaining_marks),
+            storage_snapshot->metadata);
     }
 
     Pipe pipe;

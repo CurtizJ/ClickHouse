@@ -110,9 +110,10 @@ MergeTreePrefetchedReadPool::PrefetchedReaders::PrefetchedReaders(
         task.patches_ranges = read_prefetch.ranges_in_patch_parts.getRanges(
             task.read_info->data_part_info->getDataPart(), task.read_info->patch_parts, task.ranges);
 
+        /// `createPrefetchedReadersForTask` checked that the layout is resolved, and it stays resolved.
         const auto map = read_prefetch.getActualReadRequestMap(*task.read_info, nullptr);
         readers = MergeTreeReadTask::createReaders(
-            task.read_info, task.read_info->layout, read_prefetch.getExtras(), task.ranges, task.patches_ranges,
+            task.read_info, *task.read_info->tryGetResolvedLayout(), read_prefetch.getExtras(), task.ranges, task.patches_ranges,
             map, read_prefetch.getActualPatchReadRequestMaps(*task.read_info, map));
 
         /// This is already a prefetch thread, so initiate the prefetches inline.
@@ -208,6 +209,14 @@ void MergeTreePrefetchedReadPool::createPrefetchedReadersForTask(ThreadTask & ta
     if (task.isValidReadersFuture())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Task already has a reader");
 
+    /// The readers of a part are built from its resolved layout, so the prefetch waits for the first task of the part.
+    const auto * layout = task.read_info->tryGetResolvedLayout();
+    if (!layout)
+    {
+        tasks_waiting_for_layout[task.read_info.get()].push_back(&task);
+        return;
+    }
+
     if (ranges_refiner)
     {
         /// The refining job never prefetches dropped ranges, but the task boundaries and the
@@ -222,8 +231,25 @@ void MergeTreePrefetchedReadPool::createPrefetchedReadersForTask(ThreadTask & ta
     }
 
     auto extras = getExtras();
-    auto readers = MergeTreeReadTask::createReaders(task.read_info, task.read_info->layout, extras, task.ranges, task.patches_ranges);
+    auto readers = MergeTreeReadTask::createReaders(task.read_info, *layout, extras, task.ranges, task.patches_ranges);
     task.readers_future = std::make_unique<PrefetchedReaders>(prefetch_threadpool, std::move(readers), task.priority, *this);
+}
+
+void MergeTreePrefetchedReadPool::startPrefetchesForResolvedLayouts()
+{
+    for (auto it = tasks_waiting_for_layout.begin(); it != tasks_waiting_for_layout.end();)
+    {
+        if (!it->first->tryGetResolvedLayout())
+        {
+            ++it;
+            continue;
+        }
+
+        for (auto * task : it->second)
+            createPrefetchedReadersForTask(*task);
+
+        it = tasks_waiting_for_layout.erase(it);
+    }
 }
 
 void MergeTreePrefetchedReadPool::startPrefetches()
@@ -276,6 +302,10 @@ MergeTreeReadTaskPtr MergeTreePrefetchedReadPool::getTask(size_t task_idx, Merge
                 started_prefetches = true;
                 startPrefetches();
             }
+            else if (!tasks_waiting_for_layout.empty())
+            {
+                startPrefetchesForResolvedLayouts();
+            }
 
             auto it = per_thread_tasks.find(task_idx);
             if (it == per_thread_tasks.end())
@@ -295,6 +325,10 @@ MergeTreeReadTaskPtr MergeTreePrefetchedReadPool::getTask(size_t task_idx, Merge
                 if (thread_tasks.empty())
                     per_thread_tasks.erase(it);
             }
+
+            /// The task is taken, so its prefetch must not be started anymore.
+            if (auto waiting_it = tasks_waiting_for_layout.find(thread_task->read_info.get()); waiting_it != tasks_waiting_for_layout.end())
+                std::erase(waiting_it->second, thread_task.get());
         }
 
         /// Resolve the task outside of the mutex: waiting for the prefetch job and creating

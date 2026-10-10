@@ -103,6 +103,32 @@ void MergeTreeReadTaskColumns::moveAllColumnsFromPrewhere()
     pre_columns.clear();
 }
 
+PendingReadTaskLayout::PendingReadTaskLayout(Builder builder_)
+    : builder(std::move(builder_))
+{
+}
+
+const MergeTreeReadTaskLayout & PendingReadTaskLayout::resolve(const MergeTreeReadTaskInfo & info, IndexGranulesMap & granules, bool has_selected_granules) const
+{
+    std::call_once(once, [&]
+    {
+        layout.emplace(builder(info, granules, has_selected_granules));
+        resolved.store(true, std::memory_order_release);
+    });
+
+    return *layout;
+}
+
+const MergeTreeReadTaskLayout * PendingReadTaskLayout::tryGet() const
+{
+    return resolved.load(std::memory_order_acquire) ? &*layout : nullptr;
+}
+
+const MergeTreeReadTaskLayout * MergeTreeReadTaskInfo::tryGetResolvedLayout() const
+{
+    return pending_layout ? pending_layout->tryGet() : &layout;
+}
+
 void MergeTreeReadTask::Readers::updateAllMarkRanges(const MarkRanges & ranges, const std::vector<MarkRanges> & patches_ranges)
 {
     main->updateAllMarkRanges(ranges);
@@ -143,14 +169,30 @@ MergeTreeReadTask::MergeTreeReadTask(
     std::vector<MarkRanges> patches_mark_ranges_,
     const BlockSizeParams & block_size_params_,
     MergeTreeBlockSizePredictorPtr size_predictor_,
-    RuntimeDataflowStatisticsCacheUpdaterPtr updater_)
+    RuntimeDataflowStatisticsCacheUpdaterPtr updater_,
+    ReadersFactory readers_factory_)
     : info(std::move(info_))
     , readers(std::move(readers_))
+    , readers_factory(std::move(readers_factory_))
     , mark_ranges(std::move(mark_ranges_))
     , patches_mark_ranges(std::move(patches_mark_ranges_))
     , block_size_params(block_size_params_)
     , size_predictor(std::move(size_predictor_))
     , updater(std::move(updater_))
+{
+    if (!readers.main && !readers_factory)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Read task for part {} has neither readers nor a factory for them", info->data_part_info->getPartName());
+}
+
+const IMergeTreeReader & MergeTreeReadTask::getMainReader() const
+{
+    if (!readers.main)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Readers of the read task for part {} are not created yet", info->data_part_info->getPartName());
+
+    return *readers.main;
+}
+
+void MergeTreeReadTask::initializeDataflowCacheUpdateCallback(const MergeTreeReadTaskLayout & layout)
 {
     if (updater)
     {
@@ -163,7 +205,7 @@ MergeTreeReadTask::MergeTreeReadTask(
         const auto default_codec = part_codec ? part_codec : CompressionCodecFactory::instance().getDefaultCodec();
         const auto & metadata_columns = readers.main->getStorageSnapshot()->metadata->getColumns();
         ColumnCodecByName resolved_codecs;
-        for (const auto & name : info->layout.task_columns.getAllColumnNames())
+        for (const auto & name : layout.task_columns.getAllColumnNames())
         {
             const auto * description = metadata_columns.tryGet(name);
             if (description && description->codec)
@@ -415,26 +457,6 @@ void MergeTreeReadTask::initializeReadersChain(
     if (readers_chain.isInitialized())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Range readers chain is already initialized");
 
-    PrewhereExprInfo all_prewhere_actions;
-
-    if (index_build_context || lazy_materializing_rows)
-        initializeIndexReader(index_build_context, lazy_materializing_rows);
-
-    for (const auto & step : info->mutation_steps)
-        all_prewhere_actions.steps.push_back(step);
-
-    /// The counters are indexed by the query-level steps, so a part with its own steps does not update them.
-    const auto & part_prewhere_steps = info->layout.prewhere_steps;
-    for (const auto & step : part_prewhere_steps ? part_prewhere_steps->steps : prewhere_actions.steps)
-        all_prewhere_actions.steps.push_back(step);
-
-    readers_chain = createReadersChain(
-        readers, all_prewhere_actions, read_steps_performance_counters,
-        collect_predicate_statistics && !part_prewhere_steps);
-}
-
-void MergeTreeReadTask::initializeIndexReader(const MergeTreeIndexBuildContextPtr & index_build_context, const LazyMaterializingRowsPtr & lazy_materializing_rows)
-{
     /// Optionally initialize the index filter for the current read task. If the build context exists and contains
     /// relevant read ranges for the current part, retrieve or construct index filter for all involved skip indexes.
     /// This filter will later be used to filter granules during the first reading step.
@@ -442,29 +464,71 @@ void MergeTreeReadTask::initializeIndexReader(const MergeTreeIndexBuildContextPt
     if (index_build_context)
         index_read_result = index_build_context->getPreparedIndexReadResult(*this);
 
+    IndexGranulesMap index_granules;
+    bool has_selected_granules = true;
+    if (index_read_result && index_read_result->skip_index_read_result)
+    {
+        const auto & skip_index_read_result = *index_read_result->skip_index_read_result;
+        index_granules = skip_index_read_result.index_granules;
+        has_selected_granules = std::ranges::find(skip_index_read_result.granules_selected, true) != skip_index_read_result.granules_selected.end();
+    }
+
+    const MergeTreeReadTaskLayout * layout = &info->layout;
+    if (info->pending_layout)
+    {
+        layout = &info->pending_layout->resolve(*info, index_granules, has_selected_granules);
+
+        /// A task created before the resolution has no size predictor.
+        if (!size_predictor && layout->shared_size_predictor)
+            size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(*layout->shared_size_predictor);
+    }
+
+    if (!readers.main)
+    {
+        readers = readers_factory(*layout);
+        readers_factory = {};
+    }
+
+    initializeIndexReader(std::move(index_read_result), index_granules, lazy_materializing_rows);
+
+    PrewhereExprInfo all_prewhere_actions;
+    for (const auto & step : info->mutation_steps)
+        all_prewhere_actions.steps.push_back(step);
+
+    /// The counters are indexed by the query-level steps, so a part with its own steps does not update them.
+    const auto & part_prewhere_steps = layout->prewhere_steps;
+    for (const auto & step : part_prewhere_steps ? part_prewhere_steps->steps : prewhere_actions.steps)
+        all_prewhere_actions.steps.push_back(step);
+
+    readers_chain = createReadersChain(
+        readers, all_prewhere_actions, read_steps_performance_counters,
+        collect_predicate_statistics && !part_prewhere_steps);
+
+    initializeDataflowCacheUpdateCallback(*layout);
+}
+
+void MergeTreeReadTask::initializeIndexReader(
+    MergeTreeIndexReadResultPtr index_read_result, const IndexGranulesMap & index_granules, const LazyMaterializingRowsPtr & lazy_materializing_rows)
+{
     const PaddedPODArray<UInt64> * part_rows = nullptr;
     if (lazy_materializing_rows)
     {
         part_rows = &lazy_materializing_rows->rows_in_parts[getInfo().part_index_in_query];
     }
 
-    /// Pass pre-computed text index granules to prewhere readers.
-    /// The granules were captured during filterMarksUsingIndex in MergeTreeSkipIndexReader::read.
-    if (index_read_result && index_read_result->skip_index_read_result)
+    /// Pass pre-computed text index granules to prewhere readers: the granules captured during filterMarksUsingIndex
+    /// in MergeTreeSkipIndexReader::read and the ones read to resolve the layout of the part.
+    if (!index_granules.empty())
     {
-        const auto & granules = index_read_result->skip_index_read_result->index_granules;
         for (auto & reader : readers.prewhere)
         {
             if (auto * text_reader = dynamic_cast<MergeTreeReaderTextIndex *>(reader.get()))
-                text_reader->setPrecomputedGranule(granules);
+                text_reader->setPrecomputedGranule(index_granules);
         }
     }
 
     if (index_read_result || lazy_materializing_rows)
-    {
         readers.prepared_index = std::make_unique<MergeTreeReaderIndex>(readers.main.get(), std::move(index_read_result), part_rows);
-    }
-
 }
 
 UInt64 MergeTreeReadTask::estimateNumRows() const

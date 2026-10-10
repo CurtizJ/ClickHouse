@@ -1,6 +1,10 @@
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <vector>
 #include <Core/NamesAndTypes.h>
 #include <Storages/MergeTree/AlterConversions.h>
@@ -125,6 +129,32 @@ struct MergeTreeReadTaskLayout
     IndexGranulesMap index_granules;
 };
 
+struct MergeTreeReadTaskInfo;
+
+/// Layout of a part that depends on the analysis of its text indexes at read time. Resolved once, by the first
+/// task of the part that initializes its readers chain, from the granules of that analysis.
+class PendingReadTaskLayout
+{
+public:
+    /// `granules` are the granules of the analysis at read time; the builder adds the granules it reads itself.
+    /// `has_selected_granules` is false when that analysis has dropped every granule of the part.
+    using Builder = std::function<MergeTreeReadTaskLayout(const MergeTreeReadTaskInfo & info, IndexGranulesMap & granules, bool has_selected_granules)>;
+
+    explicit PendingReadTaskLayout(Builder builder_);
+
+    /// The call that builds the layout leaves in `granules` the granules the builder has read, for the readers of its task.
+    const MergeTreeReadTaskLayout & resolve(const MergeTreeReadTaskInfo & info, IndexGranulesMap & granules, bool has_selected_granules) const;
+
+    /// Returns nullptr until the layout is resolved.
+    const MergeTreeReadTaskLayout * tryGet() const;
+
+private:
+    Builder builder;
+    mutable std::once_flag once;
+    mutable std::optional<MergeTreeReadTaskLayout> layout;
+    mutable std::atomic<bool> resolved = false;
+};
+
 struct MergeTreeReadTaskInfo
 {
     /// Part (owned or borrowed) to read while performing this task.
@@ -149,7 +179,10 @@ struct MergeTreeReadTaskInfo
     /// Patches that should be applied for part.
     PatchPartsForReader patch_parts;
     /// What the readers and the readers chain of the part are built from.
+    /// For a part with `pending_layout`, only an estimate used before the pending layout is resolved.
     MergeTreeReadTaskLayout layout;
+    /// Set for a part whose layout depends on the analysis of its text indexes at read time.
+    std::shared_ptr<const PendingReadTaskLayout> pending_layout;
     /// Shared constant fields for virtual columns.
     VirtualFields const_virtual_fields;
     /// The amount of data to read per task based on size of the queried columns.
@@ -164,6 +197,9 @@ struct MergeTreeReadTaskInfo
     MarkRangesPtr read_request_map;
     /// The same for each of `patch_parts`; empty = the whole patch parts.
     std::vector<MarkRangesPtr> patch_read_request_maps;
+
+    /// The layout to build the readers of the part from, or nullptr if `pending_layout` is not resolved yet.
+    const MergeTreeReadTaskLayout * tryGetResolvedLayout() const;
 };
 
 using MergeTreeReadTaskInfoPtr = std::shared_ptr<const MergeTreeReadTaskInfo>;
@@ -219,6 +255,11 @@ public:
         size_t num_read_bytes = 0;
     };
 
+    /// Creates the readers of a task from the resolved layout of its part.
+    using ReadersFactory = std::function<Readers(const MergeTreeReadTaskLayout & layout)>;
+
+    /// `readers_` are empty when the layout of the part is not resolved yet: then `readers_factory_` creates them
+    /// in `initializeReadersChain`.
     MergeTreeReadTask(
         MergeTreeReadTaskInfoPtr info_,
         Readers readers_,
@@ -226,8 +267,10 @@ public:
         std::vector<MarkRanges> patches_mark_ranges_,
         const BlockSizeParams & block_size_params_,
         MergeTreeBlockSizePredictorPtr size_predictor_,
-        RuntimeDataflowStatisticsCacheUpdaterPtr updater_);
+        RuntimeDataflowStatisticsCacheUpdaterPtr updater_,
+        ReadersFactory readers_factory_ = {});
 
+    /// Resolves the layout of the part if it is pending, creates the readers if they are deferred, and builds the chain.
     void initializeReadersChain(
         const PrewhereExprInfo & prewhere_actions,
         MergeTreeIndexBuildContextPtr index_build_context,
@@ -235,14 +278,13 @@ public:
         const ReadStepsPerformanceCounters & read_steps_performance_counters,
         bool collect_predicate_statistics);
 
-    void initializeIndexReader(const MergeTreeIndexBuildContextPtr & index_build_context, const LazyMaterializingRowsPtr & lazy_materializing_rows);
-
     BlockAndProgress read();
     bool isFinished() const { return mark_ranges.empty() && readers_chain.isCurrentRangeFinished(); }
 
     const MergeTreeReadTaskInfo & getInfo() const { return *info; }
     const MergeTreeReadersChain & getReadersChain() const { return readers_chain; }
-    const IMergeTreeReader & getMainReader() const { return *readers.main; }
+    bool hasReaders() const { return readers.main != nullptr; }
+    const IMergeTreeReader & getMainReader() const;
 
     void addPrewhereUnmatchedMarks(const MarkRanges & mark_ranges_);
     const MarkRanges & getPrewhereUnmatchedMarks() { return prewhere_unmatched_marks; }
@@ -291,12 +333,19 @@ private:
 
     UInt64 estimateNumRows() const;
 
+    void initializeIndexReader(
+        MergeTreeIndexReadResultPtr index_read_result, const IndexGranulesMap & index_granules, const LazyMaterializingRowsPtr & lazy_materializing_rows);
+    void initializeDataflowCacheUpdateCallback(const MergeTreeReadTaskLayout & layout);
+
     /// Shared information required for reading.
     MergeTreeReadTaskInfoPtr info;
 
     /// Readers for data_part of this task.
     /// May be reused and released to the next task.
     Readers readers;
+
+    /// Creates `readers` in `initializeReadersChain` if they were deferred.
+    ReadersFactory readers_factory;
 
     /// Range readers chain to read mark_ranges from data_part.
     MergeTreeReadersChain readers_chain;

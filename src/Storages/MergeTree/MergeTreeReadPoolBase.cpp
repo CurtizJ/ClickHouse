@@ -13,6 +13,7 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
+#include <Storages/MergeTree/TextIndexUtils.h>
 #include <Access/ContextAccess.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
@@ -502,69 +503,12 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
         std::move(mutation_steps.begin(), mutation_steps.end(), std::back_inserter(read_task_info.mutation_steps));
     }
 
+    auto index_granules = std::move(read_task_info.read_hints.index_granules);
+    const bool is_layout_pending = isLayoutPending(part_info, index_granules);
+    read_task_info.layout = buildReadTaskLayout(
+        read_task_info, index_granules, is_layout_pending ? PendingIndexColumns::Keep : PendingIndexColumns::ReadGranule);
     auto & layout = read_task_info.layout;
-    layout.index_granules = std::move(read_task_info.read_hints.index_granules);
-
-    /// Virtual columns not read from the indexes are evaluated from their default expressions by the readers of the
-    /// steps that use them: all columns of an index that is not materialized in the part, and the columns that the
-    /// analyzed granule of a materialized index classifies as `Predicate`.
-    NameSet index_read_columns;
-    Names columns_not_read_from_index;
-    /// The columns evaluated from the original predicate, which reads the indexed column.
-    NameSet deferred_columns;
-    const auto hint_max_selectivity = static_cast<double>(settings[Setting::text_index_hint_max_selectivity]);
-
-    for (const auto & [index_name, index_task] : index_read_tasks)
-    {
-        const auto & index = index_task.index.index;
-        const bool is_materialized = static_cast<bool>(index->getDeserializedFormat(*data_part, index->getFileName()));
-
-        const MergeTreeIndexGranuleText * granule = nullptr;
-        if (auto it = layout.index_granules.find(index->index.name); is_materialized && it != layout.index_granules.end())
-            granule = typeid_cast<const MergeTreeIndexGranuleText *>(it->second.get());
-
-        IndexReadTask part_index_task{.columns = {}, .index = index_task.index};
-        for (const auto & column : index_task.columns)
-        {
-            const bool from_predicate = !is_materialized
-                || (granule && granule->getAnalyzer().getColumnSource(*column.search_query, data_part->rows_count, hint_max_selectivity) == TextIndexColumnSource::Predicate);
-
-            if (!from_predicate)
-            {
-                index_read_columns.insert(column.name);
-                part_index_task.columns.push_back(column);
-                continue;
-            }
-
-            columns_not_read_from_index.push_back(column.name);
-
-            /// The default expression of a `Hint` column is a constant.
-            if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact)
-                deferred_columns.insert(column.name);
-
-            if (is_materialized && column.search_query->getSearchMode() == TextSearchMode::Phrase)
-                ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
-        }
-
-        if (!part_index_task.columns.empty())
-            layout.index_read_tasks.emplace(index_name, std::move(part_index_task));
-    }
-
-    ProfileEvents::increment(ProfileEvents::TextIndexDirectReadFallbackColumns, deferred_columns.size());
-
-    auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks, deferred_columns);
-
-    layout.task_columns = getReadTaskColumns(
-        part_info,
-        storage_snapshot,
-        column_names,
-        read_task_info.mutation_steps,
-        prewhere_steps->steps,
-        index_read_columns,
-        /*with_subcolumns=*/ true);
-
-    if (!columns_not_read_from_index.empty())
-        layout.prewhere_steps = std::move(prewhere_steps);
+    layout.index_granules = std::move(index_granules);
 
     if (read_task_info.alter_conversions->hasPatches())
     {
@@ -581,40 +525,178 @@ MergeTreeReadPoolBase::buildReadTaskInfo(const RangesInDataPart & part_with_rang
             has_lightweight_delete);
     }
 
+    if (is_layout_pending)
+    {
+        /// Direct read from a text index is not used when a part has patches, so the resolved layout needs no patch columns.
+        if (!read_task_info.patch_parts.empty())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Part {} with patch parts has a layout that depends on the analysis of its text indexes", part_info.getPartName());
+
+        /// The resolved layout keeps only the granules analyzed at planning time, like the layout before the resolution.
+        /// The other granules are owned by the result of the analysis at read time and by the readers of the part.
+        /// The pool outlives the tasks it creates, which resolve the layout.
+        read_task_info.pending_layout = std::make_shared<const PendingReadTaskLayout>(
+            [this, plan_time_granules = layout.index_granules](const MergeTreeReadTaskInfo & info, IndexGranulesMap & granules, bool has_selected_granules)
+            {
+                granules.insert(plan_time_granules.begin(), plan_time_granules.end());
+
+                auto resolved_layout = buildReadTaskLayout(
+                    info, granules, has_selected_granules ? PendingIndexColumns::ReadGranule : PendingIndexColumns::EvaluatePredicates);
+                resolved_layout.index_granules = plan_time_granules;
+                resolved_layout.shared_size_predictor = buildSizePredictor(info, resolved_layout.task_columns, getContext()->getSettingsRef());
+                return resolved_layout;
+            });
+    }
+
     read_task_info.const_virtual_fields = shared_virtual_fields;
     read_task_info.const_virtual_fields.emplace("_part_index", read_task_info.part_index_in_query);
     read_task_info.const_virtual_fields.emplace("_part_starting_offset", read_task_info.part_starting_offset_in_query);
 
-    if (pool_settings.preferred_block_size_bytes > 0)
-    {
-        const auto & result_column_names = layout.task_columns.columns.getNames();
-        NameSet all_column_names(result_column_names.begin(), result_column_names.end());
-
-        for (const auto & pre_columns_per_step : layout.task_columns.pre_columns)
-        {
-            const auto & pre_column_names = pre_columns_per_step.getNames();
-            all_column_names.insert(pre_column_names.begin(), pre_column_names.end());
-        }
-
-        Block sample_block_from_part;
-        for (const auto & column_name : all_column_names)
-        {
-            if (auto column_in_part = data_part_info->tryGetColumn(column_name))
-                sample_block_from_part.insert(ColumnWithTypeAndName(column_in_part->type->createColumn(), column_in_part->type, column_in_part->name));
-        }
-
-        layout.shared_size_predictor = std::make_unique<MergeTreeBlockSizePredictor>(
-            data_part_info,
-            Names(all_column_names.begin(), all_column_names.end()),
-            sample_block_from_part,
-            settings[Setting::allow_calculating_subcolumns_sizes_for_merge_tree_reading]);
-    }
+    /// The readers of a pending part use the size predictor of its resolved layout.
+    if (!is_layout_pending)
+        layout.shared_size_predictor = buildSizePredictor(read_task_info, layout.task_columns, settings);
 
     read_task_info.deserialization_prefixes_cache = std::make_shared<DeserializationPrefixesCache>();
 
     std::tie(read_task_info.min_marks_per_task, read_task_info.approx_size_of_mark)
         = calculateMinMarksPerTask(part_with_ranges, column_names, layout.task_columns.pre_columns, pool_settings, settings);
     return read_task_info;
+}
+
+/// Whether a virtual column of the index may have to be evaluated from its original search predicate.
+static bool hasColumnThatCanFallBack(const IndexReadTask & index_task)
+{
+    return std::ranges::any_of(index_task.columns, [](const auto & column) { return TextIndexAnalyzer::canFallBackToPredicate(*column.search_query); });
+}
+
+/// A materialized index with a virtual column that may fall back to its predicate, but no analyzed granule.
+static bool isPendingIndex(bool is_materialized, const IndexReadTask & index_task, const IndexGranulesMap & index_granules)
+{
+    return is_materialized && !index_granules.contains(index_task.index.index->index.name) && hasColumnThatCanFallBack(index_task);
+}
+
+static bool isMaterialized(const IndexReadTask & index_task, const IMergeTreeDataPartInfoForReader & part_info)
+{
+    const auto & index = index_task.index.index;
+    return static_cast<bool>(index->getDeserializedFormat(part_info, index->getFileName()));
+}
+
+bool MergeTreeReadPoolBase::isLayoutPending(const IMergeTreeDataPartInfoForReader & part_info, const IndexGranulesMap & index_granules) const
+{
+    return std::ranges::any_of(index_read_tasks, [&](const auto & entry)
+    {
+        return isPendingIndex(isMaterialized(entry.second, part_info), entry.second, index_granules);
+    });
+}
+
+MergeTreeReadTaskLayout MergeTreeReadPoolBase::buildReadTaskLayout(
+    const MergeTreeReadTaskInfo & info, IndexGranulesMap & index_granules, PendingIndexColumns pending_index_columns) const
+{
+    MergeTreeReadTaskLayout layout;
+    const auto & part_info = *info.data_part_info;
+    const auto hint_max_selectivity = static_cast<double>(getContext()->getSettingsRef()[Setting::text_index_hint_max_selectivity]);
+
+    /// Virtual columns not read from the indexes are evaluated from their default expressions by the readers of the
+    /// steps that use them: all columns of an index that is not materialized in the part, and the columns that the
+    /// analyzed granule of a materialized index classifies as `Predicate`.
+    NameSet index_read_columns;
+    Names columns_not_read_from_index;
+    /// The columns evaluated from the original predicate, which reads the indexed column.
+    NameSet deferred_columns;
+
+    const bool count_fallbacks = pending_index_columns == PendingIndexColumns::ReadGranule;
+
+    for (const auto & [index_name, index_task] : index_read_tasks)
+    {
+        const auto & index = index_task.index.index;
+        const bool is_materialized = isMaterialized(index_task, part_info);
+        bool evaluate_predicates = !is_materialized;
+
+        if (isPendingIndex(is_materialized, index_task, index_granules))
+        {
+            if (pending_index_columns == PendingIndexColumns::ReadGranule)
+                index_granules.emplace(index->index.name, readTextIndexGranuleForDirectRead(part_info, index_task, reader_settings));
+            else if (pending_index_columns == PendingIndexColumns::EvaluatePredicates)
+                evaluate_predicates = true;
+        }
+
+        const MergeTreeIndexGranuleText * granule = nullptr;
+        if (auto it = index_granules.find(index->index.name); is_materialized && it != index_granules.end())
+            granule = typeid_cast<const MergeTreeIndexGranuleText *>(it->second.get());
+
+        IndexReadTask part_index_task{.columns = {}, .index = index_task.index};
+        for (const auto & column : index_task.columns)
+        {
+            const bool from_predicate = evaluate_predicates
+                || (granule && granule->getAnalyzer().getColumnSource(*column.search_query, part_info.getRowCount(), hint_max_selectivity) == TextIndexColumnSource::Predicate);
+
+            if (!from_predicate)
+            {
+                index_read_columns.insert(column.name);
+                part_index_task.columns.push_back(column);
+                continue;
+            }
+
+            columns_not_read_from_index.push_back(column.name);
+
+            /// The default expression of a `Hint` column is a constant.
+            if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact)
+                deferred_columns.insert(column.name);
+
+            if (count_fallbacks && is_materialized && column.search_query->getSearchMode() == TextSearchMode::Phrase)
+                ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
+        }
+
+        if (!part_index_task.columns.empty())
+            layout.index_read_tasks.emplace(index_name, std::move(part_index_task));
+    }
+
+    if (count_fallbacks)
+        ProfileEvents::increment(ProfileEvents::TextIndexDirectReadFallbackColumns, deferred_columns.size());
+
+    auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks, deferred_columns);
+
+    layout.task_columns = getReadTaskColumns(
+        part_info,
+        storage_snapshot,
+        column_names,
+        info.mutation_steps,
+        prewhere_steps->steps,
+        index_read_columns,
+        /*with_subcolumns=*/ true);
+
+    if (!columns_not_read_from_index.empty())
+        layout.prewhere_steps = std::move(prewhere_steps);
+
+    return layout;
+}
+
+MergeTreeBlockSizePredictorPtr MergeTreeReadPoolBase::buildSizePredictor(
+    const MergeTreeReadTaskInfo & info, const MergeTreeReadTaskColumns & task_columns, const Settings & settings) const
+{
+    if (pool_settings.preferred_block_size_bytes == 0)
+        return nullptr;
+
+    const auto & result_column_names = task_columns.columns.getNames();
+    NameSet all_column_names(result_column_names.begin(), result_column_names.end());
+
+    for (const auto & pre_columns_per_step : task_columns.pre_columns)
+    {
+        const auto & pre_column_names = pre_columns_per_step.getNames();
+        all_column_names.insert(pre_column_names.begin(), pre_column_names.end());
+    }
+
+    Block sample_block_from_part;
+    for (const auto & column_name : all_column_names)
+    {
+        if (auto column_in_part = info.data_part_info->tryGetColumn(column_name))
+            sample_block_from_part.insert(ColumnWithTypeAndName(column_in_part->type->createColumn(), column_in_part->type, column_in_part->name));
+    }
+
+    return std::make_unique<MergeTreeBlockSizePredictor>(
+        info.data_part_info,
+        Names(all_column_names.begin(), all_column_names.end()),
+        sample_block_from_part,
+        settings[Setting::allow_calculating_subcolumns_sizes_for_merge_tree_reading]);
 }
 
 std::shared_ptr<const PrewhereExprInfo> MergeTreeReadPoolBase::getPrewhereSteps(
@@ -674,12 +756,16 @@ void MergeTreeReadPoolBase::stageColumnsCacheWriteEstimate(
         /// prewhere/mutation columns pass the gate while writing much more data than
         /// estimated. Patch-part columns are read from separate parts and are accounted
         /// for below.
-        const auto all_read_columns = read_task_info.layout.task_columns.getAllColumnNames();
+        auto all_read_columns = read_task_info.layout.task_columns.getAllColumnNames();
 
         /// Don't apply the estimate gate when there are no columns (e.g. some
         /// projection paths build the column list later).
         if (all_read_columns.empty())
             return;
+
+        /// The resolved layout of a pending part may also read the inputs of the virtual columns that fall back to their predicates.
+        if (read_task_info.pending_layout)
+            addFallbackInputColumns(read_task_info, all_read_columns);
 
         bytes_per_mark += estimateUncompressedColumnsSizePerMark(*part_with_ranges.data_part, all_read_columns, settings);
     }
@@ -745,6 +831,30 @@ void MergeTreeReadPoolBase::stageColumnsCacheWriteEstimate(
     /// install a read ranges refiner.
     staged_columns_cache_estimate_bytes += part_estimated_bytes;
     columns_cache_estimate_budget = settings[Setting::columns_cache_max_estimated_bytes_to_write_to_cache];
+}
+
+void MergeTreeReadPoolBase::addFallbackInputColumns(const MergeTreeReadTaskInfo & read_task_info, Names & columns) const
+{
+    NameSet columns_set(columns.begin(), columns.end());
+    for (const auto & [_, index_task] : index_read_tasks)
+    {
+        if (!isPendingIndex(isMaterialized(index_task, *read_task_info.data_part_info), index_task, read_task_info.layout.index_granules))
+            continue;
+
+        for (const auto & column : index_task.columns)
+        {
+            if (!TextIndexAnalyzer::canFallBackToPredicate(*column.search_query))
+                continue;
+
+            IdentifierNameSet identifiers;
+            column.default_expression->collectIdentifierNames(identifiers);
+            for (const auto & identifier : identifiers)
+            {
+                if (columns_set.insert(identifier).second)
+                    columns.push_back(identifier);
+            }
+        }
+    }
 }
 
 void MergeTreeReadPoolBase::commitColumnsCacheWriteEstimate() const
@@ -854,15 +964,17 @@ MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
     MergeTreeReadTask::Readers task_readers,
     MarkRanges ranges,
     std::vector<MarkRanges> patches_ranges,
-    RuntimeDataflowStatisticsCacheUpdaterPtr updater) const
+    RuntimeDataflowStatisticsCacheUpdaterPtr updater,
+    MergeTreeReadTask::ReadersFactory readers_factory) const
 {
     /// Every task of every pool is built here, so this is the one place that is guaranteed to
     /// run before the first task exists and after `setReadRangesRefiner`.
     commitColumnsCacheWriteEstimate();
 
-    const auto & shared_size_predictor = read_info->layout.shared_size_predictor;
-    auto task_size_predictor = shared_size_predictor
-        ? std::make_unique<MergeTreeBlockSizePredictor>(*shared_size_predictor)
+    /// A task of a part whose layout is not resolved yet gets the predictor in `MergeTreeReadTask::initializeReadersChain`.
+    const auto * layout = read_info->tryGetResolvedLayout();
+    auto task_size_predictor = layout && layout->shared_size_predictor
+        ? std::make_unique<MergeTreeBlockSizePredictor>(*layout->shared_size_predictor)
         : nullptr; /// make a copy
 
     return std::make_unique<MergeTreeReadTask>(
@@ -872,7 +984,8 @@ MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
         std::move(patches_ranges),
         block_size_params,
         std::move(task_size_predictor),
-        updater);
+        updater,
+        std::move(readers_factory));
 }
 
 MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
@@ -911,23 +1024,34 @@ MergeTreeReadTaskPtr MergeTreeReadPoolBase::createTask(
     const auto map = getActualReadRequestMap(*read_info, read_request_map);
     const auto patch_maps = getActualPatchReadRequestMaps(*read_info, map);
 
-    if (!previous_task)
-    {
-        task_readers = MergeTreeReadTask::createReaders(read_info, read_info->layout, extras, ranges, patches_ranges, map, patch_maps);
-    }
-    else if (get_part_name(previous_task->getInfo()) != get_part_name(*read_info))
-    {
-        extras.value_size_map = previous_task->getMainReader().getAvgValueSizeHints();
-        task_readers = MergeTreeReadTask::createReaders(read_info, read_info->layout, extras, ranges, patches_ranges, map, patch_maps);
-    }
-    else
+    /// A previous task of the same part has initialized its readers chain, so its readers are built from the resolved layout.
+    const bool has_previous_readers = previous_task && previous_task->hasReaders();
+    if (has_previous_readers && get_part_name(previous_task->getInfo()) == get_part_name(*read_info))
     {
         task_readers = previous_task->releaseReaders();
         task_readers.updateAllMarkRanges(ranges, patches_ranges);
         if (map)
             task_readers.updateReadRequestMap(map, patch_maps);
+
+        return createTask(read_info, std::move(task_readers), std::move(ranges), std::move(patches_ranges), updater);
     }
 
+    if (has_previous_readers)
+        extras.value_size_map = previous_task->getMainReader().getAvgValueSizeHints();
+
+    const auto * layout = read_info->tryGetResolvedLayout();
+    if (!layout)
+    {
+        /// The layout is resolved by the first task of the part that initializes its readers chain.
+        MergeTreeReadTask::ReadersFactory readers_factory = [read_info, extras, ranges, patches_ranges, map, patch_maps](const MergeTreeReadTaskLayout & resolved_layout)
+        {
+            return MergeTreeReadTask::createReaders(read_info, resolved_layout, extras, ranges, patches_ranges, map, patch_maps);
+        };
+
+        return createTask(read_info, {}, std::move(ranges), std::move(patches_ranges), updater, std::move(readers_factory));
+    }
+
+    task_readers = MergeTreeReadTask::createReaders(read_info, *layout, extras, ranges, patches_ranges, map, patch_maps);
     return createTask(read_info, std::move(task_readers), std::move(ranges), std::move(patches_ranges), updater);
 }
 

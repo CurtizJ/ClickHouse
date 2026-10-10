@@ -46,13 +46,15 @@ SELECT sum(length(s)) FROM tab PREWHERE s LIKE '%token4%' AND k = 1 SETTINGS use
 SYSTEM FLUSH LOGS query_log;
 
 -- `s` is read only for the granule where `k = 1`. Evaluating the text condition first would read it for all rows.
+-- With `use_skip_indexes_on_data_read = 1` the index is analyzed at read time, and the reader of that analysis
+-- counts each selected row once more.
 SELECT
     log_comment,
     ProfileEvents['TextIndexDirectReadFallbackColumns'],
     ProfileEvents['TextIndexPhraseFallbacks'],
-    ProfileEvents['RowsReadByPrewhereReaders'] < 1.5 * ProfileEvents['SelectedRows']
+    ProfileEvents['RowsReadByPrewhereReaders'] < if(endsWith(log_comment, '_0'), 1.5, 2.5) * ProfileEvents['SelectedRows']
 FROM system.query_log
-WHERE current_database = currentDatabase() AND event_date >= yesterday() AND type = 'QueryFinish' AND log_comment IN ('05358_like_0', '05358_phrase_0')
+WHERE current_database = currentDatabase() AND event_date >= yesterday() AND type = 'QueryFinish' AND log_comment IN ('05358_like_0', '05358_like_1', '05358_phrase_0', '05358_phrase_1')
 ORDER BY log_comment;
 
 DROP TABLE tab;

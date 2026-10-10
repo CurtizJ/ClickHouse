@@ -99,11 +99,15 @@ struct MergeTreeIndexBuildContext
     /// zero for a part, its cached index can be released to free resources.
     const PartRemainingMarks part_remaining_marks;
 
+    /// Metadata the indexes are analyzed with. Not taken from the readers of a task, which may be created later.
+    const StorageMetadataPtr metadata_snapshot;
+
     MergeTreeIndexBuildContext(
         RangesByIndex read_ranges_,
         ProjectionRangesByIndex projection_read_ranges_,
         MergeTreeIndexReadResultPoolPtr index_reader_pool_,
-        PartRemainingMarks part_remaining_marks_);
+        PartRemainingMarks part_remaining_marks_,
+        StorageMetadataPtr metadata_snapshot_);
 
     MergeTreeIndexReadResultPtr getPreparedIndexReadResult(const MergeTreeReadTask & task) const;
 };

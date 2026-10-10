@@ -126,6 +126,8 @@ private:
 
     void startPrefetches();
     void createPrefetchedReadersForTask(ThreadTask & task);
+    /// Starts the prefetches of the tasks in `tasks_waiting_for_layout` whose parts have resolved their layouts.
+    void startPrefetchesForResolvedLayouts();
     std::function<void()> createPrefetchedTask(IMergeTreeReader * reader, Priority priority);
 
     /// Returns a raw thread task to steal (the caller resolves it into a read task
@@ -144,6 +146,8 @@ private:
     TasksPerThread per_thread_tasks;
     std::priority_queue<TaskHolder> prefetch_queue; /// the smallest on top
     bool started_prefetches = false;
+    /// Queued tasks admitted for a prefetch while the layout of their part was not resolved, by part.
+    std::unordered_map<const MergeTreeReadTaskInfo *, std::vector<ThreadTask *>> tasks_waiting_for_layout;
     LoggerPtr log;
 
     /// A struct which allows to track max number of tasks which were in the

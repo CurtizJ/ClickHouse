@@ -97,6 +97,30 @@ protected:
 
     MergeTreeReadTaskInfo buildReadTaskInfo(const RangesInDataPart & part_with_ranges, const Settings & settings) const;
 
+    /// What to do with the virtual columns of a pending index (see `isLayoutPending`) of a part.
+    enum class PendingIndexColumns : uint8_t
+    {
+        /// Keep them in the index read tasks: the layout is an estimate until the analysis at read time.
+        Keep,
+        /// Read the granule of the index and classify them.
+        ReadGranule,
+        /// Evaluate them from their predicates without reading anything: no row of the part is read.
+        EvaluatePredicates,
+    };
+
+    /// Whether the layout of the part depends on the analysis of its text indexes at read time: a materialized index
+    /// has a virtual column that may fall back to its predicate and no analyzed granule in `index_granules`.
+    bool isLayoutPending(const IMergeTreeDataPartInfoForReader & part_info, const IndexGranulesMap & index_granules) const;
+
+    /// Classifies the virtual columns of the part by `index_granules` and builds its index read tasks, PREWHERE steps
+    /// and task columns. The granules read for `PendingIndexColumns::ReadGranule` are added to `index_granules`.
+    /// The profile events of the fallbacks are counted unless the layout is an estimate or reads no rows.
+    MergeTreeReadTaskLayout buildReadTaskLayout(
+        const MergeTreeReadTaskInfo & info, IndexGranulesMap & index_granules, PendingIndexColumns pending_index_columns) const;
+
+    MergeTreeBlockSizePredictorPtr buildSizePredictor(
+        const MergeTreeReadTaskInfo & info, const MergeTreeReadTaskColumns & task_columns, const Settings & settings) const;
+
     /// PREWHERE steps of the parts whose index read tasks are `part_index_read_tasks`, built once for each
     /// set of virtual columns that such parts do not read from the indexes. The conditions that read
     /// `deferred_columns`, which are determined by that set, are moved behind the others.
@@ -110,6 +134,9 @@ protected:
     /// pool's total against the query-wide budget.
     void stageColumnsCacheWriteEstimate(
         const RangesInDataPart & part_with_ranges, const MergeTreeReadTaskInfo & read_task_info, const Settings & settings);
+
+    /// Adds to `columns` the physical inputs of the virtual columns of a pending part that may fall back to their predicates.
+    void addFallbackInputColumns(const MergeTreeReadTaskInfo & read_task_info, Names & columns) const;
 
     /// Charge the staged estimate of this pool against the query-wide budget and disable cache
     /// writes for the query once the budget is exceeded. Runs once, from `createTask`, so that
@@ -130,7 +157,8 @@ protected:
         MergeTreeReadTask::Readers task_readers,
         MarkRanges ranges,
         std::vector<MarkRanges> patches_ranges,
-        RuntimeDataflowStatisticsCacheUpdaterPtr updater = nullptr) const;
+        RuntimeDataflowStatisticsCacheUpdaterPtr updater = nullptr,
+        MergeTreeReadTask::ReadersFactory readers_factory = {}) const;
 
     /// `read_request_map` narrows the part's map, e.g. to the assignment of parallel replicas.
     MergeTreeReadTaskPtr createTask(

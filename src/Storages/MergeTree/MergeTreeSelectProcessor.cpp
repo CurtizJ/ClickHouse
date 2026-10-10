@@ -137,11 +137,13 @@ MergeTreeIndexBuildContext::MergeTreeIndexBuildContext(
     RangesByIndex read_ranges_,
     ProjectionRangesByIndex projection_read_ranges_,
     MergeTreeIndexReadResultPoolPtr index_reader_pool_,
-    PartRemainingMarks part_remaining_marks_)
+    PartRemainingMarks part_remaining_marks_,
+    StorageMetadataPtr metadata_snapshot_)
     : read_ranges(std::move(read_ranges_))
     , projection_read_ranges(std::move(projection_read_ranges_))
     , index_reader_pool(std::move(index_reader_pool_))
     , part_remaining_marks(std::move(part_remaining_marks_))
+    , metadata_snapshot(std::move(metadata_snapshot_))
 {
     chassert(index_reader_pool);
 }
@@ -155,10 +157,9 @@ MergeTreeIndexReadResultPtr MergeTreeIndexBuildContext::getPreparedIndexReadResu
     const auto & projection_parts_ranges = it != projection_read_ranges.end() ? it->second : empty_parts_ranges;
     auto & remaining_marks = part_remaining_marks.at(part_index).value;
 
-    auto storage_snapshot = task.getMainReader().getStorageSnapshot();
     const auto & all_updated_columns = task.getInfo().alter_conversions->getAllUpdatedColumns();
     auto index_read_result = index_reader_pool->getOrBuildIndexReadResult(
-        part_index, task.getInfo().data_part_info, skip_input, projection_parts_ranges, storage_snapshot->metadata, all_updated_columns);
+        part_index, task.getInfo().data_part_info, skip_input, projection_parts_ranges, metadata_snapshot, all_updated_columns);
 
     /// Atomically subtract the number of marks this task will read from the total remaining marks. If the
     /// remaining marks after subtraction reach zero, this is the last task for the part, and we can trigger
