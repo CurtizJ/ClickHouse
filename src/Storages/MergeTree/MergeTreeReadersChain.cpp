@@ -534,8 +534,7 @@ void MergeTreeReadersChain::evaluateMissingDefaults(
     for (const auto & col : result.additional_columns)
         additional_columns.insert(col);
 
-    addDummyColumnWithRowCount(additional_columns, result.num_rows);
-    range_reader.getReader()->evaluateMissingDefaults(additional_columns, columns);
+    range_reader.getReader()->evaluateMissingDefaults(additional_columns, columns, result.num_rows);
 }
 
 void MergeTreeReadersChain::executePrewhereActions(MergeTreeRangeReader & reader, ReadResult & result, const Block & previous_header, bool is_last_reader)

@@ -9,6 +9,8 @@ namespace DB
 {
 
 class ColumnsCache;
+class ExpressionActions;
+using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
 
 using VirtualFields = std::unordered_map<String, Field>;
 using ValueSizeMap = std::map<std::string, double>;
@@ -71,7 +73,7 @@ public:
         Columns & res_columns, bool & should_evaluate_missing_defaults, size_t num_rows,
         const NameSet & previous_step_columns = {}) const;
     /// Evaluate defaulted columns if necessary.
-    void evaluateMissingDefaults(Block additional_columns, Columns & res_columns) const;
+    void evaluateMissingDefaults(Block additional_columns, Columns & res_columns, size_t num_rows) const;
 
     /// If part metadata is not equal to storage metadata,
     /// then try to perform conversions of columns.
@@ -185,6 +187,10 @@ protected:
 
     /// Per-reader read hints (see setReadHints/getReadHints above).
     RangesInDataPartReadHints read_hints;
+
+    /// Expressions of `evaluateMissingDefaults` by the structure of their input, which is the same for most blocks.
+    /// A null expression means that nothing has to be evaluated.
+    mutable std::unordered_map<String, ExpressionActionsPtr> missing_defaults_actions;
 
     /// Column, serialization and level (of nesting) of column
     /// which is used for reading offsets for missing nested column.

@@ -364,7 +364,7 @@ ColumnsDescription IMergeTreeReader::buildCombinedColumnsForDefaultExpressions()
     return combined_columns;
 }
 
-void IMergeTreeReader::evaluateMissingDefaults(Block additional_columns, Columns & res_columns) const
+void IMergeTreeReader::evaluateMissingDefaults(Block additional_columns, Columns & res_columns, size_t num_rows) const
 {
     try
     {
@@ -401,22 +401,56 @@ void IMergeTreeReader::evaluateMissingDefaults(Block additional_columns, Columns
             }
         }
 
-        auto context_copy = createContextForDefaultExpressions();
-        auto combined_columns = buildCombinedColumnsForDefaultExpressions();
+        /// The analysis of the default expressions needs at least one column with data to know the number of rows.
+        addDummyColumnWithRowCount(additional_columns, num_rows);
 
-        auto dag = DB::evaluateMissingDefaults(
-            additional_columns,
-            full_requested_columns,
-            combined_columns,
-            context_copy);
+        /// The expression depends on the names and types of the input and on its constant columns, which are folded,
+        /// so the inputs with constants (only the dummy column above, as a rule) are not cached.
+        const bool has_constants = std::ranges::any_of(additional_columns, [](const auto & column) { return column.column && isColumnConst(*column.column); });
 
-        if (dag)
+        String structure;
+        if (!has_constants)
         {
-            dag->addMaterializingOutputActions(/*materialize_sparse=*/ false);
-            auto actions = std::make_shared<ExpressionActions>(
-                std::move(*dag),
-                ExpressionActionsSettings(context_copy->getSettingsRef()));
-            actions->execute(additional_columns);
+            for (const auto & column : additional_columns)
+                structure += column.name + ' ' + column.type->getName() + '\n';
+
+            structure += '|';
+            for (const auto & column : full_requested_columns)
+                structure += column.name + ' ' + column.type->getName() + '\n';
+        }
+
+        ExpressionActionsPtr actions;
+        if (auto cached = missing_defaults_actions.find(structure); !has_constants && cached != missing_defaults_actions.end())
+        {
+            actions = cached->second;
+        }
+        else
+        {
+            auto context_copy = createContextForDefaultExpressions();
+            auto combined_columns = buildCombinedColumnsForDefaultExpressions();
+
+            auto dag = DB::evaluateMissingDefaults(
+                additional_columns,
+                full_requested_columns,
+                combined_columns,
+                context_copy);
+
+            if (dag)
+            {
+                dag->addMaterializingOutputActions(/*materialize_sparse=*/ false);
+                actions = std::make_shared<ExpressionActions>(
+                    std::move(*dag),
+                    ExpressionActionsSettings(context_copy->getSettingsRef()));
+            }
+
+            if (!has_constants)
+                missing_defaults_actions.emplace(std::move(structure), actions);
+        }
+
+        if (actions)
+        {
+            size_t rows = num_rows;
+            actions->execute(additional_columns, rows);
         }
         /// Move columns from block.
         it = original_requested_columns.begin();

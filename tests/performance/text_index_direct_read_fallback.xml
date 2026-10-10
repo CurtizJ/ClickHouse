@@ -32,6 +32,8 @@
   <query>SELECT s FROM t_bypass PREWHERE s LIKE '%ab12%' AND k = 7 FORMAT Null</query>
   <query>SELECT count() FROM t_bypass WHERE s LIKE '%ab12%' AND k = 7</query>
   <query>SELECT s FROM t_bypass WHERE s LIKE '%ab12%' AND k = 7 FORMAT Null</query>
+  <!-- The pattern is evaluated by the first reader of the chain. -->
+  <query>SELECT count() FROM t_bypass WHERE s LIKE '%ab12%'</query>
 
   <!-- Controls: the index serves the condition in every part. -->
   <query>SELECT count() FROM t_full PREWHERE hasToken(s, 'tok123') AND k = 7</query>
