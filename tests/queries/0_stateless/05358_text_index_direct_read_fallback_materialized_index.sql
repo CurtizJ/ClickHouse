@@ -40,7 +40,8 @@ SELECT count() FROM tab PREWHERE hasPhrase(s, 'payload word') AND k = 1 SETTINGS
 SELECT count() FROM tab PREWHERE hasPhrase(s, 'payload word') AND k = 1 SETTINGS use_skip_indexes = 0;
 
 SELECT 'select the indexed column';
-SELECT sum(length(s)) FROM tab PREWHERE s LIKE '%token4%' AND k = 1 SETTINGS use_skip_indexes_on_data_read = 0;
+SELECT sum(length(s)) FROM tab PREWHERE s LIKE '%token4%' AND k = 1 SETTINGS use_skip_indexes_on_data_read = 0, log_comment = '05358_select_0';
+SELECT sum(length(s)) FROM tab PREWHERE s LIKE '%token4%' AND k = 1 SETTINGS use_skip_indexes_on_data_read = 1, log_comment = '05358_select_1';
 SELECT sum(length(s)) FROM tab PREWHERE s LIKE '%token4%' AND k = 1 SETTINGS use_skip_indexes = 0;
 
 SYSTEM FLUSH LOGS query_log;
@@ -55,6 +56,12 @@ SELECT
     ProfileEvents['RowsReadByPrewhereReaders'] < if(endsWith(log_comment, '_0'), 1.5, 2.5) * ProfileEvents['SelectedRows']
 FROM system.query_log
 WHERE current_database = currentDatabase() AND event_date >= yesterday() AND type = 'QueryFinish' AND log_comment IN ('05358_like_0', '05358_like_1', '05358_phrase_0', '05358_phrase_1')
+ORDER BY log_comment;
+
+-- `s` is read once, by the step that evaluates the pattern, so the main reader has nothing left to read.
+SELECT log_comment, ProfileEvents['TextIndexDirectReadFallbackColumns'], ProfileEvents['RowsReadByMainReader']
+FROM system.query_log
+WHERE current_database = currentDatabase() AND event_date >= yesterday() AND type = 'QueryFinish' AND log_comment IN ('05358_select_0', '05358_select_1')
 ORDER BY log_comment;
 
 DROP TABLE tab;

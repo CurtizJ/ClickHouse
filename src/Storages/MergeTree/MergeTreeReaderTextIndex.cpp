@@ -11,8 +11,6 @@
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
 #include <Interpreters/Context.h>
-#include <Interpreters/ExpressionActions.h>
-#include <Interpreters/inplaceBlockConversions.h>
 #include <Common/logger_useful.h>
 #include <Common/Stopwatch.h>
 #include <Columns/ColumnsNumber.h>
@@ -31,7 +29,6 @@ namespace ProfileEvents
     extern const Event TextIndexPositionsBytesRead;
     extern const Event TextIndexPhraseCandidates;
     extern const Event TextIndexPhraseSearches;
-    extern const Event TextIndexPhraseFallbacks;
 }
 
 namespace DB
@@ -116,8 +113,6 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
 
     if (index_granule_)
         setIndexGranule(std::move(index_granule_));
-
-    initializeFallbackReader(main_reader_);
 }
 
 void MergeTreeReaderTextIndex::setIndexGranule(MergeTreeIndexGranulePtr index_granule)
@@ -138,109 +133,9 @@ void MergeTreeReaderTextIndex::setIndexGranule(MergeTreeIndexGranulePtr index_gr
     postings_serialization = PostingsSerialization(std::move(postings_codec), granule->getSerializationVersion());
 }
 
-void MergeTreeReaderTextIndex::initializeFallbackReader(const IMergeTreeReader * main_reader)
-{
-    /// Check if any virtual column may need a fallback path:
-    /// - Pattern queries (LIKE): fallback when dictionary scan is abandoned.
-    /// - Phrase queries (hasPhrase with Exact mode): fallback when estimated cardinality is too high
-    ///   and reading position data would be slower than evaluating directly.
-    auto needs_fallback_for_query = [](const auto & search_query)
-    {
-        return search_query && TextIndexAnalyzer::canFallBackToPredicate(*search_query);
-    };
-
-    if (std::ranges::none_of(search_queries, needs_fallback_for_query))
-        return;
-
-    /// Build a fallback evaluation path. Compile each virtual column's default expression
-    /// (the original search predicate) and determine the required physical columns from it.
-    /// Used when:
-    /// - The dictionary scan is cut short (LIKE pattern queries).
-    /// - Phrase search cardinality is too high (cheaper to evaluate hasPhrase on physical data).
-    auto context_copy = createContextForDefaultExpressions();
-    auto combined_columns = buildCombinedColumnsForDefaultExpressions();
-
-    /// Build a header block containing all physical columns (column type only, no data).
-    /// evaluateMissingDefaults passes this to createExpressionsAnalyzer, which creates
-    /// a StorageDummy from it — StorageDummy requires at least one column, so the header
-    /// must be non-empty.
-    Block physical_header;
-    for (const auto & phys_col : storage_snapshot->metadata->getColumns().getAllPhysical())
-        physical_header.insert({phys_col.type->createColumn(), phys_col.type, phys_col.name});
-
-    NameSet fallback_columns_set;
-    for (size_t i = 0; i < columns_to_read.size(); ++i)
-    {
-        const auto & column = columns_to_read[i];
-        const auto & search_query = search_queries[i];
-        if (!needs_fallback_for_query(search_query))
-            continue;
-
-        /// Compile the virtual column's default expression (the original search predicate).
-        /// We pass a header with all physical columns so that createExpressionsAnalyzer
-        /// can build a non-empty StorageDummy (it requires at least one column).
-        NamesAndTypesList need_col{{column.name, column.type}};
-        auto dag = DB::evaluateMissingDefaults(physical_header, need_col, combined_columns, context_copy);
-        if (!dag)
-            continue;
-
-        dag->addMaterializingOutputActions(/*materialize_sparse=*/ false);
-        auto actions = std::make_shared<ExpressionActions>(
-            std::move(*dag), ExpressionActionsSettings(context_copy->getSettingsRef()));
-
-        /// Collect the physical columns this expression requires.
-        for (const auto & req : actions->getRequiredColumnsWithTypes())
-        {
-            if (fallback_columns_set.insert(req.name).second)
-                fallback_columns_list.push_back(req);
-        }
-
-        fallback_expressions.emplace(column.name, std::move(actions));
-    }
-
-    if (!fallback_columns_list.empty())
-    {
-        /// The physical columns of the fallback expression are discovered here, long after
-        /// `MergeTreeReadPoolBase` sized the query's columns cache write estimate over the
-        /// columns of the read task. Writing them to the cache would therefore write bytes no
-        /// budget accounted for, so the fallback reader only reads from the cache (entries an
-        /// ordinary reader of the same columns put there) and never writes to it.
-        auto fallback_settings = main_reader->settings;
-        fallback_settings.enable_columns_cache_writes = false;
-
-        fallback_reader = createMergeTreeReader(
-            main_reader->data_part_info_for_read,
-            fallback_columns_list,
-            main_reader->storage_snapshot,
-            main_reader->storage_settings,
-            main_reader->all_mark_ranges,
-            /*virtual_fields=*/{},
-            main_reader->uncompressed_cache,
-            main_reader->columns_cache,
-            main_reader->mark_cache,
-            /*deserialization_prefixes_cache=*/nullptr,
-            fallback_settings,
-            /*avg_value_size_hints=*/{},
-            /*profile_callback=*/{});
-    }
-}
-
-void MergeTreeReaderTextIndex::updateReadRequestMap(MarkRangesPtr request_map)
-{
-    IMergeTreeReader::updateReadRequestMap(request_map);
-    /// Only the fallback reader reads the part's data. The index streams count index granules or tokens, not data marks.
-    if (fallback_reader)
-        fallback_reader->updateReadRequestMap(std::move(request_map));
-}
-
 void MergeTreeReaderTextIndex::updateAllMarkRanges(const MarkRanges & ranges)
 {
     IMergeTreeReader::updateAllMarkRanges(ranges);
-
-    if (fallback_reader)
-    {
-        fallback_reader->updateAllMarkRanges(ranges);
-    }
 
     if (!ranges.empty())
     {
@@ -273,7 +168,6 @@ void MergeTreeReaderTextIndex::readGranule()
 void MergeTreeReaderTextIndex::classifyVirtualColumns()
 {
     is_always_true.assign(columns_to_read.size(), false);
-    use_fallback.assign(columns_to_read.size(), false);
 
     const auto & analyzer = granule->getAnalyzer();
     /// Cardinalities (granule) and the number of rows (part) share scale: a text index has whole-part granularity.
@@ -295,16 +189,9 @@ void MergeTreeReaderTextIndex::classifyVirtualColumns()
                 is_always_true[i] = true;
                 break;
             case TextIndexColumnSource::Predicate:
-                if (!fallback_reader || !fallback_expressions.contains(columns_to_read[i].name))
-                {
-                    throw Exception(ErrorCodes::LOGICAL_ERROR,
-                        "The fallback reader or expression for virtual column '{}' is not initialized", columns_to_read[i].name);
-                }
-
-                use_fallback[i] = true;
-                if (search_query.getSearchMode() == TextSearchMode::Phrase)
-                    ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
-                break;
+                /// The read pool evaluates such columns from their default expressions with normal readers.
+                throw Exception(ErrorCodes::LOGICAL_ERROR,
+                    "Virtual column '{}' must be evaluated from its predicate, not by the text index reader", columns_to_read[i].name);
         }
     }
 }
@@ -348,7 +235,7 @@ void MergeTreeReaderTextIndex::initializePositionsStream()
 
 size_t MergeTreeReaderTextIndex::readRows(
     size_t from_mark,
-    size_t current_range_last_mark,
+    size_t /* current_range_last_mark */,
     bool continue_reading,
     size_t max_rows_to_read,
     MutableColumns & res_columns)
@@ -407,22 +294,6 @@ size_t MergeTreeReaderTextIndex::readRows(
         initializePositionsStream();
     }
 
-    const bool any_use_fallback = !use_fallback.empty() && std::ranges::any_of(use_fallback, [](bool b) { return b; });
-
-    /// If any column needs the fallback evaluation, read the physical columns upfront.
-    /// We pass the same mark/continue_reading/offset arguments so the fallback reader stays
-    /// in sync with the text-index reader across multiple readRows calls.
-    Block fallback_block;
-    if (any_use_fallback && fallback_reader && max_rows_to_read > 0)
-    {
-        MutableColumns fallback_cols(fallback_columns_list.size());
-        fallback_reader->readRows(from_mark, current_range_last_mark, continue_reading, max_rows_to_read, fallback_cols);
-        size_t col_idx = 0;
-        for (const auto & col_name_type : fallback_columns_list)
-            fallback_block.insert({std::move(fallback_cols[col_idx++]), col_name_type.type, col_name_type.name});
-    }
-
-    size_t fallback_offset = 0;
     std::optional<size_t> last_processed_mark;
 
     while (read_rows < max_rows_to_read && from_mark < total_marks)
@@ -457,15 +328,6 @@ size_t MergeTreeReaderTextIndex::readRows(
                 auto & column_data = assert_cast<ColumnUInt8 &>(column_mutable).getData();
                 column_data.resize_fill(column_mutable.size() + rows_to_read, 1);
             }
-            else if (use_fallback[i] && !fallback_block.empty())
-            {
-                fillColumnFallback(
-                    column_mutable,
-                    columns_to_read[i].name,
-                    fallback_block,
-                    fallback_offset,
-                    rows_to_read);
-            }
             else if (const auto & search_query = search_queries[i];
                      search_query && search_query->getSearchMode() == TextSearchMode::Phrase)
             {
@@ -484,7 +346,6 @@ size_t MergeTreeReaderTextIndex::readRows(
 
         from_row += rows_to_read;
         read_rows += rows_to_read;
-        fallback_offset += rows_to_read;
         last_processed_mark = from_mark;
 
         if (from_row == mark_end_row)
@@ -567,7 +428,7 @@ std::vector<PostingList> MergeTreeReaderTextIndex::buildPostingsForMark(size_t m
 
     for (size_t i = 0; i < columns_to_read.size(); ++i)
     {
-        if (is_always_true[i] || use_fallback[i])
+        if (is_always_true[i])
             continue;
 
         const auto & search_query = search_queries[i];
@@ -1078,37 +939,6 @@ void MergeTreeReaderTextIndex::applyPostingsPhrase(
         size_t relative_row_number = *it - row_offset;
         column_data[column_offset + relative_row_number] = 1;
     }
-}
-
-void MergeTreeReaderTextIndex::fillColumnFallback(
-    IColumn & column,
-    const String & column_name,
-    const Block & physical_block,
-    size_t offset,
-    size_t num_rows) const
-{
-    auto it = fallback_expressions.find(column_name);
-    chassert(it != fallback_expressions.end());
-
-    /// Build a block slice for this granule: cut [offset, offset + num_rows) from each physical column.
-    Block slice;
-    for (const auto & col : physical_block)
-        slice.insert({col.column->cut(offset, num_rows), col.type, col.name});
-
-    /// Execute the virtual column's default expression (the original search predicate) on the slice.
-    /// After execution the block contains both the physical columns and the computed virtual column.
-    it->second->execute(slice);
-
-    /// The predicate result can be sparse/const (inputs may be sparse), so make it full before the dense cast.
-    const auto & result_col = slice.getByName(column_name);
-    auto result_full = result_col.column->convertToFullIfWrapped();
-    const auto & result_data = assert_cast<const ColumnUInt8 &>(*result_full).getData();
-    chassert(result_data.size() == num_rows);
-
-    auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
-    const size_t old_size = column_data.size();
-    column_data.resize(old_size + num_rows);
-    memcpy(&column_data[old_size], result_data.data(), num_rows);
 }
 
 void MergeTreeReaderTextIndex::setPrecomputedGranule(const IndexGranulesMap & granules)

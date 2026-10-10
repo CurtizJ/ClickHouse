@@ -10,7 +10,7 @@ SET enable_analyzer = 1;
 SET max_threads = 1;
 
 -- Force the direct read from the text index; CI may inject these as false, in
--- which case the query would just scan `s` and never reach the fallback reader.
+-- which case the query would just scan `s` and never evaluate the pattern as a fallback.
 SET use_skip_indexes = 1;
 SET use_skip_indexes_on_data_read = 1;
 SET query_plan_direct_read_from_text_index = 1;

@@ -9,7 +9,10 @@ phrase
 select the indexed column
 219
 219
+219
 05358_like_0	1	0	1
 05358_like_1	1	0	1
 05358_phrase_0	1	1	1
 05358_phrase_1	1	1	1
+05358_select_0	1	0
+05358_select_1	1	0

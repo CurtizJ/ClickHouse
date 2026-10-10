@@ -123,7 +123,7 @@ An ASCII needle still reaches the scan, and a case-sensitive non-ASCII pattern i
 ilike ascii	1
 ilike non-ascii	0
 An arbitrary pattern on a nullable value is left to the original condition
-An exact read of a NULL value raises in the fallback reader, so the arbitrary-pattern path needs a non-nullable value
+An exact read of a NULL value raises when the pattern is evaluated as a fallback, so the arbitrary-pattern path needs a non-nullable value
 23228
 23228
 23228

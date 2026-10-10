@@ -8,7 +8,6 @@
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
 #include <Storages/MergeTree/TextIndexBlockedPositionsCodec.h>
 #include <Storages/MergeTree/TextIndexCache.h>
-#include <Interpreters/ExpressionActions.h>
 
 #include <absl/container/flat_hash_map.h>
 #include <roaring/roaring.hh>
@@ -47,15 +46,13 @@ public:
     /// by absolute row number, so a read may start or stop inside a mark.
     bool canReadIncompleteGranules() const override { return can_read_incomplete_granules; }
     void updateAllMarkRanges(const MarkRanges & ranges) override;
-    void updateReadRequestMap(MarkRangesPtr request_map) override;
 
-    /// Sets a pre-computed granule from the skip index reader (Path 2: use_skip_indexes_on_data_read = 1).
-    /// Looks up its own index name in the map.
+    /// Sets a pre-computed granule: from the skip index reader (Path 2: use_skip_indexes_on_data_read = 1),
+    /// or read to resolve the layout of the part. Looks up its own index name in the map.
     void setPrecomputedGranule(const IndexGranulesMap & granules);
 
 private:
     void setIndexGranule(MergeTreeIndexGranulePtr index_granule);
-    void initializeFallbackReader(const IMergeTreeReader * main_reader);
     void createEmptyColumns(MutableColumns & columns, size_t max_rows_to_read) const;
     /// Opens the postings stream of one token, with the buffer sized to the token's largest segment.
     std::unique_ptr<MergeTreeReaderStream> makePostingsStream(const TokenPostingsInfo & token_info) const;
@@ -95,16 +92,6 @@ private:
     /// Also creates the cursors of the column in `lazy_cursors`.
     ResolvedSearch resolveSearch(size_t column_idx);
 
-    /// Fills a virtual column for an abandoned pattern query by evaluating the virtual column's
-    /// default expression (the original search predicate) on the physical columns.
-    /// Used when the dictionary scan was cut short and pattern tokens are incomplete.
-    void fillColumnFallback(
-        IColumn & column,
-        const String & column_name,
-        const Block & physical_block,
-        size_t offset,
-        size_t num_rows) const;
-
     PostingListCursorPtr makeLazyCursor(std::string_view token, const TokenPostingsInfo & token_info);
 
     /// Fills a phrase virtual column from positional data (.pos), computing matching documents
@@ -126,17 +113,6 @@ private:
     TextIndexGranulePtr granule;
     PostingsBlocksMap postings_blocks;
 
-    /// Fallback reader for the physical columns required by the fallback expressions.
-    /// Used when the pattern dictionary scan is cut short.
-    MergeTreeReaderPtr fallback_reader;
-    /// Physical columns that fallback_reader reads (union across all fallback expressions).
-    NamesAndTypesList fallback_columns_list;
-    /// Per-virtual-column compiled expression of the original search predicate.
-    /// Executed on the physical columns when use_fallback[i] is true.
-    absl::flat_hash_map<String, ExpressionActionsPtr> fallback_expressions;
-    /// Per-virtual-column flag: true if this column's query was abandoned during the scan
-    /// and the predicate must be evaluated directly via fallback_expressions.
-    std::vector<bool> use_fallback;
     /// A separate stream is created for each token to read postings blocks continuously without additional seeks.
     absl::flat_hash_map<std::string_view, std::unique_ptr<MergeTreeReaderStream>> postings_streams;
 
