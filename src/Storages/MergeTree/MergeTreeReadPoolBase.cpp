@@ -14,11 +14,13 @@
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
+#include <Interpreters/ExpressionActions.h>
 #include <Access/ContextAccess.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/MergeTree/PatchParts/MergeTreePatchReader.h>
 
 #include <span>
+#include <fmt/ranges.h>
 
 namespace ProfileEvents
 {
@@ -574,6 +576,45 @@ static bool isPendingIndex(bool is_materialized, const IndexReadTask & index_tas
     return is_materialized && !index_granules.contains(index_task.index.index->index.name) && hasColumnThatCanFallBack(index_task);
 }
 
+/// One line per part that evaluates some virtual columns from their predicates, with the conditions on them.
+static void logReadTaskLayout(
+    const IMergeTreeDataPartInfoForReader & part_info,
+    const Names & columns_not_read_from_index,
+    const NameSet & deferred_columns,
+    const PrewhereExprInfo & prewhere_steps)
+{
+    static const auto log = getLogger("MergeTreeReadPoolBase");
+
+    Names deferred_conditions;
+    for (const auto & step : prewhere_steps.steps)
+    {
+        if (!step->actions)
+            continue;
+
+        const auto & dag = step->actions->getActionsDAG();
+        const auto required_columns = dag.getRequiredColumnsNames();
+        if (std::ranges::none_of(required_columns, [&](const auto & name) { return deferred_columns.contains(name); }))
+            continue;
+
+        /// The filter of the last condition step is an alias named after the whole PREWHERE condition,
+        /// of the boolean condition `and(condition, true)` of the step.
+        const auto * filter = &dag.findInOutputs(step->filter_column_name);
+        const auto * node = filter;
+        while (node->type == ActionsDAG::ActionType::ALIAS)
+            node = node->children.front();
+
+        auto non_constant_children = node->children | std::views::filter([](const auto * child) { return child->type != ActionsDAG::ActionType::COLUMN; });
+        const bool is_boolean_condition = node->type == ActionsDAG::ActionType::FUNCTION && node->function_base->getName() == "and"
+            && std::ranges::distance(non_constant_children) == 1;
+
+        deferred_conditions.push_back(is_boolean_condition ? non_constant_children.front()->result_name : filter->result_name);
+    }
+
+    LOG_TRACE(log, "Part {} does not read virtual columns {} from the indexes, conditions on them evaluated after the others: {}",
+        part_info.getPartName(), fmt::join(columns_not_read_from_index, ", "), fmt::join(deferred_conditions, ", "));
+    LOG_TEST(log, "PREWHERE steps of part {}:\n{}", part_info.getPartName(), prewhere_steps.dump());
+}
+
 static bool isMaterialized(const IndexReadTask & index_task, const IMergeTreeDataPartInfoForReader & part_info)
 {
     const auto & index = index_task.index.index;
@@ -603,7 +644,7 @@ MergeTreeReadTaskLayout MergeTreeReadPoolBase::buildReadTaskLayout(
     /// The columns evaluated from the original predicate, which reads the indexed column.
     NameSet deferred_columns;
 
-    const bool count_fallbacks = pending_index_columns == PendingIndexColumns::ReadGranule;
+    const bool report_fallbacks = pending_index_columns == PendingIndexColumns::ReadGranule;
 
     for (const auto & [index_name, index_task] : index_read_tasks)
     {
@@ -642,7 +683,7 @@ MergeTreeReadTaskLayout MergeTreeReadPoolBase::buildReadTaskLayout(
             if (column.search_query->getDirectReadMode() == TextIndexDirectReadMode::Exact)
                 deferred_columns.insert(column.name);
 
-            if (count_fallbacks && is_materialized && column.search_query->getSearchMode() == TextSearchMode::Phrase)
+            if (report_fallbacks && is_materialized && column.search_query->getSearchMode() == TextSearchMode::Phrase)
                 ProfileEvents::increment(ProfileEvents::TextIndexPhraseFallbacks);
         }
 
@@ -650,10 +691,13 @@ MergeTreeReadTaskLayout MergeTreeReadPoolBase::buildReadTaskLayout(
             layout.index_read_tasks.emplace(index_name, std::move(part_index_task));
     }
 
-    if (count_fallbacks)
-        ProfileEvents::increment(ProfileEvents::TextIndexDirectReadFallbackColumns, deferred_columns.size());
-
     auto prewhere_steps = getPrewhereSteps(columns_not_read_from_index, layout.index_read_tasks, deferred_columns);
+
+    if (report_fallbacks && !columns_not_read_from_index.empty())
+    {
+        ProfileEvents::increment(ProfileEvents::TextIndexDirectReadFallbackColumns, deferred_columns.size());
+        logReadTaskLayout(part_info, columns_not_read_from_index, deferred_columns, *prewhere_steps);
+    }
 
     layout.task_columns = getReadTaskColumns(
         part_info,

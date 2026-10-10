@@ -114,7 +114,8 @@ protected:
 
     /// Classifies the virtual columns of the part by `index_granules` and builds its index read tasks, PREWHERE steps
     /// and task columns. The granules read for `PendingIndexColumns::ReadGranule` are added to `index_granules`.
-    /// The profile events of the fallbacks are counted unless the layout is an estimate or reads no rows.
+    /// The fallbacks of a final layout are counted in profile events and logged: when the pool is built for a static
+    /// layout, whatever the pruning at read time, and when it is resolved with selected granules for a pending one.
     MergeTreeReadTaskLayout buildReadTaskLayout(
         const MergeTreeReadTaskInfo & info, IndexGranulesMap & index_granules, PendingIndexColumns pending_index_columns) const;
 

@@ -1,0 +1,43 @@
+<test>
+  <settings>
+      <query_plan_direct_read_from_text_index>1</query_plan_direct_read_from_text_index>
+      <use_query_condition_cache>0</use_query_condition_cache>
+      <use_text_index_like_evaluation_by_dictionary_scan>1</use_text_index_like_evaluation_by_dictionary_scan>
+      <!-- Abandon the dictionary scan of every pattern, so that the pattern is evaluated on the column. -->
+      <text_index_like_max_postings_to_read>0</text_index_like_max_postings_to_read>
+      <use_text_index_pattern_bypass_cache>0</use_text_index_pattern_bypass_cache>
+  </settings>
+
+  <!-- `k = 7` selects 1% of the granules. The text index is materialized only in the second half of the parts of `t_partial`. -->
+  <create_query>CREATE TABLE t_partial (id UInt64, k UInt8, s String) ENGINE = MergeTree ORDER BY id SETTINGS max_bytes_to_merge_at_max_space_in_pool = 1</create_query>
+  <create_query>CREATE TABLE t_bypass (id UInt64, k UInt8, s String, INDEX idx s TYPE text(tokenizer = array)) ENGINE = MergeTree ORDER BY id</create_query>
+  <create_query>CREATE TABLE t_full (id UInt64, k UInt8, s String, INDEX idx s TYPE text(tokenizer = splitByNonAlpha)) ENGINE = MergeTree ORDER BY id</create_query>
+
+  <fill_query>INSERT INTO t_partial SELECT number, if(intDiv(number, 8192) % 100 = 0, 7, 1), concat('tok', toString(number % 1000), ' word', toString(number % 777), ' ', repeat('x', 80)) FROM numbers(5000000)</fill_query>
+  <fill_query>ALTER TABLE t_partial ADD INDEX idx s TYPE text(tokenizer = splitByNonAlpha)</fill_query>
+  <fill_query>INSERT INTO t_partial SELECT number + 5000000, if(intDiv(number, 8192) % 100 = 0, 7, 1), concat('tok', toString(number % 1000), ' word', toString(number % 777), ' ', repeat('x', 80)) FROM numbers(5000000)</fill_query>
+  <fill_query>INSERT INTO t_bypass SELECT number, if(intDiv(number, 8192) % 100 = 0, 7, 1), concat('ab', toString(number % 1000), repeat('y', 90)) FROM numbers(10000000)</fill_query>
+  <fill_query>INSERT INTO t_full SELECT number, if(intDiv(number, 8192) % 100 = 0, 7, 1), concat('tok', toString(number % 1000), ' word', toString(number % 777), ' ', repeat('x', 80)) FROM numbers(10000000)</fill_query>
+  <fill_query>OPTIMIZE TABLE t_bypass FINAL</fill_query>
+  <fill_query>OPTIMIZE TABLE t_full FINAL</fill_query>
+
+  <!-- The parts without the index evaluate the text condition from `s`, after `k = 7`. -->
+  <query>SELECT count() FROM t_partial PREWHERE hasToken(s, 'tok123') AND k = 7</query>
+  <query>SELECT s FROM t_partial PREWHERE hasToken(s, 'tok123') AND k = 7 FORMAT Null</query>
+  <query>SELECT count() FROM t_partial WHERE hasToken(s, 'tok123') AND k = 7</query>
+  <query>SELECT s FROM t_partial WHERE hasToken(s, 'tok123') AND k = 7 FORMAT Null</query>
+
+  <!-- The abandoned dictionary scan evaluates the pattern from `s`, after `k = 7`, and `s` is read once. -->
+  <query>SELECT count() FROM t_bypass PREWHERE s LIKE '%ab12%' AND k = 7</query>
+  <query>SELECT s FROM t_bypass PREWHERE s LIKE '%ab12%' AND k = 7 FORMAT Null</query>
+  <query>SELECT count() FROM t_bypass WHERE s LIKE '%ab12%' AND k = 7</query>
+  <query>SELECT s FROM t_bypass WHERE s LIKE '%ab12%' AND k = 7 FORMAT Null</query>
+
+  <!-- Controls: the index serves the condition in every part. -->
+  <query>SELECT count() FROM t_full PREWHERE hasToken(s, 'tok123') AND k = 7</query>
+  <query>SELECT s FROM t_full WHERE hasToken(s, 'tok123') AND k = 7 FORMAT Null</query>
+
+  <drop_query>DROP TABLE IF EXISTS t_partial</drop_query>
+  <drop_query>DROP TABLE IF EXISTS t_bypass</drop_query>
+  <drop_query>DROP TABLE IF EXISTS t_full</drop_query>
+</test>
