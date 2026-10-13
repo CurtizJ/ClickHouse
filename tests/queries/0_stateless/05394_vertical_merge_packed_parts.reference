@@ -1,0 +1,6 @@
+merge_algorithm	Vertical
+parts	1	Wide	Packed
+same_data	1
+skip_index	1
+1
+same_data_after_attach	1
