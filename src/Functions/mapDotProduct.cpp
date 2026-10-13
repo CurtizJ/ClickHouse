@@ -46,7 +46,6 @@ namespace
   * repeated key are summed up, so the result does not depend on which of the maps is put into the hash table.
   */
 
-/// Reads the keys of a String or FixedString column.
 template <typename ColumnType>
 struct StringKeys
 {
@@ -58,8 +57,6 @@ struct StringKeys
     const ColumnType & column;
 };
 
-/// Reads the keys of an integer column as their 64-bit patterns. Both arguments are converted
-/// to the same integer type beforehand, so equal keys have equal patterns.
 template <typename T>
 struct IntegerKeys
 {
@@ -71,26 +68,11 @@ struct IntegerKeys
     const typename ColumnVector<T>::Container & data;
 };
 
-template <typename Key, typename Mapped>
-struct KeysHashTable;
-
-template <typename Mapped>
-struct KeysHashTable<std::string_view, Mapped>
-{
-    using Hash = DefaultHash<std::string_view>;
-    using Type = ClearableHashMap<std::string_view, Mapped, Hash, ClearableHashMapCellWithSavedHash<std::string_view, Mapped, Hash>>;
-};
-
-template <typename Mapped>
-struct KeysHashTable<UInt64, Mapped>
-{
-    using Type = ClearableHashMap<UInt64, Mapped>;
-};
-
 /// One argument of the function unwrapped from the Map column.
 struct MapArgument
 {
-    /// The keys converted to the common key type. May be LowCardinality if the dictionary lookup path is used.
+    /// The keys converted to the common key type.
+    /// May be LowCardinality if the dictionary lookup path is used.
     ColumnPtr keys;
     /// The values converted to the result type.
     ColumnPtr values;
@@ -105,7 +87,7 @@ template <typename ResultType, typename Keys>
 struct Kernel
 {
     using Key = typename Keys::Key;
-    using Table = typename KeysHashTable<Key, ResultType>::Type;
+    using Table = ClearableHashMap<Key, ResultType>;
 
     static NO_SANITIZE_UNDEFINED void fill(Table & table, const Keys & keys, const ResultType * values, size_t begin, size_t end)
     {
@@ -128,19 +110,14 @@ struct Kernel
     template <typename IndexType>
     static NO_SANITIZE_UNDEFINED ResultType applyLowCardinality(
         const PaddedPODArray<IndexType> & indexes,
-        const PaddedPODArray<UInt8> & dictionary_found,
-        const PaddedPODArray<ResultType> & dictionary_weights,
+        const PaddedPODArray<ResultType> & weights,
         const ResultType * values,
         size_t begin,
         size_t end)
     {
         ResultType sum{};
         for (size_t i = begin; i < end; ++i)
-        {
-            size_t index = indexes[i];
-            if (dictionary_found[index])
-                sum += dictionary_weights[index] * values[i];
-        }
+            sum += weights[indexes[i]] * values[i];
         return sum;
     }
 };
@@ -436,14 +413,11 @@ private:
 
         Keys dictionary_keys(dictionary);
         size_t dictionary_size = dictionary.size();
-
-        PaddedPODArray<UInt8> dictionary_found(dictionary_size);
         PaddedPODArray<ResultType> dictionary_weights(dictionary_size);
 
         for (size_t i = 0; i < dictionary_size; ++i)
         {
             const auto * cell = table.find(dictionary_keys[i]);
-            dictionary_found[i] = cell != nullptr;
             dictionary_weights[i] = cell ? cell->getMapped() : ResultType{};
         }
 
@@ -456,7 +430,7 @@ private:
         bool valid = castTypeToEither<ColumnUInt8, ColumnUInt16, ColumnUInt32, ColumnUInt64>(&indexes, [&](const auto & indexes_column)
         {
             for (size_t row = 0; row < input_rows_count; ++row)
-                result[row] = KernelType::applyLowCardinality(indexes_column.getData(), dictionary_found, dictionary_weights, column_values, column.begin(row), column.end(row));
+                result[row] = KernelType::applyLowCardinality(indexes_column.getData(), dictionary_weights, column_values, column.begin(row), column.end(row));
             return true;
         });
 
