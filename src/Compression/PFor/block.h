@@ -11,7 +11,7 @@
 //        positions               num_exceptions bytes, the exception indices: strictly increasing, each < cnt
 //        patches                 num_exceptions values, patch_width bits each; patch = value >> base_width
 // Decode unpacks the base then ORs each exception's high bits back in; base_width minimises total bytes.
-// A full 128-value uint32 block with base_width in [1,31] uses the SIMD vertical layout, else the scalar packer (same packedBytes, so the stream is identical).
+// A full 128-value block with base_width in [1, typeBits<T> - 1] uses the SIMD vertical layout (vertical.h), else the scalar packer (same packedBytes, so the block size is identical).
 
 #include <Compression/PFor/bitpack.h>
 #include <Compression/PFor/common.h>
@@ -26,12 +26,11 @@ template <typename T>
 inline ALWAYS_INLINE void packBase(const T * r, unsigned cnt, unsigned b, uint8_t * p) noexcept
 {
 #if PFOR_HAS_VERTICAL
-    if constexpr (sizeof(T) == 4)
-        if (cnt == BLOCK && b >= 1 && b <= 31)
-        {
-            packVertical32(reinterpret_cast<const uint32_t *>(r), b, p);
-            return;
-        }
+    if (cnt == BLOCK && b >= 1 && b < typeBits<T>)
+    {
+        packVertical<T>(r, b, p);
+        return;
+    }
 #endif
     packBits<T>(r, cnt, b, p);
 }
@@ -40,12 +39,11 @@ template <typename T>
 inline ALWAYS_INLINE void unpackBase(const uint8_t * p, unsigned cnt, unsigned b, T * out) noexcept
 {
 #if PFOR_HAS_VERTICAL
-    if constexpr (sizeof(T) == 4)
-        if (cnt == BLOCK && b >= 1 && b <= 31)
-        {
-            unpackVertical32(p, b, reinterpret_cast<uint32_t *>(out));
-            return;
-        }
+    if (cnt == BLOCK && b >= 1 && b < typeBits<T>)
+    {
+        unpackVertical<T>(p, b, out);
+        return;
+    }
 #endif
     unpackBits<T>(p, cnt, b, out);
 }
@@ -55,11 +53,14 @@ inline size_t blockEncode(const T * residuals, unsigned cnt, uint8_t * out) noex
 {
     bool all_equal = true;
     for (unsigned i = 1; i < cnt; ++i)
+    {
         if (residuals[i] != residuals[0])
         {
             all_equal = false;
             break;
         }
+    }
+
     if (all_equal)
     {
         const T constant = residuals[0];

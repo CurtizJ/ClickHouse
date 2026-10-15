@@ -34,6 +34,15 @@ inline size_t decodeBlocks(const uint8_t * in, size_t count, Delta mode, T * out
     return detail::bulkDecode<T>(in, count, mode, out, end);
 }
 
+/// Decodes one block of `count` (<= BLOCK) values, the unit `decodeBlocks` iterates over, so that a caller can stream a long
+/// block stream through a small buffer. `prev` is the carry of the delta transform, threaded across the blocks by the caller.
+/// Returns bytes consumed. Pass `end` to decode fail-closed (reads bounded, returns 0 on corrupt input); nullptr keeps the unchecked fast path.
+template <typename T>
+inline size_t decodeBlock(const uint8_t * in, unsigned count, Delta mode, T * out, T & prev, const uint8_t * end = nullptr) noexcept
+{
+    return detail::blockDecode<T>(in, count, out, mode, prev, end);
+}
+
 /// Self-describing compress into a caller buffer (>= maxCompressedBytes<T>): [varint count][u8 flags][block stream].
 template <typename T>
 inline size_t compressInto(std::span<const T> in, Delta mode, uint8_t * out) noexcept
