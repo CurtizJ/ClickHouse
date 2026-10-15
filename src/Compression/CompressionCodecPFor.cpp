@@ -11,6 +11,7 @@
 #include <base/unaligned.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -191,23 +192,134 @@ UInt32 compressDataForType(const char * source, size_t count, char * dest, Mode 
         std::span<const Packed>(residuals.data(), count), PFor::Delta::none, reinterpret_cast<uint8_t *>(dest)));
 }
 
-template <typename ValueType>
-void decompressDataForType(const char * source, UInt32 source_size, char * dest, size_t count, Mode mode)
+/// A row of 16 bytes of packed residuals or values: 4 lanes for 1-, 2- and 4-byte elements, 2 lanes for 8-byte ones.
+using Row32 = UInt32 __attribute__((vector_size(16)));
+using Row64 = UInt64 __attribute__((vector_size(16)));
+
+template <typename Packed>
+using RowOf = std::conditional_t<sizeof(Packed) == sizeof(UInt32), Row32, Row64>;
+
+/// Inclusive prefix sum over the lanes: {a, a+b} or {a, a+b, a+b+c, a+b+c+d}.
+template <typename Row>
+ALWAYS_INLINE Row prefixSum(Row x)
 {
-    static_assert(is_unsigned_v<ValueType>);
+    if constexpr (sizeof(Row) / sizeof(x[0]) == 2)
+    {
+        x += __builtin_shufflevector(x, Row{}, 2, 0);
+    }
+    else
+    {
+        x += __builtin_shufflevector(x, Row{}, 4, 0, 1, 2);
+        x += __builtin_shufflevector(x, Row{}, 4, 4, 0, 1);
+    }
+    return x;
+}
+
+template <typename Row>
+ALWAYS_INLINE Row broadcastLast(Row x)
+{
+    if constexpr (sizeof(Row) / sizeof(x[0]) == 2)
+        return __builtin_shufflevector(x, x, 1, 1);
+    else
+        return __builtin_shufflevector(x, x, 3, 3, 3, 3);
+}
+
+/// Reconstructs the values of one block from its residuals and stores them. The residuals are processed in rows:
+/// a row is unzigzagged as a vector, the running delta and value are prefix sums within the row plus the carries
+/// of the previous row, which are kept as broadcast vectors so that the serial chain stays in the vector unit
+/// instead of costing ten scalar instructions per value. The sums run in the packed width and are truncated on
+/// store, which gives the same low bits as the element-width arithmetic of the encoder. The carries are plain
+/// locals of the caller: behind a pointer they would be reloaded after every store.
+template <typename ValueType, Mode mode>
+ALWAYS_INLINE void reconstructBlock(
+    const PackedType<ValueType> * residuals,
+    unsigned count,
+    char * dest,
+    RowOf<PackedType<ValueType>> & value,
+    RowOf<PackedType<ValueType>> & delta)
+{
     using Packed = PackedType<ValueType>;
+    using Row = RowOf<Packed>;
+    constexpr unsigned LANES = sizeof(Row) / sizeof(Packed);
+
+    unsigned i = 0;
+    for (; i + LANES <= count; i += LANES)
+    {
+        Row row;
+        memcpy(&row, residuals + i, sizeof(row));
+
+        if constexpr (mode != Mode::None)
+        {
+            const Row steps = (row >> 1) ^ (Row{} - (row & 1)); /// unzigzag
+
+            if constexpr (mode == Mode::Delta)
+            {
+                value = prefixSum(steps) + value;
+            }
+            else
+            {
+                delta = prefixSum(steps) + delta;
+                value = prefixSum(delta) + value;
+            }
+
+            row = value;
+            value = broadcastLast(value);
+            delta = broadcastLast(delta);
+        }
+
+        if constexpr (sizeof(ValueType) == sizeof(Packed) && std::endian::native == std::endian::little)
+        {
+            memcpy(dest + i * sizeof(ValueType), &row, sizeof(row));
+        }
+        else
+        {
+            for (unsigned lane = 0; lane < LANES; ++lane)
+                unalignedStoreLittleEndian<ValueType>(dest + (i + lane) * sizeof(ValueType), static_cast<ValueType>(row[lane]));
+        }
+    }
+
+    /// The last row of a partial block, scalar; every lane of a carry holds the same value.
+    Packed last_value = value[0];
+    Packed last_delta = delta[0];
+
+    for (; i < count; ++i)
+    {
+        Packed current = residuals[i];
+        if constexpr (mode == Mode::Delta)
+        {
+            last_value += unzigzag<Packed>(current);
+            current = last_value;
+        }
+        else if constexpr (mode == Mode::DoubleDelta)
+        {
+            last_delta += unzigzag<Packed>(current);
+            last_value += last_delta;
+            current = last_value;
+        }
+
+        unalignedStoreLittleEndian<ValueType>(dest + i * sizeof(ValueType), static_cast<ValueType>(current));
+    }
+
+    value = Row{} + last_value;
+    delta = Row{} + last_delta;
+}
+
+template <typename ValueType, Mode mode>
+void decompressBlockStream(const char * source, UInt32 source_size, char * dest, size_t count)
+{
+    using Packed = PackedType<ValueType>;
+    using Row = RowOf<Packed>;
 
     const auto * begin = reinterpret_cast<const uint8_t *>(source);
     const auto * end = begin + source_size;
     const uint8_t * pos = begin;
 
-    /// The blocks are decoded one at a time into a small buffer that stays in L1 while its residuals are
-    /// unzigzagged, summed up and stored, instead of materializing the residuals of the whole stream first.
+    /// The blocks are decoded one at a time into a small buffer that stays in L1 while the values are
+    /// reconstructed from it, instead of materializing the residuals of the whole stream first.
     Packed residuals[PFor::BLOCK];
     Packed prev = 0; /// The carry of the block codec's own delta transform, unused with `Delta::none`.
-
-    ValueType value = 0;
-    ValueType delta = 0;
+    Row value = {};
+    Row delta = {};
 
     for (size_t offset = 0; offset < count; offset += PFor::BLOCK)
     {
@@ -219,35 +331,31 @@ void decompressDataForType(const char * source, UInt32 source_size, char * dest,
             throw Exception(ErrorCodes::CANNOT_DECOMPRESS, "Cannot decompress PFor-encoded data: the block at byte {} of {} is corrupted", pos - begin, source_size);
 
         pos += consumed;
-        char * block_dest = dest + offset * sizeof(ValueType);
-
-        switch (mode)
-        {
-            case Mode::None:
-                for (unsigned i = 0; i < block_count; ++i)
-                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), static_cast<ValueType>(residuals[i]));
-                break;
-            case Mode::Delta:
-                for (unsigned i = 0; i < block_count; ++i)
-                {
-                    value = static_cast<ValueType>(value + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
-                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), value);
-                }
-                break;
-            case Mode::DoubleDelta:
-                for (unsigned i = 0; i < block_count; ++i)
-                {
-                    delta = static_cast<ValueType>(delta + unzigzag<ValueType>(static_cast<ValueType>(residuals[i])));
-                    value = static_cast<ValueType>(value + delta);
-                    unalignedStoreLittleEndian<ValueType>(block_dest + i * sizeof(ValueType), value);
-                }
-                break;
-        }
+        reconstructBlock<ValueType, mode>(residuals, block_count, dest + offset * sizeof(ValueType), value, delta);
     }
 
     /// The stream must be consumed exactly, so trailing garbage is rejected.
     if (pos != end)
         throw Exception(ErrorCodes::CANNOT_DECOMPRESS, "Cannot decompress PFor-encoded data: the block stream has {} bytes but {} were decoded", source_size, pos - begin);
+}
+
+template <typename ValueType>
+void decompressDataForType(const char * source, UInt32 source_size, char * dest, size_t count, Mode mode)
+{
+    static_assert(is_unsigned_v<ValueType>);
+
+    switch (mode)
+    {
+        case Mode::None:
+            decompressBlockStream<ValueType, Mode::None>(source, source_size, dest, count);
+            break;
+        case Mode::Delta:
+            decompressBlockStream<ValueType, Mode::Delta>(source, source_size, dest, count);
+            break;
+        case Mode::DoubleDelta:
+            decompressBlockStream<ValueType, Mode::DoubleDelta>(source, source_size, dest, count);
+            break;
+    }
 }
 
 UInt8 getDataBytesSize(const IDataType * column_type)
