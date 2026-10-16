@@ -1,0 +1,78 @@
+function
+1
+0
+1
+0
+0
+1
+1
+1
+1
+1
+1
+1	\N
+1
+1
+1
+1
+[two, three, five], 2
+lazy	26666
+materialize	26666
+count lazy	26666
+count materialize	26666
+scan	26666
+[two, three, five], 3
+lazy	3334
+materialize	3334
+count lazy	3334
+count materialize	3334
+scan	3334
+[two, three, five], 1
+lazy	73334
+materialize	73334
+count lazy	73334
+count materialize	73334
+scan	73334
+[two, rare], 2
+lazy	100
+materialize	100
+count lazy	100
+count materialize	100
+scan	100
+[rare, three, five], 2
+lazy	6700
+materialize	6700
+count lazy	6700
+count materialize	6700
+scan	6700
+[two, missing, three], 2
+lazy	16667
+materialize	16667
+count lazy	16667
+count materialize	16667
+scan	16667
+[two, missing, three], 3
+lazy	0
+materialize	0
+count lazy	0
+count materialize	0
+scan	0
+[two, three], 3
+lazy	0
+materialize	0
+count lazy	0
+count materialize	0
+scan	0
+two three five, 2
+lazy	26666
+materialize	26666
+count lazy	26666
+count materialize	26666
+scan	26666
+[two, three, five], 2, splitByNonAlpha
+lazy	26666
+materialize	26666
+count lazy	26666
+count materialize	26666
+scan	26666
+26666

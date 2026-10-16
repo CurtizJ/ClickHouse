@@ -29,6 +29,8 @@ enum class TextSearchMode : uint8_t
     Any,
     All,
     Phrase,
+    /// At least `TextSearchQuery::getMinMatches` of the tokens.
+    AtLeast,
 };
 
 enum class TextIndexDirectReadMode : uint8_t
@@ -50,7 +52,8 @@ struct TextSearchQuery
         TextIndexDirectReadMode direct_read_mode_,
         VectorWithMemoryTracking<String> tokens_,
         std::vector<OptimizedRegularExpression> patterns_ = {},
-        VectorWithMemoryTracking<String> phrase_tokens_ = {});
+        VectorWithMemoryTracking<String> phrase_tokens_ = {},
+        size_t min_matches_ = 1);
 
     const String & getFunctionName() const { return function_name; }
     TextSearchMode getSearchMode() const { return search_mode; }
@@ -58,6 +61,7 @@ struct TextSearchQuery
     const VectorWithMemoryTracking<String> & getTokens() const { return tokens; }
     const std::vector<OptimizedRegularExpression> & getPatterns() const { return patterns; }
     const VectorWithMemoryTracking<String> & getPhraseTokens() const { return phrase_tokens; }
+    size_t getMinMatches() const { return min_matches; }
     UInt128 getHash() const { return hash; }
 
 private:
@@ -72,6 +76,8 @@ private:
     std::vector<OptimizedRegularExpression> patterns;
     /// Not sorted, not deduplicated.
     VectorWithMemoryTracking<String> phrase_tokens;
+    /// The number of tokens a row must have in the `AtLeast` mode, 1 otherwise.
+    size_t min_matches = 1;
     /// Precomputed in the constructor because getHash is called on hot paths.
     UInt128 hash{};
 };

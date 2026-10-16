@@ -18,7 +18,9 @@ class IColumn;
 class MergeTreeReaderStream;
 
 /// Operation type for padding the column with the posting list.
-enum class PadOp { Or, And };
+/// `Or` sets the bytes of the rows, `And` and `Add` increment their counters,
+/// `And` skips the regions where no row is in all the posting lists applied so far.
+enum class PadOp { Or, And, Add };
 
 /// Window of rows written by a linear scan (`linearOr` / `linearAnd`): a half-open range [begin, end) of absolute
 /// row ids that covers every byte the scan wrote. Empty when the posting list has no rows in the scanned window.
@@ -104,6 +106,10 @@ public:
     /// present in all of them, and the regions without such rows are skipped.
     /// Returns the range of rows for which counters were incremented.
     PostingsApplyWindow linearAnd(UInt8 * data, size_t row_offset, size_t num_rows, UInt8 num_applied);
+
+    /// Increments counters in `data` for all doc_ids in [row_offset, row_offset + num_rows), without skipping any region.
+    /// Returns the range of rows for which counters were incremented.
+    PostingsApplyWindow linearAdd(UInt8 * data, size_t row_offset, size_t num_rows);
 
     /// Move to the next doc_id.
     void next();
@@ -250,5 +256,18 @@ bool lazyIntersectPostingLists(
     size_t num_rows,
     TextIndexPostingsIntersectionAlgorithm algorithm,
     LazyPostingsStats & stats);
+
+/// Rows in at least `min_matches` of the posting lists: set output[row] = 1 if the row appears in `min_matches` or more.
+/// Every cursor increments the counters of its rows, then a final pass keeps the rows with enough of them.
+/// There must be less than 256 cursors, the counters are `UInt8`.
+/// Returns false only if no row of the window is set, so the caller may skip scanning the column.
+/// True means that some rows may be set.
+bool lazyAtLeastPostingLists(
+    IColumn & column,
+    const std::vector<PostingListCursor *> & cursors,
+    size_t column_offset,
+    size_t row_offset,
+    size_t num_rows,
+    size_t min_matches);
 
 }

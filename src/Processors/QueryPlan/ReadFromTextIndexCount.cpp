@@ -105,6 +105,7 @@ template <typename CheckCancelledCallback>
 UInt64 countWithCursors(
     const std::vector<PostingListCursorPtr> & cursors,
     TextSearchMode search_mode,
+    size_t min_matches,
     TextIndexPostingsIntersectionAlgorithm intersection_algorithm,
     const RowsRange & range,
     const CheckCancelledCallback & check_cancelled)
@@ -121,7 +122,7 @@ UInt64 countWithCursors(
     {
         sortCursorsForUnion(sorted_cursors);
     }
-    else
+    else if (search_mode == TextSearchMode::All)
     {
         sortCursorsForIntersection(sorted_cursors);
         intersection_algorithm = chooseIntersectionAlgorithm(sorted_cursors, intersection_algorithm);
@@ -140,9 +141,13 @@ UInt64 countWithCursors(
         filter_data.clear();
         filter_data.resize_fill(num_rows, 0);
 
-        const bool may_be_true = search_mode == TextSearchMode::Any
-            ? lazyUnionPostingLists(*filter, sorted_cursors, 0, row_offset, num_rows)
-            : lazyIntersectPostingLists(*filter, sorted_cursors, 0, row_offset, num_rows, intersection_algorithm, stats);
+        bool may_be_true = false;
+        if (search_mode == TextSearchMode::Any)
+            may_be_true = lazyUnionPostingLists(*filter, sorted_cursors, 0, row_offset, num_rows);
+        else if (search_mode == TextSearchMode::AtLeast)
+            may_be_true = lazyAtLeastPostingLists(*filter, sorted_cursors, 0, row_offset, num_rows, min_matches);
+        else
+            may_be_true = lazyIntersectPostingLists(*filter, sorted_cursors, 0, row_offset, num_rows, intersection_algorithm, stats);
 
         if (may_be_true)
             count += countBytesInFilter(filter_data);
@@ -225,13 +230,15 @@ UInt64 computeCountForPart(
     if (query_builder.is_failed)
         return 0;
 
-    /// `analyzePostings` already folded the small (single-block) postings into `query_builder.postings` by search mode.
+    /// `analyzePostings` already folded the small (single-block) postings into `query_builder.postings` by search mode,
+    /// except for the `AtLeast` mode, which reads the postings of all tokens.
+    const auto search_mode = resolved.query->getSearchMode();
     std::vector<const TokenPostingsInfo *> tokens_to_read;
     tokens_to_read.reserve(query_builder.tokens.size());
 
     for (const auto & [token, token_info] : query_builder.tokens)
     {
-        if (!analyzer.hasReadPostings(token))
+        if (search_mode == TextSearchMode::AtLeast || !analyzer.hasReadPostings(token))
             tokens_to_read.push_back(token_info.get());
     }
 
@@ -239,12 +246,14 @@ UInt64 computeCountForPart(
         return query_builder.postings ? query_builder.postings->cardinality() : 0;
 
     const auto & settings = resolved.condition->getContext()->getSettingsRef();
-    const auto search_mode = resolved.query->getSearchMode();
 
     /// Same conditions as the lazy mode of `MergeTreeReaderTextIndex`: cursors need the per-segment block index of compressed postings.
+    /// The small postings of an `AtLeast` query are not compressed, so it is counted with cursors only without them.
     const bool use_lazy_mode = settings[Setting::text_index_posting_list_apply_mode] == TextIndexPostingListApplyMode::Lazy
         && granule->getPostingsCodecType() != IPostingListCodec::Type::None
-        && granule->getSerializationVersion() >= MergeTreeTextIndexSerializationVersion::V1_WithCodec;
+        && granule->getSerializationVersion() >= MergeTreeTextIndexSerializationVersion::V1_WithCodec
+        && (search_mode != TextSearchMode::AtLeast
+            || std::ranges::all_of(tokens_to_read, [](const auto * token_info) { return token_info->header & PostingsSerialization::Flags::IsCompressed; }));
 
     if (use_lazy_mode)
     {
@@ -277,10 +286,10 @@ UInt64 computeCountForPart(
         if (query_builder.postings && !query_builder.postings->isEmpty())
             cursors.push_back(std::make_shared<PostingListCursor>(query_builder.getFlatPostings()));
 
-        /// `rows_range` is the hull of the tokens' rows for `Any` and their overlap for `All`; an empty overlap fails the query.
+        /// `rows_range` is the hull of the tokens' rows for `Any` and `AtLeast` and their overlap for `All`; an empty overlap fails the query.
         chassert(query_builder.rows_range);
         auto intersection_algorithm = settings[Setting::text_index_postings_intersection_algorithm];
-        return countWithCursors(cursors, search_mode, intersection_algorithm, *query_builder.rows_range, check_cancelled);
+        return countWithCursors(cursors, search_mode, resolved.query->getMinMatches(), intersection_algorithm, *query_builder.rows_range, check_cancelled);
     }
 
     auto postings_serialization = PostingsSerialization(
@@ -307,6 +316,17 @@ UInt64 computeCountForPart(
         check_cancelled);
 
     const RowsRange full_range(0, data_part->rows_count - 1);
+
+    if (search_mode == TextSearchMode::AtLeast)
+    {
+        AtLeastPostingsAccumulator accumulator(resolved.query->getMinMatches());
+        for (const auto * token_info : tokens_to_read)
+        {
+            check_cancelled();
+            accumulator.add(posting_reader.read(*token_info, full_range, nullptr));
+        }
+        return accumulator.getResult().cardinality();
+    }
 
     if (search_mode != TextSearchMode::All)
     {

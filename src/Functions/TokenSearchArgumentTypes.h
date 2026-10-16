@@ -35,6 +35,13 @@ inline bool isStringOrFixedStringOrArrayOfStringOrFixedString(const IDataType & 
     return false;
 }
 
+/// `hasAnyTokens(input, needles, minimum_should_match[, tokenizer])` takes the minimum number of matching tokens as an
+/// integer third argument, the tokenizer follows it. Otherwise the third argument is the tokenizer.
+inline bool isMinMatchesArgumentType(const IDataType & type)
+{
+    return isInteger(type);
+}
+
 /// Needles are a string to tokenize or an array of tokens used as-is; `Array(Nothing)` is the type of `[]`.
 inline bool isStringOrArrayOfStringType(const IDataType & type)
 {

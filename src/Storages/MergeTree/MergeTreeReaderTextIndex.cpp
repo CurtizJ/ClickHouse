@@ -655,6 +655,27 @@ PostingList MergeTreeReaderTextIndex::buildPostingsForQuery(
     if (query_builder.is_failed)
         return {};
 
+    /// The analysis does not fold the postings of an `AtLeast` query, all of them are read here.
+    if (query.getSearchMode() == TextSearchMode::AtLeast)
+    {
+        AtLeastPostingsAccumulator accumulator(query.getMinMatches());
+
+        for (const auto & [token, token_info] : query_builder.tokens)
+        {
+            PostingList token_postings;
+
+            if (token_info->header & PostingsSerialization::Flags::EmbeddedPostings)
+                token_postings = readAllPostingsForToken(token, *token_info) & range_posting;
+            else
+                for (const auto & block : readPostingsBlocksForToken(token, *token_info, range))
+                    token_postings |= *block & range_posting;
+
+            accumulator.add(token_postings);
+        }
+
+        return std::move(accumulator.getResult());
+    }
+
     std::optional<PostingList> result;
     if (query_builder.postings)
         result = *query_builder.postings & range_posting;
@@ -795,7 +816,31 @@ MergeTreeReaderTextIndex::ResolvedSearch MergeTreeReaderTextIndex::resolveSearch
     if (query_builder.is_failed)
         return resolved;
 
-    if (query_builder.needReadPostings())
+    if (search_query->getSearchMode() == TextSearchMode::AtLeast)
+    {
+        /// The analysis does not fold the postings of an `AtLeast` query, so there is a cursor for every token.
+        for (const auto & [token, token_info] : query_builder.tokens)
+        {
+            PostingListCursorPtr cursor;
+
+            if (token_info->header & PostingsSerialization::Flags::IsCompressed)
+            {
+                cursor = makeLazyCursor(token, *token_info);
+            }
+            else
+            {
+                /// Small posting lists are not compressed: read them whole into a cursor over a flat array.
+                auto postings = readAllPostingsForToken(token, *token_info);
+                auto values = std::make_shared<PaddedPODArray<UInt32>>(postings.cardinality());
+                postings.toUint32Array(values->data());
+                cursor = std::make_shared<PostingListCursor>(std::move(values));
+            }
+
+            resolved.cursors.emplace_back(cursor.get());
+            lazy_cursors.emplace_back(std::move(cursor));
+        }
+    }
+    else if (query_builder.needReadPostings())
     {
         for (const auto & [token, token_info] : query_builder.tokens)
         {
@@ -830,6 +875,10 @@ MergeTreeReaderTextIndex::ResolvedSearch MergeTreeReaderTextIndex::resolveSearch
         sortCursorsForIntersection(resolved.cursors);
         resolved.intersection_algorithm = chooseIntersectionAlgorithm(resolved.cursors, intersection_algorithm);
     }
+    else if (resolved.mode == TextSearchMode::AtLeast)
+    {
+        resolved.min_matches = search_query->getMinMatches();
+    }
     else
     {
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid search mode: {}", resolved.mode);
@@ -854,6 +903,8 @@ void MergeTreeReaderTextIndex::fillColumnLazy(IColumn & column, size_t column_id
 
     if (resolved->mode == TextSearchMode::Any)
         lazyUnionPostingLists(column, resolved->cursors, old_size, row_offset, num_rows);
+    else if (resolved->mode == TextSearchMode::AtLeast)
+        lazyAtLeastPostingLists(column, resolved->cursors, old_size, row_offset, num_rows, resolved->min_matches);
     else
         lazyIntersectPostingLists(column, resolved->cursors, old_size, row_offset, num_rows, resolved->intersection_algorithm, lazy_postings_stats);
 }

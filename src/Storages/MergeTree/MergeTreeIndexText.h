@@ -99,6 +99,26 @@ struct MergeTreeIndexTextParams
 using PostingList = roaring::Roaring;
 using PostingListPtr = std::shared_ptr<PostingList>;
 
+/// Keeps the rows present in at least `min_matches` of the added posting lists, for the `AtLeast` text search mode.
+class AtLeastPostingsAccumulator
+{
+public:
+    explicit AtLeastPostingsAccumulator(size_t min_matches) : levels(min_matches) {}
+
+    void add(const PostingList & postings)
+    {
+        for (size_t i = levels.size() - 1; i > 0; --i)
+            levels[i] |= levels[i - 1] & postings;
+        levels[0] |= postings;
+    }
+
+    PostingList & getResult() { return levels.back(); }
+
+private:
+    /// `levels[i]` holds the rows present in more than `i` of the added posting lists.
+    std::vector<PostingList> levels;
+};
+
 /// Everything a `PostingListBuilder` needs to add row ids and flush full blocks into the encoder.
 struct PostingListBuildContext
 {

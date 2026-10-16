@@ -34,7 +34,16 @@ namespace
 
 constexpr size_t arg_input = 0;
 constexpr size_t arg_needles = 1;
-constexpr size_t arg_tokenizer = 2;
+/// The minimum number of matching tokens of `hasAnyTokens`, if the third argument is an integer.
+constexpr size_t arg_min_matches = 2;
+
+/// Whether the third argument is the minimum number of matching tokens rather than the tokenizer.
+template <class HasTokensTraits>
+bool hasMinMatchesArgument(const ColumnsWithTypeAndName & arguments)
+{
+    return HasTokensTraits::mode == HasAnyAllTokensMode::Any && arguments.size() > arg_min_matches
+        && isMinMatchesArgumentType(*arguments[arg_min_matches].type);
+}
 
 /// Compaction drops tokens covered by longer ones; valid only for `hasAllTokens`.
 TokensWithPosition initializeSearchTokens(const ColumnsWithTypeAndName & arguments, const ITokenizer & tokenizer, std::string_view function_name, bool compact_tokens)
@@ -107,6 +116,9 @@ DataTypePtr FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::getReturnT
         {"needles", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isStringOrArrayOfStringType), isColumnConst, "const String or const Array(String)"}
     };
 
+    if (hasMinMatchesArgument<HasTokensTraits>(arguments))
+        mandatory_args.push_back({"minimum_should_match", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isMinMatchesArgumentType), isColumnConst, "const integer"});
+
     FunctionArgumentDescriptors optional_args
     {
         {"tokenizer", static_cast<FunctionArgumentDescriptor::TypeValidator>(&isString), isColumnConst, "const String"}
@@ -126,20 +138,33 @@ DataTypePtr FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::getReturnT
 template <class HasTokensTraits>
 FunctionBasePtr FunctionHasAnyAllTokensOverloadResolver<HasTokensTraits>::buildImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & return_type) const
 {
-    const auto tokenizer_name = arguments.size() < 3 || !arguments[arg_tokenizer].column
+    const bool has_min_matches = hasMinMatchesArgument<HasTokensTraits>(arguments);
+    const size_t arg_tokenizer = has_min_matches ? arg_min_matches + 1 : arg_min_matches;
+
+    const auto tokenizer_name = arguments.size() <= arg_tokenizer || !arguments[arg_tokenizer].column
         ? SplitByNonAlphaTokenizer::getExternalName()
         : arguments[arg_tokenizer].column->getDataAt(0);
+
+    size_t min_matches = 1;
+    if (has_min_matches && arguments[arg_min_matches].column)
+    {
+        const auto & column = *arguments[arg_min_matches].column;
+        if (isUInt(arguments[arg_min_matches].type) ? column.getUInt(0) == 0 : column.getInt(0) < 1)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Argument 'minimum_should_match' of function '{}' must be a positive integer", getName());
+        min_matches = column.getUInt(0);
+    }
 
     auto tokenizer = TokenizerFactory::instance().get(tokenizer_name);
     auto search_tokens = initializeSearchTokens(arguments, *tokenizer, getName(), HasTokensTraits::mode == HasAnyAllTokensMode::All);
     DataTypes argument_types{std::from_range_t{}, arguments | std::views::transform([](auto & elem) { return elem.type; })};
-    return std::make_shared<FunctionBaseHasAnyAllTokens<HasTokensTraits>>(std::move(tokenizer), std::move(search_tokens), std::move(argument_types), return_type);
+    return std::make_shared<FunctionBaseHasAnyAllTokens<HasTokensTraits>>(
+        std::move(tokenizer), std::move(search_tokens), min_matches, std::move(argument_types), return_type);
 }
 
 template <class HasTokensTraits>
 ExecutableFunctionPtr FunctionBaseHasAnyAllTokens<HasTokensTraits>::prepare(const ColumnsWithTypeAndName &) const
 {
-    return std::make_unique<ExecutableFunctionHasAnyAllTokens<HasTokensTraits>>(tokenizer, search_tokens);
+    return std::make_unique<ExecutableFunctionHasAnyAllTokens<HasTokensTraits>>(tokenizer, search_tokens, min_matches);
 }
 
 namespace
@@ -173,10 +198,13 @@ private:
     const TokensWithPosition & tokens;
 };
 
+/// Matches when `required_tokens` distinct tokens are found: all of them for `hasAllTokens`,
+/// at least `min_matches` of them for `hasAnyTokens`.
 struct HasAllTokensMatcher
 {
-    explicit HasAllTokensMatcher(const TokensWithPosition & tokens_)
+    HasAllTokensMatcher(const TokensWithPosition & tokens_, size_t required_tokens_)
         : tokens(tokens_)
+        , required_tokens(required_tokens_)
         , mask(tokens.size())
         , num_set_bits(0)
     {
@@ -191,7 +219,7 @@ struct HasAllTokensMatcher
             {
                 num_set_bits += !mask.test_set(it->second);
 
-                if (num_set_bits == tokens.size())
+                if (num_set_bits == required_tokens)
                 {
                     onMatchCallback();
                     return true;
@@ -210,6 +238,7 @@ struct HasAllTokensMatcher
 
 private:
     const TokensWithPosition & tokens;
+    size_t required_tokens;
     boost::dynamic_bitset<> mask;
     UInt64 num_set_bits;
 };
@@ -281,7 +310,8 @@ void executeString(
     PaddedPODArray<UInt8> & col_result,
     size_t input_rows_count,
     const ITokenizer * tokenizer,
-    const TokensWithPosition & tokens)
+    const TokensWithPosition & tokens,
+    size_t min_matches)
 {
     if (tokens.empty())
     {
@@ -293,9 +323,14 @@ void executeString(
     col_result.resize(input_rows_count);
 
     if constexpr (HasTokensTraits::mode == HasAnyAllTokensMode::Any)
-        searchOnString(col_input, col_result, input_rows_count, tokenizer, HasAnyTokensMatcher(tokens));
+    {
+        if (min_matches > 1)
+            searchOnString(col_input, col_result, input_rows_count, tokenizer, HasAllTokensMatcher(tokens, min_matches));
+        else
+            searchOnString(col_input, col_result, input_rows_count, tokenizer, HasAnyTokensMatcher(tokens));
+    }
     else if constexpr (HasTokensTraits::mode == HasAnyAllTokensMode::All)
-        searchOnString(col_input, col_result, input_rows_count, tokenizer, HasAllTokensMatcher(tokens));
+        searchOnString(col_input, col_result, input_rows_count, tokenizer, HasAllTokensMatcher(tokens, tokens.size()));
     else
         static_assert(false, "Unknown search mode value detected");
 }
@@ -307,7 +342,8 @@ void executeArray(
     const ColumnNullable * null_map,
     PaddedPODArray<UInt8> & col_result,
     const ITokenizer * tokenizer,
-    const TokensWithPosition & tokens)
+    const TokensWithPosition & tokens,
+    size_t min_matches)
 {
     const auto & offsets = array->getOffsets();
     const size_t input_size = offsets.size();
@@ -322,9 +358,14 @@ void executeArray(
     col_result.resize(input_size);
 
     if constexpr (HasTokensTraits::mode == HasAnyAllTokensMode::Any)
-        searchOnArray(offsets, input_string, null_map, col_result, input_size, tokenizer, HasAnyTokensMatcher(tokens));
+    {
+        if (min_matches > 1)
+            searchOnArray(offsets, input_string, null_map, col_result, input_size, tokenizer, HasAllTokensMatcher(tokens, min_matches));
+        else
+            searchOnArray(offsets, input_string, null_map, col_result, input_size, tokenizer, HasAnyTokensMatcher(tokens));
+    }
     else if constexpr (HasTokensTraits::mode == HasAnyAllTokensMode::All)
-        searchOnArray(offsets, input_string, null_map, col_result, input_size, tokenizer, HasAllTokensMatcher(tokens));
+        searchOnArray(offsets, input_string, null_map, col_result, input_size, tokenizer, HasAllTokensMatcher(tokens, tokens.size()));
     else
         static_assert(false, "Unknown search mode value detected");
 }
@@ -335,12 +376,13 @@ void executeStringOrArray(
     PaddedPODArray<UInt8> & col_result,
     size_t input_rows_count,
     const ITokenizer * tokenizer,
-    const TokensWithPosition & tokens)
+    const TokensWithPosition & tokens,
+    size_t min_matches)
 {
     if (const auto * col_input_string = checkAndGetColumn<ColumnString>(col_input.get()))
-        executeString<HasTokensTraits>(*col_input_string, col_result, input_rows_count, tokenizer, tokens);
+        executeString<HasTokensTraits>(*col_input_string, col_result, input_rows_count, tokenizer, tokens, min_matches);
     else if (const auto * col_input_fixedstring = checkAndGetColumn<ColumnFixedString>(col_input.get()))
-        executeString<HasTokensTraits>(*col_input_fixedstring, col_result, input_rows_count, tokenizer, tokens);
+        executeString<HasTokensTraits>(*col_input_fixedstring, col_result, input_rows_count, tokenizer, tokens, min_matches);
     else if (const auto * col_input_array = checkAndGetColumn<ColumnArray>(col_input.get()))
     {
          /// Array elements may be Nullable(String) or Nullable(FixedString); unwrap and pass the null map.
@@ -349,9 +391,9 @@ void executeStringOrArray(
         const IColumn * actual_data = null_map ? &null_map->getNestedColumn() : data_col;
 
         if (const auto * input_string = checkAndGetColumn<ColumnString>(actual_data))
-            executeArray<HasTokensTraits>(col_input_array, *input_string, null_map, col_result, tokenizer, tokens);
+            executeArray<HasTokensTraits>(col_input_array, *input_string, null_map, col_result, tokenizer, tokens, min_matches);
         else if (const auto * input_fixedstring = checkAndGetColumn<ColumnFixedString>(actual_data))
-            executeArray<HasTokensTraits>(col_input_array, *input_fixedstring, null_map, col_result, tokenizer, tokens);
+            executeArray<HasTokensTraits>(col_input_array, *input_fixedstring, null_map, col_result, tokenizer, tokens, min_matches);
         else
             /// `Array(Nothing)`, the type of `[]`: rows without tokens.
             col_result.assign(input_rows_count, UInt8(0));
@@ -369,7 +411,8 @@ ColumnPtr ExecutableFunctionHasAnyAllTokens<HasTokensTraits>::executeImpl(
 
     auto col_result = ColumnVector<UInt8>::create();
 
-    if (search_tokens.empty())
+    /// No row has more distinct tokens than searched.
+    if (search_tokens.empty() || min_matches > search_tokens.size())
     {
         col_result->getData().assign(input_rows_count, UInt8(0));
         return col_result;
@@ -382,11 +425,11 @@ ColumnPtr ExecutableFunctionHasAnyAllTokens<HasTokensTraits>::executeImpl(
         /// Stateful tokenizers mutate internal state during execution and cannot be shared across
         /// threads; use a per-execution clone.
         auto stateful_tokenizer = tokenizer->clone();
-        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, stateful_tokenizer.get(), search_tokens);
+        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, stateful_tokenizer.get(), search_tokens, min_matches);
     }
     else
     {
-        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, tokenizer.get(), search_tokens);
+        executeStringOrArray<HasTokensTraits>(col_input, col_result->getData(), input_rows_count, tokenizer.get(), search_tokens, min_matches);
     }
 
     return col_result;
@@ -402,6 +445,7 @@ REGISTER_FUNCTION(HasAnyTokens)
 {
     FunctionDocumentation::Description description_hasAnyTokens = R"(
 Returns 1, if at least one token in the `needle` string or array matches the `input` string, and 0 otherwise. If `input` is a column, returns all rows that satisfy this condition.
+With the optional `minimum_should_match` argument, returns 1 only if at least `minimum_should_match` distinct tokens of `needles` match the `input` string.
 
 <Note>
 Column `input` should have a [text index](/reference/engines/table-engines/mergetree-family/textindexes) defined for optimal performance.
@@ -426,14 +470,15 @@ The preprocessor is part of the index definition, so it is applied wherever the 
 </Note>
     )";
     FunctionDocumentation::Syntax syntax_hasAnyTokens = R"(
-hasAnyTokens(input, needles[, tokenizer])
+hasAnyTokens(input, needles[, minimum_should_match][, tokenizer])
 )";
     FunctionDocumentation::Arguments arguments_hasAnyTokens = {
         {"input", "The input column.", {"String", "FixedString", "Nullable(String)", "Nullable(FixedString)", "Array(String)", "Array(FixedString)", "Array(Nullable(String))", "Array(Nullable(FixedString))"}},
         {"needles", "Tokens to be searched.", {"String", "Array(String)"}},
+        {"minimum_should_match", "The minimum number of distinct tokens of `needles` that must match. Optional, if not set explicitly, defaults to `1`.", {"const (U)Int*"}},
         {"tokenizer", "The tokenizer to use. Valid arguments are `splitByNonAlpha`, `splitByString`, `splitByRegexp`, `asciiCJK`, `chinese`, `icu('<locale>')`, `japanese`, `ngrams`, `sparseGrams`, and `array`. Optional, if not set explicitly, defaults to `splitByNonAlpha`.", {"const String"}},
     };
-    FunctionDocumentation::ReturnedValue returned_value_hasAnyTokens = {"Returns `1`, if there was at least one match. `0`, otherwise.", {"UInt8"}};
+    FunctionDocumentation::ReturnedValue returned_value_hasAnyTokens = {"Returns `1`, if there were at least `minimum_should_match` matches (one by default). `0`, otherwise.", {"UInt8"}};
     FunctionDocumentation::Examples examples_hasAnyTokens = {
     {
         "Basic usage with a string needle",
@@ -502,6 +547,17 @@ SELECT count() FROM doc WHERE hasAnyTokens(msg, tokens('a()d', 'splitByString', 
 ┌─count()─┐
 │       3 │
 └─────────┘
+        )"
+    },
+    {
+        "Require at least two of the tokens",
+        R"(
+SELECT hasAnyTokens('failed to charge card', ['error', 'failed', 'charge', 'cache'], 2) AS res;
+        )",
+        R"(
+┌─res─┐
+│   1 │
+└─────┘
         )"
     },
     {

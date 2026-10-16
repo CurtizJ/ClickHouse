@@ -90,6 +90,8 @@ private:
         std::vector<PostingListCursor *> cursors;
         TextSearchMode mode = TextSearchMode::Any;
         TextIndexPostingsIntersectionAlgorithm intersection_algorithm = TextIndexPostingsIntersectionAlgorithm::Leapfrog;
+        /// The number of posting lists a row must be in, in the `AtLeast` mode.
+        size_t min_matches = 1;
     };
 
     /// Also creates the cursors of the column in `lazy_cursors`.

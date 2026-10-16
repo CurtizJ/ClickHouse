@@ -37,9 +37,10 @@ public:
     static constexpr auto name = HasTokensTraits::name;
 
     explicit ExecutableFunctionHasAnyAllTokens(
-        std::shared_ptr<const ITokenizer> tokenizer_, const TokensWithPosition & search_tokens_)
+        std::shared_ptr<const ITokenizer> tokenizer_, const TokensWithPosition & search_tokens_, size_t min_matches_)
         : tokenizer(std::move(tokenizer_))
         , search_tokens(std::move(search_tokens_))
+        , min_matches(min_matches_)
     {
     }
 
@@ -50,6 +51,8 @@ public:
 private:
     std::shared_ptr<const ITokenizer> tokenizer;
     const TokensWithPosition & search_tokens;
+    /// The number of distinct tokens of `search_tokens` a row must have for `hasAnyTokens`.
+    size_t min_matches;
 };
 
 template <class HasTokensTraits>
@@ -61,10 +64,12 @@ public:
     FunctionBaseHasAnyAllTokens(
         std::shared_ptr<const ITokenizer> tokenizer_,
         TokensWithPosition search_tokens_,
+        size_t min_matches_,
         DataTypes argument_types_,
         DataTypePtr result_type_)
         : tokenizer(std::move(tokenizer_))
         , search_tokens(std::move(search_tokens_))
+        , min_matches(min_matches_)
         , argument_types(std::move(argument_types_))
         , result_type(std::move(result_type_))
     {
@@ -80,6 +85,7 @@ public:
 private:
     std::shared_ptr<const ITokenizer> tokenizer;
     TokensWithPosition search_tokens;
+    size_t min_matches;
     DataTypes argument_types;
     DataTypePtr result_type;
 };
@@ -100,7 +106,7 @@ public:
     String getName() const override { return name; }
     size_t getNumberOfArguments() const override { return 0; }
     bool isVariadic() const override { return true; }
-    ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1, 2}; }
+    ColumnNumbers getArgumentsThatAreAlwaysConstant() const override { return {1, 2, 3}; }
 
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override;
 

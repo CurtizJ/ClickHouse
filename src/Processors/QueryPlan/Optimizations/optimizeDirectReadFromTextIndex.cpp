@@ -13,6 +13,7 @@
 #include <Functions/FunctionHelpers.h>
 #include <Functions/FunctionsMiscellaneous.h>
 #include <Functions/IFunction.h>
+#include <Functions/TokenSearchArgumentTypes.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ITokenizer.h>
@@ -671,7 +672,13 @@ private:
         const std::vector<SelectedCondition> & selected_conditions,
         const ContextPtr & context)
     {
-        if (selected_conditions.size() != 1 || function_node.children.size() < 2 || function_node.children.size() > 3)
+        /// `hasAnyTokens(input, needles, minimum_should_match[, tokenizer])` has the tokenizer after the minimum number of matches.
+        const size_t tokenizer_argument_idx = function_node.function_base->getName() == "hasAnyTokens" && function_node.children.size() > 2
+                && isMinMatchesArgumentType(*function_node.children[2]->result_type)
+            ? 3
+            : 2;
+
+        if (selected_conditions.size() != 1 || function_node.children.size() < 2 || function_node.children.size() > tokenizer_argument_idx + 1)
             return &function_node;
 
         auto new_children = function_node.children;
@@ -755,8 +762,8 @@ private:
             MutableColumnConstPtr arg_column = arg_type->createColumnConst(0, Field(tokenizer_description));
             String name = quoteString(tokenizer_description);
             const ActionsDAG::Node & new_child = actions_dag.addColumn(std::move(arg_column), std::move(arg_type), std::move(name));
-            if (new_children.size() == 3)
-                new_children[2] = &new_child;
+            if (new_children.size() > tokenizer_argument_idx)
+                new_children[tokenizer_argument_idx] = &new_child;
             else
                 new_children.push_back(&new_child);
 
@@ -796,11 +803,11 @@ private:
             /// to 'array' to match them verbatim, instead of re-splitting tokens the index stores whole.
             if (function_name == "hasAnyTokens" || function_name == "hasAllTokens" || function_name == "hasPhrase")
             {
-                chassert(new_children.size() == 3);
+                chassert(new_children.size() == tokenizer_argument_idx + 1);
                 DataTypePtr arg_type = std::make_shared<DataTypeString>();
                 const String array_tokenizer_desc = ArrayTokenizer::getName();
                 MutableColumnConstPtr arg_column = arg_type->createColumnConst(0, Field(array_tokenizer_desc));
-                new_children[2] = &actions_dag.addColumn(std::move(arg_column), arg_type, quoteString(array_tokenizer_desc));
+                new_children[tokenizer_argument_idx] = &actions_dag.addColumn(std::move(arg_column), arg_type, quoteString(array_tokenizer_desc));
             }
 
             /// hasToken takes a String haystack, so rejoin the tokens for it to re-tokenize; dropped tokens are

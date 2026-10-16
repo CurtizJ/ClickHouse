@@ -17,6 +17,7 @@
 #include <Functions/MultiSearchImpl.h>
 #include <Functions/checkHyperscanRegexp.h>
 #include <Functions/hasAnyAllTokens.h>
+#include <Functions/TokenSearchArgumentTypes.h>
 #include <IO/WriteBufferFromString.h>
 #include <Functions/Regexps.h>
 #include <Interpreters/Context.h>
@@ -73,13 +74,15 @@ TextSearchQuery::TextSearchQuery(
     TextIndexDirectReadMode direct_read_mode_,
     VectorWithMemoryTracking<String> tokens_,
     std::vector<OptimizedRegularExpression> patterns_,
-    VectorWithMemoryTracking<String> phrase_tokens_)
+    VectorWithMemoryTracking<String> phrase_tokens_,
+    size_t min_matches_)
     : function_name(std::move(function_name_))
     , search_mode(search_mode_)
     , direct_read_mode(direct_read_mode_)
     , tokens(std::move(tokens_))
     , patterns(std::move(patterns_))
     , phrase_tokens(std::move(phrase_tokens_))
+    , min_matches(min_matches_)
 {
     std::sort(tokens.begin(), tokens.end());
     initializeHash();
@@ -91,6 +94,10 @@ void TextSearchQuery::initializeHash()
     hash_state.update(function_name);
     hash_state.update(search_mode);
     hash_state.update(direct_read_mode);
+
+    /// Only in the `AtLeast` mode, so the hashes (and the virtual column names) of the other queries do not change.
+    if (search_mode == TextSearchMode::AtLeast)
+        hash_state.update(min_matches);
 
     hash_state.update(tokens.size());
     for (const auto & token : tokens)
@@ -434,9 +441,22 @@ TextSearchQueryPtr MergeTreeIndexConditionText::createTextSearchQuery(const Acti
     return rpn_element.text_search_queries.front();
 }
 
+namespace
+{
+
+/// Whether `hasAnyTokens(input, needles, minimum_should_match[, tokenizer])` has the minimum number of matching tokens
+/// as the third argument, which moves the tokenizer to the fourth one.
+bool hasMinMatchesArgument(const RPNBuilderFunctionTreeNode & function)
+{
+    return function.getFunctionName() == "hasAnyTokens" && function.getArgumentsSize() > 2
+        && isMinMatchesArgumentType(*function.getArgumentAt(2).getDAGNode()->result_type);
+}
+
+}
+
 bool MergeTreeIndexConditionText::canAnswerFunctionNode(const ActionsDAG::Node & node) const
 {
-    if (node.type != ActionsDAG::ActionType::FUNCTION || !node.function_base || node.children.size() != 3)
+    if (node.type != ActionsDAG::ActionType::FUNCTION || !node.function_base || node.children.size() < 3)
         return true;
 
     const auto function_name = node.function_base->getName();
@@ -447,8 +467,12 @@ bool MergeTreeIndexConditionText::canAnswerFunctionNode(const ActionsDAG::Node &
 
     RPNBuilderTreeNode rpn_node(&node, getContext());
     const auto function_node = rpn_node.toFunctionNode();
+    const size_t tokenizer_argument_idx = hasMinMatchesArgument(function_node) ? 3 : 2;
 
-    return tokenizerArgumentMatchesIndex(function_name, function_node.getArgumentAt(2));
+    if (node.children.size() != tokenizer_argument_idx + 1)
+        return true;
+
+    return tokenizerArgumentMatchesIndex(function_name, function_node.getArgumentAt(tokenizer_argument_idx));
 }
 
 std::optional<String> MergeTreeIndexConditionText::tryGetVirtualColumnName(const TextSearchQuery & query, const String & index_name) const
@@ -786,18 +810,20 @@ bool MergeTreeIndexConditionText::traverseAtomNode(const RPNBuilderTreeNode & no
             return false;
         }
 
-        if (function_arguments_size == 3)
-        {
-            /// Both needles are arguments of the call, so the (column, constant) shape below cannot express it.
-            if (function_name == "mapContainsKeyValue")
-                return traverseMapContainsKeyValueNode(function, out);
+        /// Both needles are arguments of the call, so the (column, constant) shape below cannot express it.
+        if (function_arguments_size == 3 && function_name == "mapContainsKeyValue")
+            return traverseMapContainsKeyValueNode(function, out);
 
+        const size_t tokenizer_argument_idx = hasMinMatchesArgument(function) ? 3 : 2;
+
+        if (function_arguments_size == tokenizer_argument_idx + 1)
+        {
             /// The index path tokenizes needles with the index tokenizer, so it can answer the
             /// predicate only when the tokenizer argument denotes that same tokenizer.
-            if (!tokenizerArgumentMatchesIndex(function_name, function.getArgumentAt(2)))
+            if (!tokenizerArgumentMatchesIndex(function_name, function.getArgumentAt(tokenizer_argument_idx)))
                 return false;
         }
-        else if (function_arguments_size != 2)
+        else if (function_arguments_size != tokenizer_argument_idx)
         {
             return false;
         }
@@ -1412,6 +1438,45 @@ bool MergeTreeIndexConditionText::traverseFunctionNode(
         if (function_name == "hasAnyTokens")
         {
             out.function = RPNElement::FUNCTION_HAS_ANY_TOKENS;
+
+            if (hasMinMatchesArgument(function_node))
+            {
+                Field min_matches_field;
+                DataTypePtr min_matches_type;
+                if (!function_node.getArgumentAt(2).tryGetConstant(min_matches_field, min_matches_type))
+                    return false;
+
+                /// The function throws for a non-positive number.
+                UInt64 min_matches = 0;
+                if (min_matches_field.getType() == Field::Types::UInt64)
+                    min_matches = min_matches_field.safeGet<UInt64>();
+                else if (min_matches_field.getType() == Field::Types::Int64 && min_matches_field.safeGet<Int64>() > 0)
+                    min_matches = min_matches_field.safeGet<Int64>();
+                else
+                    return false;
+
+                std::ranges::sort(search_tokens);
+                search_tokens.erase(std::ranges::unique(search_tokens).begin(), search_tokens.end());
+
+                if (min_matches > search_tokens.size())
+                {
+                    out.function = RPNElement::ALWAYS_FALSE;
+                    return true;
+                }
+
+                /// The lazy mode counts the tokens of a row in `UInt8`.
+                if (search_tokens.size() > std::numeric_limits<UInt8>::max())
+                    return false;
+
+                if (min_matches > 1)
+                {
+                    out.text_search_queries.emplace_back(std::make_shared<TextSearchQuery>(
+                        function_name, TextSearchMode::AtLeast, direct_read_mode, std::move(search_tokens),
+                        std::vector<OptimizedRegularExpression>{}, VectorWithMemoryTracking<String>{}, min_matches));
+                    return true;
+                }
+            }
+
             out.text_search_queries.emplace_back(std::make_shared<TextSearchQuery>(function_name, TextSearchMode::Any, direct_read_mode, search_tokens));
         }
         else

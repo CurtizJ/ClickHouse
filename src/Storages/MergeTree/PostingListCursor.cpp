@@ -541,7 +541,7 @@ void PostingListCursor::next()
 }
 
 /// Scatter-write into `out` for doc_ids in values[begin..length).
-/// PadOp::Or assigns 1, PadOp::And increments the counter.
+/// PadOp::Or assigns 1, PadOp::And and PadOp::Add increment the counter.
 namespace
 {
 
@@ -571,7 +571,7 @@ inline void padColumn(UInt8 * __restrict out, const uint32_t * values, size_t ro
 
 /// Apply the padding op to a contiguous, fully-dense output region (every row in it is a match):
 ///   PadOp::Or  — set every byte to 1;
-///   PadOp::And — increment every counter.
+///   PadOp::And, PadOp::Add — increment every counter.
 template <PadOp op>
 inline void padDenseRange(UInt8 * __restrict out, size_t count)
 {
@@ -589,10 +589,14 @@ inline void padDenseRange(UInt8 * __restrict out, size_t count)
 /// Whether the output region [data, data + count) needs no contribution
 /// from this posting list and the whole segment/block can be skipped:
 ///   PadOp::Or  — no byte is zero: every row is already set;
-///   PadOp::And — no counter equals `num_applied`: so no row can reach count == n and incrementing is pointless.
+///   PadOp::And — no counter equals `num_applied`: so no row can reach count == n and incrementing is pointless;
+///   PadOp::Add — never, every row of the posting list counts.
 template <PadOp op>
 inline bool canSkipRegion(const UInt8 * data, size_t count, UInt8 num_applied)
 {
+    if constexpr (op == PadOp::Add)
+        return false;
+
     const int value = op == PadOp::Or ? 0 : num_applied;
     return memchr(data, value, count) == nullptr;
 }
@@ -617,6 +621,16 @@ PostingsApplyWindow PostingListCursor::linearAnd(UInt8 * data, size_t row_offset
         return linearEmbedded<PadOp::And>(data, row_offset, num_rows);
 
     return linearSegments<PadOp::And>(data, row_offset, num_rows, num_applied);
+}
+
+PostingsApplyWindow PostingListCursor::linearAdd(UInt8 * data, size_t row_offset, size_t num_rows)
+{
+    requireRowOffsetRepresentable(row_offset);
+
+    if (is_embedded)
+        return linearEmbedded<PadOp::Add>(data, row_offset, num_rows);
+
+    return linearSegments<PadOp::Add>(data, row_offset, num_rows, 0);
 }
 
 template <PadOp op>
@@ -1041,6 +1055,48 @@ bool lazyIntersectPostingLists(
     {
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Unresolved intersection algorithm: {}", algorithm);
     }
+}
+
+bool lazyAtLeastPostingLists(
+    IColumn & column,
+    const std::vector<PostingListCursor *> & cursors,
+    size_t column_offset,
+    size_t row_offset,
+    size_t num_rows,
+    size_t min_matches)
+{
+    requireRowOffsetRepresentable(row_offset);
+    chassert(cursors.size() < 256);
+
+    auto & data = assert_cast<DB::ColumnUInt8 &>(column).getData();
+    UInt8 * out = data.data() + column_offset;
+
+    /// The windows written by different cursors may overlap in any order, so take their hull.
+    size_t begin = row_offset + num_rows;
+    size_t end = row_offset;
+
+    for (auto * cursor : cursors)
+    {
+        const PostingsApplyWindow written = cursor->linearAdd(out, row_offset, num_rows);
+        if (!written.empty())
+        {
+            begin = std::min(begin, written.begin);
+            end = std::max(end, written.end);
+        }
+    }
+
+    if (begin >= end)
+        return false;
+
+    UInt8 * __restrict row_counts = out + (begin - row_offset);
+    const size_t count = end - begin;
+    const UInt8 target = static_cast<UInt8>(min_matches);
+
+    /// The compiler vectorizes and unrolls this loop.
+    for (size_t i = 0; i < count; ++i)
+        row_counts[i] = (row_counts[i] >= target);
+
+    return true;
 }
 
 }

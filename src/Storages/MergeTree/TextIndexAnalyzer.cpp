@@ -95,14 +95,14 @@ void TextIndexAnalyzer::QueryBuilder::addMissingToken(std::string_view token)
         return;
     }
 
-    /// `Any` mode fails once none of its declared tokens can contribute.
+    /// `Any` mode fails once none of its declared tokens can contribute, `AtLeast` mode once fewer than the required number.
     /// Pattern queries discover tokens dynamically, so the count applies only to pure-token queries.
     if (query->getPatterns().empty())
     {
         if (num_live_tokens > 0)
             --num_live_tokens;
 
-        if (num_live_tokens == 0)
+        if (num_live_tokens < query->getMinMatches())
             markFailed();
     }
 }
@@ -125,7 +125,7 @@ void TextIndexAnalyzer::QueryBuilder::addRowsRange(RowsRange token_rows_range)
     {
         rows_range = token_rows_range;
     }
-    else if (query->getSearchMode() == TextSearchMode::Any)
+    else if (query->getSearchMode() == TextSearchMode::Any || query->getSearchMode() == TextSearchMode::AtLeast)
     {
         rows_range = rows_range->unionWith(token_rows_range);
     }
@@ -141,6 +141,10 @@ void TextIndexAnalyzer::QueryBuilder::addRowsRange(RowsRange token_rows_range)
 void TextIndexAnalyzer::QueryBuilder::addPostings(const PostingList & token_postings)
 {
     if (is_failed)
+        return;
+
+    /// Folding loses how many tokens a row has, so the readers read all postings of an `AtLeast` query.
+    if (query->getSearchMode() == TextSearchMode::AtLeast)
         return;
 
     ++num_read_postings;
@@ -462,6 +466,8 @@ double TextIndexAnalyzer::estimateQueryCardinality(const QueryBuilder & query_bu
             log_cardinality -= static_cast<double>(num_unread) * std::log(n);
             return std::exp(log_cardinality);
         }
+        /// The union is an upper bound of the rows with at least some of the tokens.
+        case TextSearchMode::AtLeast:
         case TextSearchMode::Any:
         {
             /// |union| ≈ n * (1 - (1 - |C_read|/n) * prod(1 - |Ai|/n)) over tokens whose postings are still unread.
