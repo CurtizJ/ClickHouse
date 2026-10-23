@@ -79,6 +79,23 @@ public:
         mutable PaddedPODArrayPtr flat_postings;
     };
 
+    /// Rows of the posting list of a token that the queries referencing it can use.
+    /// The other rows cannot change the analysis, so the packed blocks with only such rows need not be decoded.
+    struct PostingsFilter
+    {
+        /// Rows still readable after the analysis of the primary key and prior skip indexes. nullptr if all rows are readable.
+        const ReadableRows * readable_rows = nullptr;
+        /// True if some query takes every row of the token: an `Any` query, or a query with no folded postings yet.
+        bool need_all_rows = false;
+        /// Otherwise, the postings folded so far by the `All` and `Phrase` queries: a row outside them cannot change these queries.
+        std::vector<const PostingList *> folded_postings;
+
+        /// True if every row of the token may be used.
+        bool isFull() const { return need_all_rows && !readable_rows; }
+        /// True if some query may use a row in the closed range.
+        bool mayUseRows(UInt32 begin, UInt32 end) const;
+    };
+
     explicit TextIndexAnalyzer(const MergeTreeIndexConditionText & condition_text);
 
     bool alwaysFalse() const { return always_false; }
@@ -94,6 +111,9 @@ public:
     void addMissingToken(std::string_view token);
     void addTokenInfo(std::string_view token, TokenPostingsInfoPtr token_info);
     void addPostings(std::string_view token, const PostingList & postings);
+    /// Returns the rows of the posting list of `token` that the active queries referencing it can use.
+    /// Valid until the next call of `addPostings`.
+    PostingsFilter getPostingsFilter(std::string_view token) const;
 
     /// Pushes the row ranges still readable after the analysis of the primary key and prior skip indexes.
     void setReadableRows(std::vector<RowsRange> readable_ranges);

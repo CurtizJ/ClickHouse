@@ -193,6 +193,8 @@
     M(TextIndexPhraseCursorSearches, "Number of phrase searches that found their candidate rows with posting list cursors instead of intersecting bitmaps.", ValueType::Number) \
     M(TextIndexPhraseFallbacks, "Number of times a phrase query skipped the text index because the phrase was estimated to match more rows than 'text_index_hint_max_selectivity', and was evaluated on the column instead.", ValueType::Number) \
     M(TextIndexReadPostings, "Number of times a posting list has been read from the text index.", ValueType::Number) \
+    M(TextIndexAnalysisPackedBlocksDecoded, "Number of packed blocks of posting lists decoded by the text index analysis.", ValueType::Number) \
+    M(TextIndexAnalysisPackedBlocksSkipped, "Number of packed blocks of posting lists skipped by the text index analysis, because no query could use their rows.", ValueType::Number) \
     M(TextIndexUsedEmbeddedPostings, "Number of times a posting list embedded in the dictionary has been used.", ValueType::Number) \
     M(TextIndexUseHint, "Number of index granules where a direct reading from the text index was added as hint and was used.", ValueType::Number) \
     M(TextIndexDiscardHint, "Number of index granules where a direct reading from the text index was added as hint and was discarded due to low selectivity.", ValueType::Number) \

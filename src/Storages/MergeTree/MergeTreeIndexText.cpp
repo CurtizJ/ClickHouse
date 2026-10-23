@@ -38,6 +38,8 @@
 #include <Storages/MergeTree/MarkRange.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPostprocessor.h>
+#include <Storages/MergeTree/PostingListBlockCodec.h>
+#include <Storages/MergeTree/PostingListSegment.h>
 #include <Storages/MergeTree/TextIndexPositionCodec.h>
 #include <Storages/MergeTree/TextIndexBlockedPositionsCodec.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
@@ -62,6 +64,8 @@ namespace ProfileEvents
     extern const Event TextIndexReadSparseIndexBlocks;
     extern const Event TextIndexReadGranulesMicroseconds;
     extern const Event TextIndexReadPostings;
+    extern const Event TextIndexAnalysisPackedBlocksDecoded;
+    extern const Event TextIndexAnalysisPackedBlocksSkipped;
     extern const Event TextIndexTokensCacheHits;
     extern const Event TextIndexTokensCacheMisses;
     extern const Event TextIndexTokensCacheNegativeHits;
@@ -966,6 +970,44 @@ PostingListPtr MergeTreeIndexGranuleText::readPostingsBlock(
     return std::get<PostingListPtr>(cell->value);
 }
 
+namespace
+{
+
+/// Reads the rows of a single-segment posting list from the packed blocks with rows some query may use (see `PostingsFilter`).
+/// The other blocks are not decoded: their rows cannot change the analysis.
+PostingList readPostingsInFilter(
+    MergeTreeIndexReaderStream & stream,
+    const TokenPostingsInfo & token_info,
+    const TextIndexAnalyzer::PostingsFilter & filter,
+    TextIndexPostingsCache * postings_cache,
+    const String & index_id_for_caches)
+{
+    auto segment = getPostingListSegment(stream, token_info, 0, postings_cache, index_id_for_caches, ProfileEvents::TextIndexReadPostings);
+    auto block_codec = createPostingListBlockCodec(segment->codec_type);
+
+    PaddedPODArray<UInt32> row_ids;
+    size_t num_skipped_blocks = 0;
+
+    for (size_t block_idx = 0; block_idx < segment->block_count; ++block_idx)
+    {
+        if (!filter.mayUseRows(segment->getBlockFirstRowId(block_idx), segment->block_last_row_ids[block_idx]))
+        {
+            ++num_skipped_blocks;
+            continue;
+        }
+
+        const size_t old_size = row_ids.size();
+        row_ids.resize(old_size + IPostingListBlockCodec::BLOCK_SIZE);
+        row_ids.resize(old_size + segment->decodeBlock(block_idx, *block_codec, row_ids.data() + old_size));
+    }
+
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksDecoded, segment->block_count - num_skipped_blocks);
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksSkipped, num_skipped_blocks);
+    return buildPostingListFromSortedRowIds(row_ids);
+}
+
+}
+
 void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings_serialization, MergeTreeIndexDeserializationState & state)
 {
     if (analyzer->alwaysFalse())
@@ -1004,14 +1046,28 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         state.reader_settings,
         largest_segment_bytes);
 
+    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
+
     for (const auto & [token, token_info] : tokens_to_read)
     {
         /// Check one more time, because query with this token may have been
         /// discarded by the analyzer after reading postings for previous tokens.
         if (analyzer->isTokenNeeded(token))
         {
-            auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
-            analyzer->addPostings(token, *block);
+            /// The rows the queries can use: the readable rows and the rows folded so far by `All` queries.
+            /// The tokens are read rarest first, so the folded rows bound the blocks decoded for the common tokens.
+            auto filter = analyzer->getPostingsFilter(token);
+
+            if (filter.isFull() || !(token_info->header & IsCompressed) || !(token_info->header & HasBlockIndex))
+            {
+                auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
+                analyzer->addPostings(token, *block);
+            }
+            else
+            {
+                auto postings = readPostingsInFilter(*stream, *token_info, filter, condition_text.postingsCache().get(), index_id_for_caches);
+                analyzer->addPostings(token, postings);
+            }
         }
 
         if (analyzer->alwaysFalse())

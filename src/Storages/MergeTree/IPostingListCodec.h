@@ -95,6 +95,10 @@ inline constexpr bool isValidPostingListBlockCodecType(UInt64 value)
         || value == static_cast<UInt64>(IPostingListCodec::Type::PFor);
 }
 
+/// Builds a posting list from sorted unique row ids. Much faster than `PostingList::addMany`, which inserts
+/// the row ids one by one, because the containers of the bitmap are filled directly.
+PostingList buildPostingListFromSortedRowIds(std::span<const UInt32> row_ids);
+
 class PostingListCodecFactory : public boost::noncopyable
 {
 public:

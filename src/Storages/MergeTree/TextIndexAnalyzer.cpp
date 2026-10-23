@@ -284,6 +284,51 @@ void TextIndexAnalyzer::addPostings(std::string_view token, const PostingList & 
     });
 }
 
+bool TextIndexAnalyzer::PostingsFilter::mayUseRows(UInt32 begin, UInt32 end) const
+{
+    if (readable_rows && !readable_rows->clipRowsRange(RowsRange(begin, end)))
+        return false;
+
+    if (need_all_rows)
+        return true;
+
+    return std::ranges::any_of(folded_postings, [&](const PostingList * postings)
+    {
+        /// An allocation-free check that the folded posting list has a value in the closed range of rows.
+        return roaring::api::roaring_bitmap_intersect_with_range(&postings->roaring, begin, static_cast<UInt64>(end) + 1);
+    });
+}
+
+TextIndexAnalyzer::PostingsFilter TextIndexAnalyzer::getPostingsFilter(std::string_view token) const
+{
+    PostingsFilter filter;
+
+    if (readable_rows)
+        filter.readable_rows = &*readable_rows;
+
+    auto it = queries_by_token.find(token);
+    if (it == queries_by_token.end())
+        return filter;
+
+    for (const auto & query_hash : it->second)
+    {
+        const auto & query_builder = query_builders.at(query_hash);
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        if (query_builder.query->getSearchMode() == TextSearchMode::Any || !query_builder.postings)
+        {
+            filter.need_all_rows = true;
+            filter.folded_postings.clear();
+            break;
+        }
+
+        filter.folded_postings.push_back(&*query_builder.postings);
+    }
+
+    return filter;
+}
+
 void TextIndexAnalyzer::setReadableRows(std::vector<RowsRange> readable_ranges)
 {
     readable_rows.reset();

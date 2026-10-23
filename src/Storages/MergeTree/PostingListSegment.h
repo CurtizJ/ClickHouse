@@ -1,12 +1,18 @@
 #pragma once
 #include <base/types.h>
 #include <Common/PODArray.h>
+#include <Common/ProfileEvents.h>
 #include <Storages/MergeTree/IPostingListCodec.h>
 #include <cstdint>
 #include <memory>
 
 namespace DB
 {
+
+class IPostingListBlockCodec;
+class MergeTreeReaderStream;
+class TextIndexPostingsCache;
+struct TokenPostingsInfo;
 
 /// Immutable, decoded metadata of one segment of a compressed (bitpacked) posting list.
 /// Per-task cursors hold non-owning views, so it is parsed once and safe to share without synchronization.
@@ -38,8 +44,29 @@ struct PostingListSegment
             + block_last_row_ids.allocated_bytes()
             + block_offsets.allocated_bytes();
     }
+
+    /// Reads and parses the `segment_idx`-th segment of the posting list from `stream`:
+    /// the header, the bulk-loaded payload and the Index Section, checked against the token metadata.
+    static PostingListSegment read(MergeTreeReaderStream & stream, const TokenPostingsInfo & info, size_t segment_idx);
+
+    /// The lowest row id the packed block may hold: a block starts after the last row id of the previous block.
+    UInt32 getBlockFirstRowId(size_t block_idx) const { return block_idx == 0 ? first_row_id : block_last_row_ids[block_idx - 1] + 1; }
+
+    /// Decodes the row ids of the packed block into `out`, which must have room for `IPostingListBlockCodec::BLOCK_SIZE` values.
+    /// `block_codec` must have the type `codec_type`. Returns the number of decoded row ids.
+    size_t decodeBlock(size_t block_idx, IPostingListBlockCodec & block_codec, uint32_t * out) const;
 };
 
 using PostingListSegmentPtr = std::shared_ptr<const PostingListSegment>;
+
+/// Returns the `segment_idx`-th segment of the posting list, memoized in `postings_cache` (keyed by `index_id_for_cache`
+/// and the segment offset) when the cache is set. `read_event` is incremented every time the segment is read from `stream`.
+PostingListSegmentPtr getPostingListSegment(
+    MergeTreeReaderStream & stream,
+    const TokenPostingsInfo & info,
+    size_t segment_idx,
+    TextIndexPostingsCache * postings_cache,
+    const String & index_id_for_cache,
+    ProfileEvents::Event read_event);
 
 }

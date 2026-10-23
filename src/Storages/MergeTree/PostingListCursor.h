@@ -144,13 +144,9 @@ public:
     }
 
 private:
-    /// Point `current_segment` at the `segment_idx`-th segment (from the cache or `buildPostingSegment`)
+    /// Point `current_segment` at the `segment_idx`-th segment (from the cache or read from `stream`)
     /// without decoding block data yet. No-op for shared-array cursors, which already hold the array.
     void prepareSegment(size_t segment_idx);
-
-    /// Reads and parses one compressed segment from `stream` into an immutable `PostingListSegment`.
-    /// Invoked on a cache miss (or directly when no posting cache is available).
-    PostingListSegment buildPostingSegment(size_t segment_idx);
 
     /// Advance to the first doc_id >= target within the current segment.
     /// Uses binary search on `block_last_row_ids` for O(log N) access.
@@ -209,7 +205,6 @@ private:
 
     /// Packed-block iteration state within the current segment.
     size_t current_block = 0;            /// Index of the packed block being iterated.
-    UInt32 last_decoded_doc_id = 0;      /// Last doc_id decoded (delta base for next block).
 
     /// Decoded data of the current segment, read directly wherever the segment layout is needed.
     /// Held by shared_ptr so it stays alive for the cursor's lifetime even after the cache evicts it.

@@ -114,23 +114,9 @@ SegmentedPostingListCodec::SegmentData SegmentedPostingListCodec::readSegmentDat
 
 void SegmentedPostingListCodec::decode(ReadBuffer & in, UInt64 max_cardinality, PostingList & postings, PaddedPODArray<char> & buffer)
 {
-    auto segment_data = readSegmentData(in, max_cardinality, buffer);
-
-    const size_t num_blocks = segment_data.header.cardinality / BLOCK_SIZE;
-    const size_t tail_size = segment_data.header.cardinality % BLOCK_SIZE;
-
-    block_values.resize(BLOCK_SIZE);
-
-    for (size_t i = 0; i < num_blocks; i++)
-    {
-        decodeBlock(segment_data.payload, std::span(block_values.data(), BLOCK_SIZE));
-        postings.addMany(BLOCK_SIZE, block_values.data());
-    }
-    if (tail_size)
-    {
-        decodeBlock(segment_data.payload, std::span(block_values.data(), tail_size));
-        postings.addMany(tail_size, block_values.data());
-    }
+    PaddedPODArray<UInt32> row_ids;
+    decode(in, max_cardinality, row_ids, buffer);
+    postings = buildPostingListFromSortedRowIds(row_ids);
 }
 
 void SegmentedPostingListCodec::decode(ReadBuffer & in, UInt64 max_cardinality, PaddedPODArray<UInt32> & row_ids, PaddedPODArray<char> & buffer)
