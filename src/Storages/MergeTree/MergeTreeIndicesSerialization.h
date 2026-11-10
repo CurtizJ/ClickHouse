@@ -82,6 +82,9 @@ struct MergeTreeIndexDeserializationState
     const IMergeTreeIndex & index;
     const MarkRanges * readable_ranges = nullptr;
     bool text_index_read_postings = true;
+    /// Text index: the analysis may approximate dense posting lists at the granularity of marks instead of decoding them.
+    /// Their tokens stay unread, so the consumer of the granule must read their posting lists itself if it needs the rows.
+    bool text_index_approximate_postings = false;
     const MergeTreeReaderSettings & reader_settings;
 };
 

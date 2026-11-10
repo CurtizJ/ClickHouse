@@ -3,6 +3,7 @@
 -- Tests that the text index analysis decodes only the packed blocks of a posting list that some query can use:
 -- the blocks with rows readable after the primary key analysis, and for `All` queries the blocks with a row
 -- of the intersection folded so far. The other blocks cannot change the result, so they are skipped.
+-- A dense posting list of an `Any` query is approximated by the spans of its blocks instead (see 05616).
 
 SET enable_analyzer = 1;
 SET use_skip_indexes = 1;
@@ -12,6 +13,8 @@ SET use_text_index_postings_cache = 0;
 -- Analyze the index once per part, at the planning stage, so that the counts of the packed blocks below are exact.
 SET use_skip_indexes_on_data_read = 0;
 SET query_plan_direct_read_from_text_index = 0;
+-- Dense posting lists are approximated only in the lazy mode.
+SET text_index_posting_list_apply_mode = 'lazy';
 
 DROP TABLE IF EXISTS tab_pfor;
 DROP TABLE IF EXISTS tab_bitpacking;
@@ -53,24 +56,28 @@ INSERT INTO tab_bitpacking SELECT * FROM tab_pfor;
 OPTIMIZE TABLE tab_pfor FINAL;
 OPTIMIZE TABLE tab_bitpacking FINAL;
 
--- 'rare' is read first, then only the 20 blocks of 'common' with a row of 'rare' are decoded.
+-- The block of 'rare' is decoded first, then only the 20 blocks of 'common' with a row of 'rare'.
 SELECT count() FROM tab_pfor WHERE hasAllTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_pfor_all_rare';
 -- The intersection starts from the embedded postings of 'tiny': 3 blocks of 'common'.
 SELECT count() FROM tab_pfor WHERE hasAllTokens(s, ['common', 'tiny']) SETTINGS log_comment = 'skip_blocks_pfor_all_tiny';
 -- The primary key leaves the rows from 98304 readable: the block of 'rare' is decoded, 'rare' keeps 10 rows,
 -- then 10 blocks of 'common' are decoded.
 SELECT count() FROM tab_pfor WHERE id >= 100000 AND hasAllTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_pfor_all_pk';
--- An `Any` query takes every readable row: the primary key leaves the rows up to 24575 readable,
--- so the block of 'rare' and the 192 blocks of 'common' inside them are decoded.
+-- An `Any` query takes every readable row: the primary key leaves the rows up to 24575 readable. The blocks of
+-- 'common' span less than a mark, so 'common' is approximated by their spans and only the block of 'rare' is decoded.
 SELECT count() FROM tab_pfor WHERE id < 20000 AND hasAnyTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_pfor_any_pk';
--- 'common' is used by an `Any` query too, so its posting list is read in full.
+-- 'common' is used by an `All` query with two tokens and by an `Any` query: neither an intersection nor an
+-- approximation can be used, so all its 1563 blocks are decoded, and the block of 'rare'.
 SELECT count() FROM tab_pfor WHERE hasAllTokens(s, ['common', 'rare']) AND hasAnyTokens(s, ['common', 'tiny']) SETTINGS log_comment = 'skip_blocks_pfor_mixed';
--- Two `All` queries share 'common': the blocks with a row of either intersection are decoded.
+-- Two `All` queries share 'common': each of them decodes the 20 blocks with a row of its intersection,
+-- after the blocks of 'rare' and 'rare2'.
 SELECT count() FROM tab_pfor WHERE hasAllTokens(s, ['common', 'rare']) OR hasAllTokens(s, ['common', 'rare2']) SETTINGS log_comment = 'skip_blocks_pfor_two_all';
 
 SELECT count() FROM tab_bitpacking WHERE hasAllTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_bitpacking_all_rare';
 SELECT count() FROM tab_bitpacking WHERE id >= 100000 AND hasAllTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_bitpacking_all_pk';
-SELECT count() FROM tab_bitpacking WHERE id < 20000 AND hasAnyTokens(s, ['common', 'rare']) SETTINGS log_comment = 'skip_blocks_bitpacking_any_pk';
+-- Nothing is approximated in the materialize mode: the block of 'rare' and the 192 blocks of 'common' with readable rows are decoded.
+SELECT count() FROM tab_bitpacking WHERE id < 20000 AND hasAnyTokens(s, ['common', 'rare'])
+SETTINGS log_comment = 'skip_blocks_bitpacking_any_pk', text_index_posting_list_apply_mode = 'materialize';
 
 SYSTEM FLUSH LOGS query_log;
 

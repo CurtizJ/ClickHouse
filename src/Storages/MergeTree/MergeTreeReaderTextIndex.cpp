@@ -111,6 +111,7 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
         .index = *index_read_task.index.index,
         .readable_ranges = nullptr,
         .text_index_read_postings = true,
+        .text_index_approximate_postings = true,
         .reader_settings = settings,
     };
 
@@ -736,7 +737,7 @@ PostingList MergeTreeReaderTextIndex::buildPostingsForQuery(
 
     std::optional<PostingList> result;
     if (query_builder.postings)
-        result = *query_builder.postings & range_posting;
+        result = query_builder.postings->getBitmapInRange(static_cast<UInt32>(range.begin), static_cast<UInt32>(range.end));
 
     if (!query_builder.needReadPostings())
         return result.value_or(PostingList{});
@@ -858,8 +859,10 @@ void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const PostingList & 
     }
 }
 
-const PostingList * MergeTreeReaderTextIndex::getFoldedPostings(size_t column_idx) const
+const FoldedPostings * MergeTreeReaderTextIndex::getFoldedPostings(size_t column_idx) const
 {
+    static const FoldedPostings empty_postings;
+
     if (use_lazy_mode || is_always_true[column_idx] || use_fallback[column_idx])
         return nullptr;
 
@@ -880,7 +883,7 @@ const PostingList * MergeTreeReaderTextIndex::getFoldedPostings(size_t column_id
     return query_builder.postings ? &*query_builder.postings : &empty_postings;
 }
 
-void MergeTreeReaderTextIndex::fillColumnFromPostings(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows)
+void MergeTreeReaderTextIndex::fillColumnFromPostings(IColumn & column, const FoldedPostings & postings, size_t row_offset, size_t num_rows)
 {
     ProfileEvents::increment(ProfileEvents::TextIndexFilledFromFoldedPostings);
 
@@ -888,9 +891,8 @@ void MergeTreeReaderTextIndex::fillColumnFromPostings(IColumn & column, const Po
     if (row_offset > std::numeric_limits<UInt32>::max())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Text index posting lists do not support row offset larger than UINT32_MAX, got {}", row_offset);
 
-    PostingList range;
-    range.addRangeClosed(static_cast<UInt32>(row_offset), static_cast<UInt32>(std::min<size_t>(row_offset + num_rows - 1, std::numeric_limits<UInt32>::max())));
-    fillColumn(column, postings & range, row_offset, num_rows);
+    auto range_end = static_cast<UInt32>(std::min<size_t>(row_offset + num_rows - 1, std::numeric_limits<UInt32>::max()));
+    fillColumn(column, postings.getBitmapInRange(static_cast<UInt32>(row_offset), range_end), row_offset, num_rows);
 }
 
 MergeTreeReaderTextIndex::ResolvedSearch MergeTreeReaderTextIndex::resolveSearch(size_t column_idx)
@@ -926,10 +928,14 @@ MergeTreeReaderTextIndex::ResolvedSearch MergeTreeReaderTextIndex::resolveSearch
 
     if (query_builder.postings && !query_builder.postings->isEmpty())
     {
-        /// Build a cursor over the sorted array of postings, shared by all readers of the granule.
-        auto cursor = std::make_shared<PostingListCursor>(query_builder.getFlatPostings());
-        resolved.cursors.emplace_back(cursor.get());
-        lazy_cursors.emplace_back(std::move(cursor));
+        /// Build cursors over the sorted arrays of postings, shared by all readers of the granule.
+        /// A folded union may consist of several arrays, which are not merged: the cursors unite them.
+        for (auto & rows : query_builder.postings->getArrays())
+        {
+            auto cursor = std::make_shared<PostingListCursor>(std::move(rows));
+            resolved.cursors.emplace_back(cursor.get());
+            lazy_cursors.emplace_back(std::move(cursor));
+        }
     }
 
     if (resolved.cursors.empty())

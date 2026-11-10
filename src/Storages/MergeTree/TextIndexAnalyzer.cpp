@@ -1,16 +1,20 @@
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
+#include <Storages/MergeTree/PostingListBlockCodec.h>
 #include <Columns/ColumnString.h>
 #include <Common/ProfileEvents.h>
 #include <Common/StringUtils.h>
 #include <Common/typeid_cast.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace ProfileEvents
 {
     extern const Event TextIndexUseHint;
     extern const Event TextIndexDiscardHint;
     extern const Event TextIndexUsedEmbeddedPostings;
+    extern const Event TextIndexAnalysisPackedBlocksDecoded;
+    extern const Event TextIndexAnalysisPackedBlocksSkipped;
 }
 
 namespace DB
@@ -21,6 +25,367 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
+
+const PostingList & TokenPostings::getBitmap()
+{
+    if (bitmap)
+        return *bitmap;
+
+    if (!bitmap_of_array)
+        bitmap_of_array = buildPostingListFromSortedRowIds(*array);
+
+    return *bitmap_of_array;
+}
+
+const PaddedPODArrayPtr & TokenPostings::getArray()
+{
+    if (!array)
+    {
+        auto rows = std::make_shared<PaddedPODArray<UInt32>>(bitmap->cardinality());
+        bitmap->toUint32Array(rows->data());
+        array = std::move(rows);
+    }
+
+    return array;
+}
+
+namespace
+{
+
+/// Like `std::lower_bound`, but looks from the beginning with exponentially growing steps first, so a value close to
+/// the beginning is found in a few steps that stay in the cache. Used to look up the sorted rows of a small array in
+/// a large one one by one.
+const UInt32 * gallopLowerBound(const UInt32 * first, const UInt32 * last, UInt32 value)
+{
+    const size_t size = last - first;
+    size_t bound = 1;
+
+    while (bound < size && first[bound - 1] < value)
+        bound *= 2;
+
+    return std::lower_bound(first + bound / 2, first + std::min(bound, size), value);
+}
+
+/// Merges two sorted arrays of unique rows. A much smaller array is merged into the larger one by looking up
+/// its rows there and copying the runs of the larger array between them.
+PaddedPODArrayPtr uniteSortedArrays(const PaddedPODArray<UInt32> & lhs, const PaddedPODArray<UInt32> & rhs)
+{
+    const auto & small = lhs.size() <= rhs.size() ? lhs : rhs;
+    const auto & large = lhs.size() <= rhs.size() ? rhs : lhs;
+
+    auto result = std::make_shared<PaddedPODArray<UInt32>>(small.size() + large.size());
+    UInt32 * out = result->data();
+
+    if (small.size() * 32 < large.size())
+    {
+        const UInt32 * pos = large.begin();
+        for (const UInt32 row : small)
+        {
+            const UInt32 * next = gallopLowerBound(pos, large.end(), row);
+            out = std::copy(pos, next, out);
+            pos = next;
+
+            if (pos == large.end() || *pos != row)
+                *out++ = row;
+        }
+
+        out = std::copy(pos, large.end(), out);
+    }
+    else
+    {
+        out = std::set_union(small.begin(), small.end(), large.begin(), large.end(), out);
+    }
+
+    result->resize(out - result->data());
+    return result;
+}
+
+/// Intersects two sorted arrays of unique rows. The rows of a much smaller array are looked up in the larger one.
+PaddedPODArrayPtr intersectSortedArrays(const PaddedPODArray<UInt32> & lhs, const PaddedPODArray<UInt32> & rhs)
+{
+    const auto & small = lhs.size() <= rhs.size() ? lhs : rhs;
+    const auto & large = lhs.size() <= rhs.size() ? rhs : lhs;
+
+    auto result = std::make_shared<PaddedPODArray<UInt32>>(small.size());
+    UInt32 * out = result->data();
+
+    if (small.size() * 32 < large.size())
+    {
+        const UInt32 * pos = large.begin();
+        for (const UInt32 row : small)
+        {
+            pos = gallopLowerBound(pos, large.end(), row);
+            if (pos == large.end())
+                break;
+
+            if (*pos == row)
+                *out++ = row;
+        }
+    }
+    else
+    {
+        out = std::set_intersection(small.begin(), small.end(), large.begin(), large.end(), out);
+    }
+
+    result->resize(out - result->data());
+    return result;
+}
+
+}
+
+namespace
+{
+
+/// The number of rows two sorted arrays of unique rows have in common. The rows of the smaller array are looked up in the larger one.
+size_t countCommonRows(const PaddedPODArray<UInt32> & lhs, const PaddedPODArray<UInt32> & rhs)
+{
+    const auto & small = lhs.size() <= rhs.size() ? lhs : rhs;
+    const auto & large = lhs.size() <= rhs.size() ? rhs : lhs;
+
+    size_t num_common = 0;
+    const UInt32 * pos = large.begin();
+
+    for (const UInt32 row : small)
+    {
+        pos = gallopLowerBound(pos, large.end(), row);
+        if (pos == large.end())
+            break;
+
+        num_common += *pos == row;
+    }
+
+    return num_common;
+}
+
+}
+
+FoldedPostings::FoldedPostings(TokenPostings & postings, bool as_array)
+{
+    if (as_array)
+        array = postings.getArray();
+    else
+        bitmap = postings.getBitmap();
+}
+
+size_t FoldedPostings::cardinality() const
+{
+    chassert(!isUnion() || is_finalized);
+
+    if (array)
+        return array->size();
+
+    return isUnion() ? union_cardinality : bitmap.cardinality();
+}
+
+bool FoldedPostings::hasRowsInRange(UInt32 begin, UInt32 end) const
+{
+    chassert(!isUnion() || is_finalized);
+
+    const auto has_rows_in_range = [&](const PaddedPODArray<UInt32> & rows)
+    {
+        const auto * it = std::lower_bound(rows.begin(), rows.end(), begin);
+        return it != rows.end() && *it <= end;
+    };
+
+    if (array)
+        return has_rows_in_range(*array);
+
+    if (isUnion())
+        return std::ranges::any_of(arrays_to_unite, [&](const auto & rows) { return has_rows_in_range(*rows); });
+
+    /// An allocation-free check that the bitmap has a value in the closed range of rows.
+    return roaring::api::roaring_bitmap_intersect_with_range(&bitmap.roaring, begin, static_cast<UInt64>(end) + 1);
+}
+
+PostingList FoldedPostings::getBitmapInRange(UInt32 begin, UInt32 end) const
+{
+    if (isArray())
+    {
+        const auto & rows = *getArray();
+        const auto * range_begin = std::lower_bound(rows.begin(), rows.end(), begin);
+        const auto * range_end = std::upper_bound(range_begin, rows.end(), end);
+        return buildPostingListFromSortedRowIds(std::span(range_begin, range_end));
+    }
+
+    PostingList range;
+    range.addRangeClosed(begin, end);
+    return bitmap & range;
+}
+
+PostingList FoldedPostings::getBitmap() const
+{
+    return isArray() ? buildPostingListFromSortedRowIds(*getArray()) : bitmap;
+}
+
+PaddedPODArrayPtr FoldedPostings::getArray() const
+{
+    chassert(!isUnion() || is_finalized);
+
+    if (array)
+        return array;
+
+    std::call_once(single_array_once, [&]
+    {
+        if (isUnion())
+        {
+            single_array = uniteSortedArrays(*arrays_to_unite.front(), *arrays_to_unite.back());
+            return;
+        }
+
+        auto bitmap_array = std::make_shared<PaddedPODArray<UInt32>>(bitmap.cardinality());
+        bitmap.toUint32Array(bitmap_array->data());
+        single_array = std::move(bitmap_array);
+    });
+
+    return single_array;
+}
+
+std::vector<PaddedPODArrayPtr> FoldedPostings::getArrays() const
+{
+    chassert(!isUnion() || is_finalized);
+    return isUnion() ? arrays_to_unite : std::vector<PaddedPODArrayPtr>{getArray()};
+}
+
+void FoldedPostings::unite(TokenPostings & postings)
+{
+    chassert(!is_finalized);
+
+    if (!isArray())
+    {
+        bitmap |= postings.getBitmap();
+        return;
+    }
+
+    if (array)
+        arrays_to_unite.push_back(std::move(array));
+
+    arrays_to_unite.push_back(postings.getArray());
+}
+
+void FoldedPostings::intersect(TokenPostings & postings)
+{
+    chassert(!isUnion());
+
+    if (!array)
+    {
+        bitmap &= postings.getBitmap();
+        return;
+    }
+
+    if (postings.hasArray())
+    {
+        array = intersectSortedArrays(*array, *postings.getArray());
+        return;
+    }
+
+    const auto & token_bitmap = postings.getBitmap();
+    auto result = std::make_shared<PaddedPODArray<UInt32>>();
+    result->reserve(array->size());
+    roaring::BulkContext context;
+
+    for (const UInt32 row : *array)
+    {
+        if (token_bitmap.containsBulk(context, row))
+            result->push_back(row);
+    }
+
+    array = std::move(result);
+}
+
+void FoldedPostings::intersect(const PostingListSegment & segment, IPostingListBlockCodec & block_codec)
+{
+    if (!array)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot intersect the bitmap of folded postings with a posting list segment");
+
+    chassert(!isUnion());
+
+    const auto & block_last_row_ids = segment.block_last_row_ids;
+    const auto * blocks_end = block_last_row_ids.begin() + segment.block_count;
+
+    UInt32 values[IPostingListBlockCodec::BLOCK_SIZE];
+    size_t num_values = 0;
+    size_t value_idx = 0;
+    size_t block_idx = 0;
+    bool is_block_decoded = false;
+    size_t num_decoded_blocks = 0;
+
+    auto result = std::make_shared<PaddedPODArray<UInt32>>();
+    result->reserve(array->size());
+
+    for (const UInt32 row : *array)
+    {
+        /// Move to the first block that ends at or after the row. The rows are sorted, so the blocks are visited in order.
+        if (row > block_last_row_ids[block_idx])
+        {
+            block_idx = std::lower_bound(block_last_row_ids.begin() + block_idx + 1, blocks_end, row) - block_last_row_ids.begin();
+            if (block_idx == segment.block_count)
+                break;
+
+            is_block_decoded = false;
+        }
+
+        /// The row falls between the blocks, so the posting list does not contain it.
+        if (row < segment.getBlockFirstRowId(block_idx))
+            continue;
+
+        if (!is_block_decoded)
+        {
+            num_values = segment.decodeBlock(block_idx, block_codec, values);
+            value_idx = 0;
+            is_block_decoded = true;
+            ++num_decoded_blocks;
+        }
+
+        while (value_idx < num_values && values[value_idx] < row)
+            ++value_idx;
+
+        if (value_idx < num_values && values[value_idx] == row)
+            result->push_back(row);
+    }
+
+    array = std::move(result);
+
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksDecoded, num_decoded_blocks);
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksSkipped, segment.block_count - num_decoded_blocks);
+}
+
+void FoldedPostings::finalize()
+{
+    if (!isUnion() || is_finalized)
+        return;
+
+    is_finalized = true;
+
+    /// The largest array, usually the posting list of a frequent token, is kept as is: merging it would copy all its rows.
+    std::ranges::nth_element(arrays_to_unite, arrays_to_unite.begin(), [](const auto & lhs, const auto & rhs) { return lhs->size() > rhs->size(); });
+    auto largest = std::move(arrays_to_unite.front());
+    std::vector<PaddedPODArrayPtr> others(std::make_move_iterator(arrays_to_unite.begin() + 1), std::make_move_iterator(arrays_to_unite.end()));
+    arrays_to_unite.clear();
+
+    if (others.empty())
+    {
+        array = std::move(largest);
+        return;
+    }
+
+    /// Merge the two smallest of the other arrays first, so that every row is copied only a logarithmic number of times.
+    const auto is_larger = [](const PaddedPODArrayPtr & lhs, const PaddedPODArrayPtr & rhs) { return lhs->size() > rhs->size(); };
+    std::ranges::make_heap(others, is_larger);
+
+    while (others.size() > 1)
+    {
+        std::ranges::pop_heap(others, is_larger);
+        auto smallest = std::move(others.back());
+        others.pop_back();
+
+        std::ranges::pop_heap(others, is_larger);
+        others.back() = uniteSortedArrays(*smallest, *others.back());
+        std::ranges::push_heap(others, is_larger);
+    }
+
+    union_cardinality = largest->size() + others.front()->size() - countCommonRows(*largest, *others.front());
+    arrays_to_unite = {std::move(largest), std::move(others.front())};
+}
 
 TextIndexAnalyzer::ReadableRows::ReadableRows(std::vector<RowsRange> ranges_)
     : ranges(std::move(ranges_))
@@ -65,6 +430,29 @@ PostingList TextIndexAnalyzer::ReadableRows::clipPostings(const PostingList & po
     return postings & ranges_bitmap;
 }
 
+void TextIndexAnalyzer::ReadableRows::clipRows(PaddedPODArray<UInt32> & rows) const
+{
+    size_t num_kept = 0;
+    const UInt32 * it = rows.begin();
+
+    for (const auto & range : ranges)
+    {
+        it = std::lower_bound(it, rows.cend(), range.begin);
+        const UInt32 * range_end = std::upper_bound(it, rows.cend(), range.end);
+
+        if (rows.data() + num_kept != it)
+            memmove(rows.data() + num_kept, it, (range_end - it) * sizeof(UInt32));
+
+        num_kept += range_end - it;
+        it = range_end;
+
+        if (it == rows.end())
+            break;
+    }
+
+    rows.resize(num_kept);
+}
+
 size_t TextIndexAnalyzer::ReadableRows::getSizeInBytes() const
 {
     return ranges.capacity() * sizeof(RowsRange) + ranges_bitmap.getSizeInBytes();
@@ -74,6 +462,7 @@ void TextIndexAnalyzer::QueryBuilder::markFailed()
 {
     is_failed = true;
     postings.reset();
+    approximate_postings.reset();
     rows_range.reset();
     num_live_tokens = 0;
 }
@@ -108,7 +497,7 @@ void TextIndexAnalyzer::QueryBuilder::addMissingToken(std::string_view token)
 }
 
 void TextIndexAnalyzer::QueryBuilder::addTokenInfo(
-    std::string_view token, TokenPostingsInfoPtr token_info, RowsRange token_rows_range, const PostingList * embedded_postings)
+    std::string_view token, TokenPostingsInfoPtr token_info, RowsRange token_rows_range, TokenPostings * embedded_postings)
 {
     /// A pattern scan delivers known tokens again, so embedded postings are added only with a new token.
     if (is_failed || tokens.contains(token))
@@ -143,43 +532,64 @@ void TextIndexAnalyzer::QueryBuilder::addRowsRange(RowsRange token_rows_range)
     }
 }
 
-void TextIndexAnalyzer::QueryBuilder::addPostings(const PostingList & token_postings)
+void TextIndexAnalyzer::QueryBuilder::addPostings(TokenPostings & token_postings)
 {
     if (is_failed)
         return;
 
     ++num_read_postings;
+    bool need_all_tokens = query->getSearchMode() == TextSearchMode::All || query->getSearchMode() == TextSearchMode::Phrase;
 
     if (!postings)
-        postings = token_postings;
-    else if (query->getSearchMode() == TextSearchMode::Any)
-        *postings |= token_postings;
+        postings.emplace(token_postings, fold_into_arrays);
+    else if (need_all_tokens)
+        postings->intersect(token_postings);
     else
-        *postings &= token_postings;
+        postings->unite(token_postings);
 
     /// `All` mode fails as soon as the running intersection of readable postings becomes empty.
-    bool need_all_tokens = query->getSearchMode() == TextSearchMode::All || query->getSearchMode() == TextSearchMode::Phrase;
     if (need_all_tokens && postings->isEmpty())
         markFailed();
 }
 
-PaddedPODArrayPtr TextIndexAnalyzer::QueryBuilder::getFlatPostings() const
+void TextIndexAnalyzer::QueryBuilder::addApproximatePostings(const PostingList & token_postings)
 {
-    chassert(postings);
+    if (is_failed)
+        return;
 
-    std::call_once(flat_postings_once, [&]
-    {
-        auto flat = std::make_shared<PaddedPODArray<UInt32>>(postings->cardinality());
-        postings->toUint32Array(flat->data());
-        flat_postings = std::move(flat);
-    });
+    ++num_approximate_postings;
 
-    return flat_postings;
+    if (!approximate_postings)
+        approximate_postings = token_postings;
+    else
+        *approximate_postings |= token_postings;
 }
 
-TextIndexAnalyzer::TextIndexAnalyzer(const MergeTreeIndexConditionText & condition_text)
+bool TextIndexAnalyzer::QueryBuilder::canApproximatePostings() const
+{
+    if (!query->getPatterns().empty())
+        return false;
+
+    const auto search_mode = query->getSearchMode();
+    return search_mode == TextSearchMode::Any || (search_mode == TextSearchMode::All && query->getTokens().size() == 1);
+}
+
+void TextIndexAnalyzer::QueryBuilder::intersectPostings(const PostingListSegment & segment, IPostingListBlockCodec & block_codec)
+{
+    if (is_failed)
+        return;
+
+    ++num_read_postings;
+    postings->intersect(segment, block_codec);
+
+    if (postings->isEmpty())
+        markFailed();
+}
+
+TextIndexAnalyzer::TextIndexAnalyzer(const MergeTreeIndexConditionText & condition_text, IPostingListCodec::Type postings_codec_type)
 {
     global_search_mode = condition_text.getGlobalSearchMode();
+    fold_into_arrays = postings_codec_type != IPostingListCodec::Type::None;
     bool all_patterns_have_automata = true;
     bool has_general_pattern = false;
 
@@ -187,6 +597,8 @@ TextIndexAnalyzer::TextIndexAnalyzer(const MergeTreeIndexConditionText & conditi
     {
         auto & query_builder = query_builders[hash];
         query_builder.query = query;
+        /// A pattern can match many tokens: their union is cheaper to fold into a bitmap.
+        query_builder.fold_into_arrays = fold_into_arrays && query->getPatterns().empty();
 
         for (const auto & token : query->getTokens())
         {
@@ -281,15 +693,18 @@ void TextIndexAnalyzer::addTokenInfo(std::string_view token, TokenPostingsInfoPt
     }
 
     /// Clip the embedded postings to the readable rows once.
-    std::optional<PostingList> embedded_postings;
+    std::optional<TokenPostings> embedded_postings;
     if (!token_info->embedded_postings.empty())
     {
         tokens_with_postings.emplace(token);
         ProfileEvents::increment(ProfileEvents::TextIndexUsedEmbeddedPostings);
 
-        embedded_postings.emplace(token_info->embedded_postings.size(), token_info->embedded_postings.data());
+        auto rows = std::make_shared<PaddedPODArray<UInt32>>();
+        rows->insert(token_info->embedded_postings.begin(), token_info->embedded_postings.end());
         if (readable_rows)
-            embedded_postings = readable_rows->clipPostings(*embedded_postings);
+            readable_rows->clipRows(*rows);
+
+        embedded_postings.emplace(std::move(rows));
     }
 
     const bool no_readable_postings = embedded_postings && embedded_postings->isEmpty();
@@ -321,52 +736,52 @@ void TextIndexAnalyzer::addPostings(std::string_view token, const PostingList & 
     if (readable_rows)
     {
         clipped_postings = readable_rows->clipPostings(postings);
-
-        if (clipped_postings->isEmpty())
-        {
-            processTokenOperation(token, [&](QueryBuilder & query_builder)
-            {
-                query_builder.addMissingToken(token);
-            });
-
-            queries_by_token.erase(token);
-            return;
-        }
-
         postings_ptr = &*clipped_postings;
+    }
+
+    TokenPostings token_postings(*postings_ptr);
+    foldPostings(token, token_postings);
+}
+
+void TextIndexAnalyzer::addPostings(std::string_view token, PaddedPODArray<UInt32> && rows)
+{
+    tokens_with_postings.emplace(token);
+
+    /// Clip the postings to the readable rows once.
+    if (readable_rows)
+        readable_rows->clipRows(rows);
+
+    TokenPostings token_postings(std::make_shared<PaddedPODArray<UInt32>>(std::move(rows)));
+    foldPostings(token, token_postings);
+}
+
+void TextIndexAnalyzer::foldPostings(std::string_view token, TokenPostings & postings)
+{
+    /// A token without readable postings is missing.
+    if (postings.isEmpty())
+    {
+        processTokenOperation(token, [&](QueryBuilder & query_builder)
+        {
+            query_builder.addMissingToken(token);
+        });
+
+        queries_by_token.erase(token);
+        return;
     }
 
     processTokenOperation(token, [&](QueryBuilder & query_builder)
     {
-        query_builder.addPostings(*postings_ptr);
+        query_builder.addPostings(postings);
     });
 }
 
-bool TextIndexAnalyzer::PostingsFilter::mayUseRows(UInt32 begin, UInt32 end) const
+bool TextIndexAnalyzer::canApproximatePostings(std::string_view token) const
 {
-    if (readable_rows && !readable_rows->clipRowsRange(RowsRange(begin, end)))
-        return false;
-
-    if (need_all_rows)
-        return true;
-
-    return std::ranges::any_of(folded_postings, [&](const PostingList * postings)
-    {
-        /// An allocation-free check that the folded posting list has a value in the closed range of rows.
-        return roaring::api::roaring_bitmap_intersect_with_range(&postings->roaring, begin, static_cast<UInt64>(end) + 1);
-    });
-}
-
-TextIndexAnalyzer::PostingsFilter TextIndexAnalyzer::getPostingsFilter(std::string_view token) const
-{
-    PostingsFilter filter;
-
-    if (readable_rows)
-        filter.readable_rows = &*readable_rows;
-
     auto it = queries_by_token.find(token);
     if (it == queries_by_token.end())
-        return filter;
+        return false;
+
+    bool has_active_queries = false;
 
     for (const auto & query_hash : it->second)
     {
@@ -374,17 +789,79 @@ TextIndexAnalyzer::PostingsFilter TextIndexAnalyzer::getPostingsFilter(std::stri
         if (query_builder.is_failed || query_builder.is_bypassed)
             continue;
 
-        if (query_builder.query->getSearchMode() == TextSearchMode::Any || !query_builder.postings)
-        {
-            filter.need_all_rows = true;
-            filter.folded_postings.clear();
-            break;
-        }
+        if (!query_builder.canApproximatePostings())
+            return false;
 
-        filter.folded_postings.push_back(&*query_builder.postings);
+        has_active_queries = true;
     }
 
-    return filter;
+    return has_active_queries;
+}
+
+void TextIndexAnalyzer::addApproximatePostings(std::string_view token, const PostingList & postings)
+{
+    /// The token is not added to `tokens_with_postings`: the readers read its posting list.
+    if (postings.isEmpty())
+    {
+        processTokenOperation(token, [&](QueryBuilder & query_builder)
+        {
+            query_builder.addMissingToken(token);
+        });
+
+        queries_by_token.erase(token);
+        return;
+    }
+
+    processTokenOperation(token, [&](QueryBuilder & query_builder)
+    {
+        query_builder.addApproximatePostings(postings);
+    });
+}
+
+void TextIndexAnalyzer::finalize()
+{
+    for (auto & [_, query_builder] : query_builders)
+    {
+        if (query_builder.postings)
+            query_builder.postings->finalize();
+    }
+}
+
+bool TextIndexAnalyzer::canIntersectPostings(std::string_view token) const
+{
+    auto it = queries_by_token.find(token);
+    if (!fold_into_arrays || it == queries_by_token.end())
+        return false;
+
+    bool has_active_queries = false;
+
+    for (const auto & query_hash : it->second)
+    {
+        const auto & query_builder = query_builders.at(query_hash);
+        if (query_builder.is_failed || query_builder.is_bypassed)
+            continue;
+
+        const auto search_mode = query_builder.query->getSearchMode();
+        if (search_mode != TextSearchMode::All && search_mode != TextSearchMode::Phrase)
+            return false;
+
+        if (!query_builder.postings || !query_builder.postings->isArray())
+            return false;
+
+        has_active_queries = true;
+    }
+
+    return has_active_queries;
+}
+
+void TextIndexAnalyzer::intersectPostings(std::string_view token, const PostingListSegment & segment, IPostingListBlockCodec & block_codec)
+{
+    tokens_with_postings.emplace(token);
+
+    processTokenOperation(token, [&](QueryBuilder & query_builder)
+    {
+        query_builder.intersectPostings(segment, block_codec);
+    });
 }
 
 void TextIndexAnalyzer::setReadableRows(std::vector<RowsRange> readable_ranges)

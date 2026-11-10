@@ -1,0 +1,35 @@
+-- the approximation selects the same granules as the decoded posting lists
+Parts: 1 | Granules: 13
+Granules: 25/25
+Granules: 13/25
+Parts: 1 | Granules: 13
+Granules: 25/25
+Granules: 13/25
+Parts: 1 | Granules: 9
+Granules: 25/25
+Granules: 9/25
+Parts: 1 | Granules: 9
+Granules: 25/25
+Granules: 9/25
+Parts: 1 | Granules: 6
+Granules: 13/25
+Granules: 6/13
+Parts: 1 | Granules: 6
+Granules: 13/25
+Granules: 6/13
+-- which posting lists are approximated
+35005
+35000
+0
+206
+35005
+approximate_all	0
+approximate_any	1
+approximate_materialize	0
+approximate_single	1
+approximate_sparse	0
+-- the results do not depend on the index and on the way it is applied
+35005	35000	10005	35165	2175670015
+35005	35000	10005	35165	2175670015
+35005	35000	10005	35165	2175670015
+35005	35000	10005	35165

@@ -275,9 +275,13 @@ UInt64 computeCountForPart(
                 granule->getIndexIdForCaches()));
         }
 
-        /// The folded small postings join the intersection or union as one more cursor over a flat array.
+        /// The folded small postings join the intersection or union as more cursors over sorted arrays:
+        /// a folded union may consist of several arrays.
         if (query_builder.postings && !query_builder.postings->isEmpty())
-            cursors.push_back(std::make_shared<PostingListCursor>(query_builder.getFlatPostings()));
+        {
+            for (auto & rows : query_builder.postings->getArrays())
+                cursors.push_back(std::make_shared<PostingListCursor>(std::move(rows)));
+        }
 
         /// `rows_range` is the hull of the tokens' rows for `Any` and their overlap for `All`; an empty overlap fails the query.
         chassert(query_builder.rows_range);
@@ -314,7 +318,10 @@ UInt64 computeCountForPart(
 
     if (search_mode != TextSearchMode::All)
     {
-        std::optional<PostingList> merged_postings = query_builder.postings;
+        std::optional<PostingList> merged_postings;
+        if (query_builder.postings)
+            merged_postings = query_builder.postings->getBitmap();
+
         for (const auto * token_info : tokens_to_read)
         {
             check_cancelled();
@@ -333,7 +340,10 @@ UInt64 computeCountForPart(
     std::sort(tokens_to_read.begin(), tokens_to_read.end(),
         [](const auto * lhs, const auto * rhs) { return lhs->cardinality < rhs->cardinality; });
 
-    std::optional<PostingList> candidates = query_builder.postings;
+    std::optional<PostingList> candidates;
+    if (query_builder.postings)
+        candidates = query_builder.postings->getBitmap();
+
     size_t next = 0;
 
     if (!candidates)

@@ -559,8 +559,8 @@ namespace
 /// Returns whether a text search query may match some row in current_range,
 /// given the per-granule analysis state of the query (query_builder).
 ///
-/// A query in `Any` mode folds postings by union, so the folded
-/// posting list is complete only when the postings of all tokens have been read.
+/// A query in `Any` mode folds postings by union, so the folded posting list is complete only when the postings
+/// of all tokens have been read, exactly or approximately (approximate postings are exact at the granularity of marks).
 ///
 /// A query in `All` mode folds postings by intersection, so a partially folded
 /// posting list is a superset of the result and can be used for pruning right away.
@@ -586,19 +586,28 @@ bool queryMayBeTrueInRange(
     if (!query_builder.rows_range->intersectWith(*current_range))
         return false;
 
-    if (!query_builder.postings.has_value())
+    const auto & postings = query_builder.postings;
+    const auto & approximate_postings = query_builder.approximate_postings;
+
+    if (!postings && !approximate_postings)
         return true;
 
-    if (search_mode == TextSearchMode::All || !query_builder.needReadPostings())
-    {
-        /// An allocation-free check that the folded posting list has a value in the closed range of rows.
-        return roaring::api::roaring_bitmap_intersect_with_range(
-            &query_builder.postings->roaring,
-            current_range->begin,
-            static_cast<UInt64>(current_range->end) + 1);
-    }
+    const auto begin = static_cast<UInt32>(current_range->begin);
+    const auto end = static_cast<UInt32>(current_range->end);
 
-    return true;
+    /// An allocation-free check that the approximate postings have a row in the closed range.
+    const auto approximate_postings_have_rows = [&]
+    {
+        return roaring::api::roaring_bitmap_intersect_with_range(&approximate_postings->roaring, begin, static_cast<UInt64>(end) + 1);
+    };
+
+    if (search_mode == TextSearchMode::All)
+        return (!postings || postings->hasRowsInRange(begin, end)) && (!approximate_postings || approximate_postings_have_rows());
+
+    if (!query_builder.hasAllPostings())
+        return true;
+
+    return (postings && postings->hasRowsInRange(begin, end)) || (approximate_postings && approximate_postings_have_rows());
 }
 
 bool hasAnyTokensInRange(const TextSearchQuery & query, const TextIndexAnalyzer::QueryBuilder & query_builder, const std::optional<RowsRange> & current_range)

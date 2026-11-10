@@ -67,6 +67,7 @@ namespace ProfileEvents
     extern const Event TextIndexReadPostings;
     extern const Event TextIndexAnalysisPackedBlocksDecoded;
     extern const Event TextIndexAnalysisPackedBlocksSkipped;
+    extern const Event TextIndexAnalysisApproximatedPostings;
     extern const Event TextIndexTokensCacheHits;
     extern const Event TextIndexTokensCacheMisses;
     extern const Event TextIndexTokensCacheNegativeHits;
@@ -105,6 +106,7 @@ namespace Setting
     extern const SettingsFloat text_index_hint_max_selectivity;
     extern const SettingsBool use_text_index_negative_tokens_cache;
     extern const SettingsBool use_text_index_pattern_bypass_cache;
+    extern const SettingsTextIndexPostingListApplyMode text_index_posting_list_apply_mode;
 }
 
 /// The enum values are written verbatim into the text index header and must remain stable.
@@ -657,7 +659,8 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
         index_id_for_caches = makeIndexIdForCaches(state.part_info, state.index);
 
     is_empty = false;
-    analyzer = std::make_unique<TextIndexAnalyzer>(condition_text);
+    auto text_index_header = loadHeader(*index_stream, condition_text, index_id_for_caches);
+    analyzer = std::make_unique<TextIndexAnalyzer>(condition_text, text_index_header->codec_type);
 
     /// Push the row ranges still readable after the analysis of the primary key and prior skip indexes into the analyzer.
     if (state.readable_ranges)
@@ -678,7 +681,6 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
         analyzer->setReadableRows(std::move(readable_row_ranges));
     }
 
-    auto text_index_header = loadHeader(*index_stream, condition_text, index_id_for_caches);
     auto postings_codec = PostingListCodecFactory::createPostingListCodec(text_index_header->codec_type);
     auto postings_serialization = PostingsSerialization(std::move(postings_codec), text_index_header->version);
     serialization_version = text_index_header->version;
@@ -702,6 +704,8 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
 
     if (state.text_index_read_postings)
         analyzePostings(postings_serialization, state);
+
+    analyzer->finalize();
 
     const auto & settings = condition_text.getContext()->getSettingsRef();
     analyzer->analyzeCardinalitiesAndBypassHints(static_cast<double>(settings[Setting::text_index_hint_max_selectivity]), state.part_info.getRowCount());
@@ -1046,37 +1050,109 @@ PostingListPtr MergeTreeIndexGranuleText::readPostingsBlock(
 namespace
 {
 
-/// Reads the rows of a single-segment posting list from the packed blocks with rows some query may use (see `PostingsFilter`).
-/// The other blocks are not decoded: their rows cannot change the analysis.
-PostingList readPostingsInFilter(
-    MergeTreeIndexReaderStream & stream,
-    const TokenPostingsInfo & token_info,
-    const TextIndexAnalyzer::PostingsFilter & filter,
-    TextIndexPostingsCache * postings_cache,
-    const String & index_id_for_caches)
+/// Decodes the rows of a single-segment posting list from the packed blocks that overlap the readable rows (all
+/// blocks if `readable_rows` is nullptr). The other blocks are not decoded: their rows are not readable.
+PaddedPODArray<UInt32> decodeReadablePostings(const PostingListSegment & segment, const TextIndexAnalyzer::ReadableRows * readable_rows)
 {
-    auto segment = getPostingListSegment(stream, token_info, 0, postings_cache, index_id_for_caches, ProfileEvents::TextIndexReadPostings);
-    auto block_codec = createPostingListBlockCodec(segment->codec_type);
-
-    PaddedPODArray<UInt32> row_ids;
-    size_t num_skipped_blocks = 0;
-
-    for (size_t block_idx = 0; block_idx < segment->block_count; ++block_idx)
+    const auto is_readable_block = [&](size_t block_idx)
     {
-        if (!filter.mayUseRows(segment->getBlockFirstRowId(block_idx), segment->block_last_row_ids[block_idx]))
-        {
-            ++num_skipped_blocks;
+        return !readable_rows || readable_rows->clipRowsRange(RowsRange(segment.getBlockFirstRowId(block_idx), segment.block_last_row_ids[block_idx]));
+    };
+
+    size_t num_readable_blocks = 0;
+    for (size_t block_idx = 0; block_idx < segment.block_count; ++block_idx)
+        num_readable_blocks += is_readable_block(block_idx);
+
+    auto block_codec = createPostingListBlockCodec(segment.codec_type);
+    PaddedPODArray<UInt32> row_ids;
+    /// `decodeBlock` needs room for a full block.
+    row_ids.reserve_exact(num_readable_blocks * IPostingListBlockCodec::BLOCK_SIZE);
+
+    for (size_t block_idx = 0; block_idx < segment.block_count; ++block_idx)
+    {
+        if (!is_readable_block(block_idx))
             continue;
-        }
 
         const size_t old_size = row_ids.size();
         row_ids.resize(old_size + IPostingListBlockCodec::BLOCK_SIZE);
-        row_ids.resize(old_size + segment->decodeBlock(block_idx, *block_codec, row_ids.data() + old_size));
+        row_ids.resize(old_size + segment.decodeBlock(block_idx, *block_codec, row_ids.data() + old_size));
     }
 
-    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksDecoded, segment->block_count - num_skipped_blocks);
-    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksSkipped, num_skipped_blocks);
-    return buildPostingListFromSortedRowIds(row_ids);
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksDecoded, num_readable_blocks);
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksSkipped, segment.block_count - num_readable_blocks);
+    return row_ids;
+}
+
+/// Returns a superset of the rows of a single-segment posting list that is exact at the granularity of marks: a range
+/// of marks has a row of the posting list if and only if it has a row of the superset. The last row of a packed block
+/// is a row of the posting list, so a mark that holds rows of the span of a block, which runs from the end of the
+/// previous block to the end of the block, holds a row unless it lies strictly inside the span. Hence only the blocks
+/// whose span holds a whole mark are decoded, and the other blocks are approximated by their spans.
+/// The blocks with no readable rows are skipped. Returns nullopt if more than a quarter of the blocks would be decoded,
+/// or if few blocks would not: then the posting list is about as cheap to decode in full, and its exact rows spare
+/// the readers reading it again.
+std::optional<PostingList> approximatePostings(
+    const PostingListSegment & segment,
+    const MergeTreeIndexGranularity & index_granularity,
+    const TextIndexAnalyzer::ReadableRows * readable_rows)
+{
+    const size_t num_marks = index_granularity.getMarksCountWithoutFinal();
+    size_t mark = 0;
+    size_t mark_begin = 0;
+
+    std::vector<size_t> blocks_to_decode;
+    /// The spans of the blocks that are not decoded, merged when adjacent.
+    std::vector<RowsRange> spans;
+    size_t num_readable_blocks = 0;
+
+    for (size_t block_idx = 0; block_idx < segment.block_count; ++block_idx)
+    {
+        const UInt32 span_begin = segment.getBlockFirstRowId(block_idx);
+        const UInt32 span_end = segment.block_last_row_ids[block_idx];
+
+        if (readable_rows && !readable_rows->clipRowsRange(RowsRange(span_begin, span_end)))
+            continue;
+
+        ++num_readable_blocks;
+
+        /// The first mark that starts inside the span or after it. The spans grow, so the marks are visited in order.
+        while (mark < num_marks && mark_begin < span_begin)
+        {
+            mark_begin += index_granularity.getMarkRows(mark);
+            ++mark;
+        }
+
+        /// The mark ends before the last row of the block: it may hold rows of the block and none of the ends of the span.
+        if (mark < num_marks && mark_begin + index_granularity.getMarkRows(mark) <= span_end)
+            blocks_to_decode.push_back(block_idx);
+        else if (!spans.empty() && spans.back().end + 1 == span_begin)
+            spans.back().end = span_end;
+        else
+            spans.emplace_back(span_begin, span_end);
+    }
+
+    static constexpr size_t min_blocks_to_approximate = 64;
+    if (blocks_to_decode.size() * 4 > num_readable_blocks || num_readable_blocks - blocks_to_decode.size() < min_blocks_to_approximate)
+        return std::nullopt;
+
+    auto block_codec = createPostingListBlockCodec(segment.codec_type);
+    PaddedPODArray<UInt32> row_ids;
+    row_ids.reserve_exact(blocks_to_decode.size() * IPostingListBlockCodec::BLOCK_SIZE);
+
+    for (const size_t block_idx : blocks_to_decode)
+    {
+        const size_t old_size = row_ids.size();
+        row_ids.resize(old_size + IPostingListBlockCodec::BLOCK_SIZE);
+        row_ids.resize(old_size + segment.decodeBlock(block_idx, *block_codec, row_ids.data() + old_size));
+    }
+
+    PostingList postings = buildPostingListFromSortedRowIds(row_ids);
+    for (const auto & span : spans)
+        postings.addRangeClosed(static_cast<UInt32>(span.begin), static_cast<UInt32>(span.end));
+
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksDecoded, blocks_to_decode.size());
+    ProfileEvents::increment(ProfileEvents::TextIndexAnalysisPackedBlocksSkipped, segment.block_count - blocks_to_decode.size());
+    return postings;
 }
 
 }
@@ -1122,6 +1198,13 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         /*use_page_cache_lookahead=*/ false);
 
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
+    auto * postings_cache = condition_text.postingsCache().get();
+
+    /// The readers read the posting lists of the approximated tokens themselves, with cursors, as in the lazy mode.
+    /// The readers use it only if there are no patterns.
+    const bool may_approximate_postings = state.text_index_approximate_postings
+        && condition_text.getContext()->getSettingsRef()[Setting::text_index_posting_list_apply_mode] == TextIndexPostingListApplyMode::Lazy
+        && !condition_text.hasSearchPatterns();
 
     for (const auto & [token, token_info] : tokens_to_read)
     {
@@ -1129,19 +1212,40 @@ void MergeTreeIndexGranuleText::analyzePostings(PostingsSerialization & postings
         /// discarded by the analyzer after reading postings for previous tokens.
         if (analyzer->isTokenNeeded(token))
         {
-            /// The rows the queries can use: the readable rows and the rows folded so far by `All` queries.
-            /// The tokens are read rarest first, so the folded rows bound the blocks decoded for the common tokens.
-            auto filter = analyzer->getPostingsFilter(token);
+            const bool has_block_index = (token_info->header & IsCompressed) && (token_info->header & HasBlockIndex);
 
-            if (filter.isFull() || !(token_info->header & IsCompressed) || !(token_info->header & HasBlockIndex))
+            if (!has_block_index)
             {
                 auto block = readPostingsBlock(*stream, state, *token_info, 0, postings_serialization, index_id_for_caches);
                 analyzer->addPostings(token, *block);
             }
             else
             {
-                auto postings = readPostingsInFilter(*stream, *token_info, filter, condition_text.postingsCache().get(), index_id_for_caches);
-                analyzer->addPostings(token, postings);
+                auto segment = getPostingListSegment(*stream, *token_info, 0, postings_cache, index_id_for_caches, ProfileEvents::TextIndexReadPostings);
+
+                if (analyzer->canIntersectPostings(token))
+                {
+                    /// The tokens are read rarest first, so the rows folded so far by the `All` queries
+                    /// bound the blocks decoded for the more frequent tokens.
+                    auto block_codec = createPostingListBlockCodec(segment->codec_type);
+                    analyzer->intersectPostings(token, *segment, *block_codec);
+                }
+                else
+                {
+                    std::optional<PostingList> approximate_postings;
+                    if (may_approximate_postings && analyzer->canApproximatePostings(token))
+                        approximate_postings = approximatePostings(*segment, state.part_info.getIndexGranularity(), analyzer->getReadableRows());
+
+                    if (approximate_postings)
+                    {
+                        ProfileEvents::increment(ProfileEvents::TextIndexAnalysisApproximatedPostings);
+                        analyzer->addApproximatePostings(token, *approximate_postings);
+                    }
+                    else
+                    {
+                        analyzer->addPostings(token, decodeReadablePostings(*segment, analyzer->getReadableRows()));
+                    }
+                }
             }
         }
 

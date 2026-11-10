@@ -17,6 +17,7 @@ namespace DB
 {
 
 class TextIndexAnalyzer;
+class FoldedPostings;
 class MergeTreeIndexConditionText;
 
 using PostingsBlocksMap = absl::flat_hash_map<std::string_view, absl::btree_map<size_t, PostingListPtr>>;
@@ -84,9 +85,9 @@ private:
     void fillColumn(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
     /// Returns the postings folded by the index analysis for the query of the column, if they answer it
     /// completely (no postings of the query are read per mark) and lazy mode is off, and nullptr otherwise.
-    const PostingList * getFoldedPostings(size_t column_idx) const;
+    const FoldedPostings * getFoldedPostings(size_t column_idx) const;
     /// Fills rows [row_offset, row_offset + num_rows) from `postings` of the whole part.
-    void fillColumnFromPostings(IColumn & column, const PostingList & postings, size_t row_offset, size_t num_rows);
+    void fillColumnFromPostings(IColumn & column, const FoldedPostings & postings, size_t row_offset, size_t num_rows);
     void fillColumnLazy(IColumn & column, size_t column_idx, size_t row_offset, size_t num_rows);
 
     /// Search of one column resolved once per part.
@@ -156,7 +157,6 @@ private:
     size_t current_row = 0;
     size_t current_mark = 0;
     PaddedPODArray<UInt32> indices_buffer;
-    const PostingList empty_postings;
 
     bool is_initialized = false;
     /// Virtual columns that are always true.
